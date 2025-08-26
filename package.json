@@ -1,0 +1,16 @@
+{
+    "name": "baileys-api",
+    "version": "1.0.0",
+    "main": "server.js",
+    "type": "commonjs",
+    "scripts": {
+      "start": "node server.js"
+    },
+    "dependencies": {
+      "@whiskeysockets/baileys": "^6.7.18",
+      "express": "^4.19.2",
+      "pino": "^9.1.0",
+      "qrcode": "^1.5.3",
+      "dotenv": "^16.4.5"
+    }
+  }
