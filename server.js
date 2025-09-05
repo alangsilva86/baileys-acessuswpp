@@ -652,14 +652,47 @@ app.post('/logout', auth, asyncHandler(async (req, res) => {
   }
 }));
 
+// --------------------------- Admin: logout/wipe -----------------------
 app.post('/session/wipe', auth, asyncHandler(async (req, res) => {
+  // 1) marque parada e tente fechar o socket
   try {
-    await fs.rm(SESSION_DIR, { recursive: true, force: true });
-    await fs.mkdir(SESSION_DIR, { recursive: true });
-    res.json({ ok: true, message: 'Sessão limpa. Reiniciando para gerar novo QR.' });
+    stopping = true;
+    if (sock) {
+      try { await sock.logout().catch(() => {}); } catch {}
+      try { sock.end?.(); } catch {}
+    }
+  } catch {}
+
+  // 2) renomeie a pasta de sessão para contornar EBUSY e deletar depois
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const bak = `${SESSION_DIR}.bak-${stamp}`;
+    await fs.rename(SESSION_DIR, bak).catch(() => {}); // se não existir, ignora
+
+    // crie uma pasta limpa para o próximo boot
+    await fs.mkdir(SESSION_DIR, { recursive: true }).catch(() => {});
+
+    // retorno imediato ao cliente
+    res.json({ ok: true, message: 'Sessão isolada. Reiniciando para gerar novo QR.' });
+
+    // 3) finalize o processo para reiniciar limpo (Render religa o serviço)
     setTimeout(() => process.exit(0), 200);
+
+    // 4) (assíncrono) tente apagar o backup antigo sem travar resposta
+    setTimeout(async () => {
+      try { await fs.rm(bak, { recursive: true, force: true }); } catch {}
+    }, 1000);
+
   } catch (e) {
-    res.status(500).json({ error: 'falha ao limpar sessão', detail: e.message });
+    // se ainda assim falhar, tente remover diretamente (pode dar EBUSY)
+    try {
+      await fs.rm(SESSION_DIR, { recursive: true, force: true });
+      await fs.mkdir(SESSION_DIR, { recursive: true });
+      res.json({ ok: true, message: 'Sessão limpa. Reiniciando para gerar novo QR.' });
+      setTimeout(() => process.exit(0), 200);
+    } catch (err) {
+      res.status(500).json({ error: 'falha ao limpar sessão', detail: err?.message || String(err) });
+    }
   }
 }));
 
