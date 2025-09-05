@@ -395,6 +395,18 @@ app.post('/send-me', auth, asyncHandler(async (req, res) => {
   res.json({ ok: true, id, to: sock.user.id, status });
 }));
 
+// --------------------------- Logout ---------------------------
+app.post('/logout', auth, asyncHandler(async (req, res) => {
+  if (!sock) return res.status(503).json({ error: 'socket indisponível' });
+
+  try {
+    await sock.logout(); // força logout no WhatsApp
+    res.json({ ok: true, message: 'Sessão desconectada. Escaneie um novo QR em /qr' });
+  } catch (e) {
+    res.status(500).json({ error: 'falha ao desconectar', detail: e.message });
+  }
+}));
+
 // --------------------------- Error handling ---------------------------
 
 app.use((err, req, res, next) => {
