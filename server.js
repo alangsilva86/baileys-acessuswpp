@@ -1,33 +1,10 @@
 /**
- * Baileys HTTP Service — robust, extensible, production-ready.
- * - CommonJS (Node 18+)
- * - Structured logging (pino)
- * - Auth via x-api-key (constant-time compare)
- * - Graceful reconnect with backoff
- * - Webhook relay (optional) with HMAC signature
- * - Input validation + JID resolution via onWhatsApp
- * - Message delivery status tracking
- * - Group utilities, image send & quick-reply buttons
- * - Dashboard em "/": status, QR, métricas + gráficos, ações
- *
- * Endpoints (JSON):
- *  GET  /                    -> Dashboard (HTML)
- *  GET  /health
- *  GET  /qr                  -> QR em HTML
- *  GET  /qr.png              -> QR como PNG (para o dashboard)
- *  GET  /whoami
- *  GET  /status?id=MSG_ID    (auth)
- *  GET  /groups              (auth)
- *  GET  /metrics             (auth)
- *  POST /pair                (auth) { phoneNumber }
- *  POST /exists              (auth) { to }
- *  POST /send-text           (auth) { to, message, waitAckMs? }
- *  POST /send-image          (auth) { to, url, caption?, waitAckMs? }
- *  POST /send-group          (auth) { groupId, message, waitAckMs? }
- *  POST /send-me             (auth) { message, waitAckMs? }
- *  POST /send-buttons        (auth) { to, text, buttons:[{id,text}], waitAckMs? }
- *  POST /logout              (auth) -> desconecta e mantém pasta
- *  POST /session/wipe        (auth) -> apaga pasta de sessão e reinicia
+ * Baileys HTTP Service + Dashboard
+ * - Node 18+, CommonJS
+ * - Pino logs, x-api-key, reconexão com backoff
+ * - Webhook (opcional), onWhatsApp, tracking de status
+ * - Envio: texto, imagem, grupo, quick-reply buttons
+ * - Dashboard em "/": status, QR, métricas + gráfico, ações
  */
 
 require('dotenv').config();
@@ -37,7 +14,6 @@ const crypto = require('crypto');
 const pino = require('pino');
 const QRCode = require('qrcode');
 const fs = require('fs/promises');
-const path = require('path');
 
 const {
   default: makeWASocket,
@@ -46,8 +22,7 @@ const {
   DisconnectReason
 } = require('@whiskeysockets/baileys');
 
-// --------------------------- Configuration ---------------------------
-
+// --------------------------- Config ---------------------------
 const PORT = Number(process.env.PORT || 3000);
 const API_KEYS = String(process.env.API_KEY || 'change-me')
   .split(',')
@@ -55,142 +30,104 @@ const API_KEYS = String(process.env.API_KEY || 'change-me')
   .filter(Boolean);
 const SESSION_DIR = process.env.SESSION_DIR || './sessions';
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
-const WEBHOOK_URL = process.env.WEBHOOK_URL || ''; // optional
+const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
 const SERVICE_NAME = process.env.SERVICE_NAME || 'baileys-api';
 
-// Hard caps / defaults
-const SEND_TIMEOUT_MS = 25_000; // network send timeout safeguard
+const SEND_TIMEOUT_MS = 25_000;
 const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 
-// Lightweight burst control (global): up to N sends per WINDOW_MS
 const RATE_MAX_SENDS = Number(process.env.RATE_MAX_SENDS || 20);
 const RATE_WINDOW_MS = Number(process.env.RATE_WINDOW_MS || 15_000);
+const E164_BRAZIL = /^55\d{10,11}$/;
 
-// Basic input sanity
-const E164_BRAZIL = /^55\d{10,11}$/; // 55 + DDD + 8..9 digits (fixo/cel)
+// --------------------------- Logger ---------------------------
+const logger = pino({ level: LOG_LEVEL, base: { service: SERVICE_NAME } });
 
-// ----------------------------- Logger --------------------------------
-
-const logger = pino({
-  level: LOG_LEVEL,
-  base: { service: SERVICE_NAME }
-});
-
-// ---------------------------- App setup ------------------------------
-
+// --------------------------- App ------------------------------
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
-// Simple request logging with request id
+// Log simples por requisição
 app.use((req, res, next) => {
   req.id = crypto.randomUUID();
   const start = Date.now();
   logger.info({ reqId: req.id, method: req.method, url: req.url }, 'request.start');
   res.on('finish', () => {
     logger.info({
-      reqId: req.id,
-      method: req.method,
-      url: req.url,
-      statusCode: res.statusCode,
-      ms: Date.now() - start
+      reqId: req.id, method: req.method, url: req.url,
+      statusCode: res.statusCode, ms: Date.now() - start
     }, 'request.end');
   });
   next();
 });
 
-// --------------------------- Auth & Utils ----------------------------
-
-/** constant-time comparison to mitigate timing attacks */
+// ---------------------- Auth & Utils --------------------------
 function safeEquals(a, b) {
-  const bufA = Buffer.from(String(a));
-  const bufB = Buffer.from(String(b));
-  if (bufA.length !== bufB.length) return false;
-  return crypto.timingSafeEqual(bufA, bufB);
+  const A = Buffer.from(String(a));
+  const B = Buffer.from(String(b));
+  if (A.length !== B.length) return false;
+  return crypto.timingSafeEqual(A, B);
 }
-
 function isAuthorized(req) {
   const key = req.header('x-api-key') || '';
   return API_KEYS.some(k => safeEquals(k, key));
 }
-
 function auth(req, res, next) {
-  if (!isAuthorized(req)) {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
+  if (!isAuthorized(req)) return res.status(401).json({ error: 'unauthorized' });
   next();
 }
+const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-/** Wrap async handlers to bubble errors to Express */
-function asyncHandler(fn) {
-  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-}
-
-/** Minimal phone sanitizer for BR E.164 (digits only) */
 function normalizeToE164BR(val) {
   const digits = String(val || '').replace(/\D+/g, '');
   if (digits.startsWith('55') && E164_BRAZIL.test(digits)) return digits;
-  // Se mandarem apenas DDD+NUM (10/11), prefixamos 55
   if (/^\d{10,11}$/.test(digits)) return `55${digits}`;
   return null;
 }
-
-/** Build HMAC-SHA256 signature for webhook payload */
 function buildSignature(payload, secret) {
   const h = crypto.createHmac('sha256', String(secret));
   h.update(payload);
   return `sha256=${h.digest('hex')}`;
 }
 
-// --------------------------- Métricas --------------------------------
-
+// --------------------------- Métricas --------------------------
 const metrics = {
   startedAt: Date.now(),
   sent: 0,
   sent_by_type: { text: 0, image: 0, group: 0, buttons: 0 },
-  status_counts: { "1": 0, "2": 0, "3": 0, "4": 0 }, // 1=server,2=delivered,3=read,4=played
+  status_counts: { "1": 0, "2": 0, "3": 0, "4": 0 },
   last: { sentId: null, lastStatusId: null, lastStatusCode: null }
 };
 
-// ----------------------- ACK waiters por messageId -------------------
-
+// ACK waiters (aguarda status até N ms)
 const ackWaiters = new Map(); // mid -> {resolve, timer}
-
 function waitForAck(messageId, timeoutMs = 10000) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       ackWaiters.delete(messageId);
-      resolve(null); // timeout, sem ACK
+      resolve(null);
     }, timeoutMs);
     ackWaiters.set(messageId, { resolve, timer });
   });
 }
 
-// --------------------------- WhatsApp Socket -------------------------
-
+// ----------------------- WhatsApp Socket ----------------------
 let sock = null;
 let lastQR = null;
 let reconnectDelay = RECONNECT_MIN_DELAY_MS;
 let stopping = false;
 
-// Map de status por messageId
-const statusMap = new Map(); // mid -> status (1=server, 2=delivered, 3=read, 4=played)
+const statusMap = new Map(); // mid -> status
 
 async function startSocket() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   const { version } = await fetchLatestBaileysVersion();
   logger.info({ version }, 'baileys.version');
 
-  sock = makeWASocket({
-    version,
-    auth: state,
-    logger
-  });
-
-  // Persist credentials
+  sock = makeWASocket({ version, auth: state, logger });
   sock.ev.on('creds.update', saveCreds);
 
-  // Connection lifecycle
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr, receivedPendingNotifications } = update;
 
@@ -198,13 +135,11 @@ async function startSocket() {
       lastQR = qr;
       logger.info('QR atualizado; acesse /qr para escanear.');
     }
-
     if (connection === 'open') {
       lastQR = null;
-      reconnectDelay = RECONNECT_MIN_DELAY_MS; // reset backoff
+      reconnectDelay = RECONNECT_MIN_DELAY_MS;
       logger.info({ receivedPendingNotifications }, 'whatsapp.connected');
     }
-
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
@@ -218,17 +153,16 @@ async function startSocket() {
           startSocket().catch(err => logger.error({ err }, 'whatsapp.reconnect.failed'));
         }, delay);
       } else if (isLoggedOut) {
-        logger.error('Sessão deslogada. Remova/limpe a pasta de sessão para parear novamente.');
+        logger.error('Sessão deslogada. Limpe a pasta de sessão para parear novamente.');
       }
     }
   });
 
-  // Recebimento de mensagens
   sock.ev.on('messages.upsert', async (evt) => {
     const count = evt.messages?.length || 0;
     logger.info({ type: evt.type, count }, 'messages.upsert');
 
-    // Log de cliques em botões (quick replies)
+    // Captura clique em quick replies
     if (count) {
       for (const m of evt.messages) {
         const btn = m.message?.templateButtonReplyMessage || m.message?.buttonsResponseMessage;
@@ -242,32 +176,28 @@ async function startSocket() {
       }
     }
 
-    // Webhook relay (opcional)
+    // Webhook opcional
     if (WEBHOOK_URL && count) {
       try {
         const body = JSON.stringify(evt);
         const sig = buildSignature(body, API_KEYS[0] || 'change-me');
         await fetch(WEBHOOK_URL, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Signature-256': sig
-          },
+          headers: { 'Content-Type': 'application/json', 'X-Signature-256': sig },
           body
-        }).catch(() => {}); // ignora erro de rede
+        }).catch(() => {});
       } catch (e) {
         logger.warn({ err: e?.message }, 'webhook.relay.error');
       }
     }
   });
 
-  // Delivery acks
   sock.ev.on('messages.update', (updates) => {
     for (const u of updates) {
       const mid = u.key?.id;
       const st = u.update?.status;
       if (mid && st != null) {
-        statusMap.set(mid, st); // 1,2,3,4...
+        statusMap.set(mid, st);
         metrics.status_counts[String(st)] = (metrics.status_counts[String(st)] || 0) + 1;
         metrics.last.lastStatusId = mid;
         metrics.last.lastStatusCode = st;
@@ -276,7 +206,7 @@ async function startSocket() {
         if (waiter) {
           clearTimeout(waiter.timer);
           ackWaiters.delete(mid);
-          waiter.resolve(st); // resolve pendente de /send-*
+          waiter.resolve(st);
         }
       }
       logger.info({ mid, status: st }, 'messages.status');
@@ -286,8 +216,7 @@ async function startSocket() {
   return sock;
 }
 
-// ------------------------------ Rate Limit ----------------------------
-
+// --------------------------- Rate Limit -----------------------
 const sendTimestamps = [];
 function allowSend() {
   const now = Date.now();
@@ -296,7 +225,6 @@ function allowSend() {
   sendTimestamps.push(now);
   return true;
 }
-
 async function sendWithTimeout(jid, content) {
   return await Promise.race([
     sock.sendMessage(jid, content),
@@ -304,8 +232,7 @@ async function sendWithTimeout(jid, content) {
   ]);
 }
 
-// ------------------------------ Dashboard -----------------------------
-
+// --------------------------- Dashboard ------------------------
 app.get('/', (req, res) => {
   res.type('html').send(`<!doctype html>
 <html lang="pt-br">
@@ -358,7 +285,9 @@ app.get('/', (req, res) => {
 
       <div class="p-4 bg-white rounded-2xl shadow md:col-span-2">
         <h2 class="font-semibold mb-2">Gráfico — enviados vs status</h2>
-        <canvas id="metricsChart" height="110"></canvas>
+        <div class="relative w-full h-64 md:h-80 xl:h-96 overflow-hidden">
+          <canvas id="metricsChart" class="absolute inset-0 w-full h-full"></canvas>
+        </div>
       </div>
     </section>
 
@@ -404,12 +333,21 @@ let chart;
 function initChart() {
   const ctx = document.getElementById('metricsChart').getContext('2d');
   chart = new Chart(ctx, {
-    type: 'bar',
+    type: window.matchMedia('(max-width: 640px)').matches ? 'bar' : 'line',
     data: {
-      labels: ['Enviadas', 'Status 1', 'Status 2', 'Status 3', 'Status 4'],
+      labels: ['Enviadas','Status 1','Status 2','Status 3','Status 4'],
       datasets: [{ label: 'Total', data: [0,0,0,0,0] }]
     },
-    options: { responsive: true, maintainAspectRatio: false }
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: { intersect: false, mode: 'index' },
+      scales: {
+        x: { ticks: { maxRotation: 0, autoSkip: true } },
+        y: { beginAtZero: true, grace: '5%' }
+      }
+    }
   });
 }
 initChart();
@@ -425,10 +363,19 @@ async function fetchJSON(path, auth=true) {
   try { return await r.json(); } catch { return {}; }
 }
 
+let lastRender = 0;
+function safeUpdateChart() {
+  const now = Date.now();
+  if (now - lastRender < 2000) return; // no máx a cada 2s
+  lastRender = now;
+  chart.update('none');
+}
+
 async function refresh() {
   try {
     const m = await fetchJSON('/metrics', true);
     const connected = !!m.connected;
+
     els.badge.textContent = connected ? 'Conectado' : 'Desconectado';
     els.badge.className = 'px-3 py-1 rounded-full text-sm ' + (connected ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800');
     els.whoami.textContent = connected && m.user ? (m.user.name ? (m.user.name + ' — ' + m.user.id) : m.user.id) : '—';
@@ -445,7 +392,7 @@ async function refresh() {
       m.counters.statusCounts['3']||0,
       m.counters.statusCounts['4']||0
     ];
-    chart.update();
+    safeUpdateChart();
 
     if (!connected) {
       const r = await fetch('/qr.png', { cache: 'no-store' });
@@ -502,21 +449,14 @@ els.btnSend.onclick = async () => {
 </html>`);
 });
 
-// ------------------------------ Routes API ----------------------------
-
+// --------------------------- Endpoints API --------------------
 app.get('/health', (req, res) => res.json({ ok: true, service: SERVICE_NAME }));
 
 app.get('/qr', asyncHandler(async (req, res) => {
   if (!lastQR) return res.status(404).send('QR não disponível. Talvez já esteja conectado.');
   const dataUrl = await QRCode.toDataURL(lastQR);
-  res.type('html').send(`
-    <html><body>
-      <h3>Escaneie este QR no WhatsApp (Aparelhos Conectados)</h3>
-      <img alt="QR" src="${dataUrl}" />
-    </body></html>
-  `);
+  res.type('html').send(`<html><body><h3>Escaneie este QR no WhatsApp</h3><img alt="QR" src="${dataUrl}" /></body></html>`);
 }));
-
 app.get('/qr.png', asyncHandler(async (req, res) => {
   if (!lastQR) return res.status(404).send('no-qr');
   const png = await QRCode.toBuffer(lastQR, { type: 'png', margin: 1, scale: 6 });
@@ -532,7 +472,7 @@ app.get('/status', auth, (req, res) => {
   const id = String(req.query.id || '');
   if (!id) return res.status(400).json({ error: 'id obrigatório' });
   const status = statusMap.get(id) ?? null;
-  res.json({ id, status }); // 1=server, 2=delivered, 3=read, 4=played
+  res.json({ id, status });
 });
 
 app.get('/groups', auth, asyncHandler(async (req, res) => {
@@ -666,7 +606,7 @@ app.post('/send-me', auth, asyncHandler(async (req, res) => {
   res.json({ ok: true, id, to: sock.user.id, status });
 }));
 
-// Enviar mensagem com botões (quick replies)
+// Quick-reply buttons (até 3)
 app.post('/send-buttons', auth, asyncHandler(async (req, res) => {
   if (!sock) return res.status(503).json({ error: 'socket indisponível' });
   if (!allowSend()) return res.status(429).json({ error: 'rate limit exceeded' });
@@ -684,7 +624,6 @@ app.post('/send-buttons', auth, asyncHandler(async (req, res) => {
   if (!entry || !entry.exists) return res.status(404).json({ error: 'número não está no WhatsApp', to: normalized });
   const jid = entry.jid;
 
-  // WhatsApp permite até 3 quick replies
   const templateButtons = buttons.slice(0, 3).map((b, i) => ({
     index: i + 1,
     quickReplyButton: { displayText: String(b.text), id: String(b.id) }
@@ -702,12 +641,11 @@ app.post('/send-buttons', auth, asyncHandler(async (req, res) => {
   res.json({ ok: true, id, to: jid, status });
 }));
 
-// --------------------------- Admin: logout/wipe -----------------------
-
+// --------------------------- Admin ----------------------------
 app.post('/logout', auth, asyncHandler(async (req, res) => {
   if (!sock) return res.status(503).json({ error: 'socket indisponível' });
   try {
-    await sock.logout(); // desconecta do WhatsApp (mantém arquivos)
+    await sock.logout();
     res.json({ ok: true, message: 'Sessão desconectada. Um novo QR aparecerá em breve.' });
   } catch (e) {
     res.status(500).json({ error: 'falha ao desconectar', detail: e.message });
@@ -719,23 +657,20 @@ app.post('/session/wipe', auth, asyncHandler(async (req, res) => {
     await fs.rm(SESSION_DIR, { recursive: true, force: true });
     await fs.mkdir(SESSION_DIR, { recursive: true });
     res.json({ ok: true, message: 'Sessão limpa. Reiniciando para gerar novo QR.' });
-    // Reinicia o processo para reabrir socket e gerar QR
     setTimeout(() => process.exit(0), 200);
   } catch (e) {
     res.status(500).json({ error: 'falha ao limpar sessão', detail: e.message });
   }
 }));
 
-// --------------------------- Error handling ---------------------------
-
+// ---------------------- Error handling ------------------------
 app.use((err, req, res, next) => {
   logger.error({ reqId: req?.id, err: err?.message, stack: err?.stack }, 'unhandled.error');
   if (res.headersSent) return next(err);
   res.status(500).json({ error: 'internal_error', detail: err?.message || 'unknown' });
 });
 
-// --------------------------- Boot & shutdown --------------------------
-
+// ---------------------- Boot & shutdown -----------------------
 let server;
 
 startSocket()
@@ -752,12 +687,11 @@ async function shutdown(signal) {
     stopping = true;
     logger.warn({ signal }, 'shutdown.begin');
     server && server.close();
-    setTimeout(() => process.exit(0), 500); // dá tempo para flush de logs
+    setTimeout(() => process.exit(0), 500);
   } catch (e) {
     logger.error({ err: e?.message }, 'shutdown.error');
     process.exit(1);
   }
 }
-
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
