@@ -95,10 +95,11 @@ function buildSignature(payload, secret) {
 const metrics = {
   startedAt: Date.now(),
   sent: 0,
-  sent_by_type: { text: 0, image: 0, group: 0, buttons: 0 },
+  sent_by_type: { text: 0, image: 0, group: 0, buttons: 0, lists: 0 },
   status_counts: { "1": 0, "2": 0, "3": 0, "4": 0 },
   last: { sentId: null, lastStatusId: null, lastStatusCode: null }
 };
+
 
 // ACK waiters (aguarda status até N ms)
 const ackWaiters = new Map(); // mid -> {resolve, timer}
@@ -111,6 +112,97 @@ function waitForAck(messageId, timeoutMs = 10000) {
     ackWaiters.set(messageId, { resolve, timer });
   });
 }
+
+// ======================= LIST MESSAGE (menu expansível) =======================
+app.post('/send-list', auth, asyncHandler(async (req, res) => {
+  if (!sock) return res.status(503).json({ error: 'socket indisponível' });
+  if (!allowSend()) return res.status(429).json({ error: 'rate limit exceeded' });
+
+  const { to, text, footer, buttonText, sections, waitAckMs } = req.body || {};
+
+  // Validação básica
+  if (!to || !text || !buttonText || !Array.isArray(sections) || !sections.length) {
+    return res.status(400).json({
+      error: 'parâmetros obrigatórios: to, text, buttonText, sections[]'
+    });
+  }
+
+  // Normaliza destino -> E.164 BR
+  const normalized = normalizeToE164BR(to);
+  if (!normalized) return res.status(400).json({ error: 'to inválido. Use E.164: 55DDDNUMERO' });
+
+  // Verifica se está no WhatsApp e pega JID correto
+  const check = await sock.onWhatsApp(normalized);
+  const entry = Array.isArray(check) ? check[0] : null;
+  if (!entry || !entry.exists) return res.status(404).json({ error: 'número não está no WhatsApp', to: normalized });
+  const jid = entry.jid;
+
+  // Sanitiza sections: [{ title, rows: [{ title, rowId, description? }, ...] }, ...]
+  const fixedSections = sections.map(sec => {
+    const title = String(sec.title || '').slice(0, 24) || undefined;
+    const rows = (sec.rows || [])
+      .filter(r => r && (r.title || r.rowId))
+      .slice(0, 10)
+      .map(r => ({
+        title: String(r.title || r.rowId).slice(0, 72),
+        rowId: String(r.rowId || r.title).slice(0, 256),
+        description: r.description ? String(r.description).slice(0, 256) : undefined,
+      }));
+    return { title, rows };
+  }).filter(s => s.rows && s.rows.length);
+
+  if (!fixedSections.length) return res.status(400).json({ error: 'sections sem rows válidas' });
+
+  const payload = {
+    text: String(text),
+    footer: footer ? String(footer) : undefined,
+    buttonText: String(buttonText).slice(0, 24), // texto do botão que abre o menu
+    sections: fixedSections,
+  };
+
+  // Envia List Message
+  let result, id = null, status = null;
+  try {
+    result = await sendWithTimeout(jid, payload);
+    id = result?.key?.id || null;
+
+    // Métricas: conta como LIST
+    metrics.sent++;
+    metrics.sent_by_type.lists++;
+    metrics.last.sentId = id;
+
+    const ms = Number(waitAckMs || 0);
+    if (id && ms > 0) status = await waitForAck(id, Math.min(ms, 20000));
+
+    return res.json({ ok: true, id, to: jid, status });
+  } catch (err) {
+    // Fallback: menu numerado
+    const fallback = [
+      String(text),
+      '',
+      ...fixedSections.flatMap((sec, si) => {
+        const head = sec.title ? [`*${sec.title}*`] : [];
+        const rows = sec.rows.map((r, i) => `${si + 1}.${i + 1}) ${r.title}`);
+        return [...head, ...rows, ''];
+      }),
+      'Responda com o número da opção.'
+    ].join('\n');
+
+    try {
+      const fb = await sendWithTimeout(jid, { text: fallback });
+      id = fb?.key?.id || null;
+
+      // Métricas: conta como TEXTO (fallback)
+      metrics.sent++;
+      metrics.sent_by_type.text++;
+      metrics.last.sentId = id;
+
+      return res.json({ ok: true, id, to: jid, status: null, fallback: true, error: String(err?.message || err) });
+    } catch (err2) {
+      return res.status(500).json({ error: 'falha ao enviar lista e fallback', detail: String(err2?.message || err2) });
+    }
+  }
+}));
 
 // ----------------------- WhatsApp Socket ----------------------
 let sock = null;
@@ -159,38 +251,50 @@ async function startSocket() {
   });
 
   sock.ev.on('messages.upsert', async (evt) => {
-    const count = evt.messages?.length || 0;
-    logger.info({ type: evt.type, count }, 'messages.upsert');
+  const count = evt.messages?.length || 0;
+  logger.info({ type: evt.type, count }, 'messages.upsert');
 
-    // Captura clique em quick replies
-    if (count) {
-      for (const m of evt.messages) {
-        const btn = m.message?.templateButtonReplyMessage || m.message?.buttonsResponseMessage;
-        if (btn) {
-          logger.info({
-            from: m.key?.remoteJid,
-            selectedId: btn?.selectedId || btn?.selectedButtonId,
-            selectedText: btn?.selectedDisplayText
-          }, 'button.reply');
-        }
+  if (count) {
+    for (const m of evt.messages) {
+      const from = m.key?.remoteJid;
+
+      // Quick replies (templateButtons / buttonsResponse)
+      const btn = m.message?.templateButtonReplyMessage || m.message?.buttonsResponseMessage;
+      if (btn) {
+        logger.info({
+          from,
+          selectedId: btn?.selectedId || btn?.selectedButtonId,
+          selectedText: btn?.selectedDisplayText
+        }, 'button.reply');
+      }
+
+      // List Message (menu expansível)
+      const list = m.message?.listResponseMessage;
+      if (list) {
+        logger.info({
+          from,
+          selectedId: list?.singleSelectReply?.selectedRowId,
+          selectedTitle: list?.title,
+        }, 'list.reply');
       }
     }
+  }
 
-    // Webhook opcional
-    if (WEBHOOK_URL && count) {
-      try {
-        const body = JSON.stringify(evt);
-        const sig = buildSignature(body, API_KEYS[0] || 'change-me');
-        await fetch(WEBHOOK_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Signature-256': sig },
-          body
-        }).catch(() => {});
-      } catch (e) {
-        logger.warn({ err: e?.message }, 'webhook.relay.error');
-      }
+  // Webhook (apenas 1x por upsert)
+  if (WEBHOOK_URL && count) {
+    try {
+      const body = JSON.stringify(evt);
+      const sig = buildSignature(body, API_KEYS[0] || 'change-me');
+      await fetch(WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Signature-256': sig },
+        body
+      }).catch(() => {});
+    } catch (e) {
+      logger.warn({ err: e?.message }, 'webhook.relay.error');
     }
-  });
+  }
+});
 
   sock.ev.on('messages.update', (updates) => {
     for (const u of updates) {
@@ -494,7 +598,13 @@ app.get('/metrics', auth, (req, res) => {
       byType: metrics.sent_by_type,
       statusCounts: metrics.status_counts
     },
-    last: metrics.last
+    last: metrics.last,
+    rate: {
+      limit: RATE_MAX_SENDS,
+      windowMs: RATE_WINDOW_MS,
+      inWindow: sendTimestamps.length
+    },
+    sessionDir: SESSION_DIR
   });
 });
 
@@ -606,7 +716,7 @@ app.post('/send-me', auth, asyncHandler(async (req, res) => {
   res.json({ ok: true, id, to: sock.user.id, status });
 }));
 
-// Quick-reply buttons (até 3)
+// Quick-reply buttons (até 3) — com fallback numerado
 app.post('/send-buttons', auth, asyncHandler(async (req, res) => {
   if (!sock) return res.status(503).json({ error: 'socket indisponível' });
   if (!allowSend()) return res.status(429).json({ error: 'rate limit exceeded' });
@@ -624,74 +734,61 @@ app.post('/send-buttons', auth, asyncHandler(async (req, res) => {
   if (!entry || !entry.exists) return res.status(404).json({ error: 'número não está no WhatsApp', to: normalized });
   const jid = entry.jid;
 
-  const templateButtons = buttons.slice(0, 3).map((b, i) => ({
-    index: i + 1,
-    quickReplyButton: { displayText: String(b.text), id: String(b.id) }
-  }));
+  // Saneia botões (máx 3) e limita comprimentos
+  const cleaned = buttons
+    .filter(b => b && (b.text || b.id))
+    .slice(0, 3)
+    .map((b, i) => ({
+      index: i + 1,
+      quickReplyButton: {
+        displayText: String(b.text || b.id).slice(0, 24),
+        id: String(b.id || b.text).slice(0, 128)
+      }
+    }));
 
-  const result = await sendWithTimeout(jid, { text: String(text), templateButtons });
-  const id = result?.key?.id || null;
+  if (!cleaned.length) return res.status(400).json({ error: 'buttons[] sem itens válidos' });
 
-  metrics.sent++; metrics.sent_by_type.buttons++; metrics.last.sentId = id;
-
+  let id = null;
   let status = null;
-  const ms = Number(waitAckMs || 0);
-  if (id && ms > 0) status = await waitForAck(id, Math.min(ms, 20000));
 
-  res.json({ ok: true, id, to: jid, status });
-}));
-
-// --------------------------- Admin ----------------------------
-app.post('/logout', auth, asyncHandler(async (req, res) => {
-  if (!sock) return res.status(503).json({ error: 'socket indisponível' });
   try {
-    await sock.logout();
-    res.json({ ok: true, message: 'Sessão desconectada. Um novo QR aparecerá em breve.' });
-  } catch (e) {
-    res.status(500).json({ error: 'falha ao desconectar', detail: e.message });
-  }
-}));
+    // Envia com templateButtons
+    const result = await sendWithTimeout(jid, { text: String(text), templateButtons: cleaned });
+    id = result?.key?.id || null;
 
-// --------------------------- Admin: logout/wipe -----------------------
-app.post('/session/wipe', auth, asyncHandler(async (req, res) => {
-  // 1) marque parada e tente fechar o socket
-  try {
-    stopping = true;
-    if (sock) {
-      try { await sock.logout().catch(() => {}); } catch {}
-      try { sock.end?.(); } catch {}
-    }
-  } catch {}
+    metrics.sent++;
+    metrics.sent_by_type.buttons++;
+    metrics.last.sentId = id;
 
-  // 2) renomeie a pasta de sessão para contornar EBUSY e deletar depois
-  try {
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const bak = `${SESSION_DIR}.bak-${stamp}`;
-    await fs.rename(SESSION_DIR, bak).catch(() => {}); // se não existir, ignora
+    const ms = Number(waitAckMs || 0);
+    if (id && ms > 0) status = await waitForAck(id, Math.min(ms, 20000));
 
-    // crie uma pasta limpa para o próximo boot
-    await fs.mkdir(SESSION_DIR, { recursive: true }).catch(() => {});
+    return res.json({ ok: true, id, to: jid, status });
 
-    // retorno imediato ao cliente
-    res.json({ ok: true, message: 'Sessão isolada. Reiniciando para gerar novo QR.' });
+  } catch (err) {
+    // Fallback: lista numerada
+    const numbered = [
+      String(text),
+      '',
+      ...cleaned.map((b, i) => `${i + 1}) ${b.quickReplyButton.displayText}`),
+      '',
+      'Responda com o número da opção.'
+    ].join('\n');
 
-    // 3) finalize o processo para reiniciar limpo (Render religa o serviço)
-    setTimeout(() => process.exit(0), 200);
-
-    // 4) (assíncrono) tente apagar o backup antigo sem travar resposta
-    setTimeout(async () => {
-      try { await fs.rm(bak, { recursive: true, force: true }); } catch {}
-    }, 1000);
-
-  } catch (e) {
-    // se ainda assim falhar, tente remover diretamente (pode dar EBUSY)
     try {
-      await fs.rm(SESSION_DIR, { recursive: true, force: true });
-      await fs.mkdir(SESSION_DIR, { recursive: true });
-      res.json({ ok: true, message: 'Sessão limpa. Reiniciando para gerar novo QR.' });
-      setTimeout(() => process.exit(0), 200);
-    } catch (err) {
-      res.status(500).json({ error: 'falha ao limpar sessão', detail: err?.message || String(err) });
+      const fb = await sendWithTimeout(jid, { text: numbered });
+      id = fb?.key?.id || null;
+
+      metrics.sent++;
+      metrics.sent_by_type.text++;
+      metrics.last.sentId = id;
+
+      const ms = Number(waitAckMs || 0);
+      if (id && ms > 0) status = await waitForAck(id, Math.min(ms, 20000));
+
+      return res.json({ ok: true, id, to: jid, status, fallback: true, error: String(err?.message || err) });
+    } catch (err2) {
+      return res.status(500).json({ error: 'falha ao enviar buttons e fallback', detail: String(err2?.message || err2) });
     }
   }
 }));
