@@ -391,6 +391,7 @@ const els = {
   badge: document.getElementById('badge'),
   sessionsRoot: document.getElementById('sessionsRoot'),
   selInstance: document.getElementById('selInstance'),
+  btnNew: document.getElementById('btnNew'),
   cards: document.getElementById('cards'),
   qrImg: document.getElementById('qrImg'),
   qrHint: document.getElementById('qrHint'),
