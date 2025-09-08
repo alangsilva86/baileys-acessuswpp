@@ -1,0 +1,21 @@
+{
+  "general": {
+    "timezone": "America/Sao_Paulo",
+    "businessHours": "Mon-Fri 08:00-20:00"
+  },
+  "prompt": {
+    "system": ""
+  },
+  "templates": {
+    "outOfHours": "Estamos fora do horário de atendimento humano (Seg–Sex 08:00–20:00). Posso seguir com a consulta de margem agora ou prefere falar com um atendente depois? Responda: CONSULTA ou ATENDENTE.",
+    "llmError": "Desculpe, estou instável agora. Podemos tentar novamente?",
+    "toolError": "Não consegui executar essa etapa agora. Posso tentar de novo?"
+  },
+  "integrations": {
+    "http": { "requestTimeoutMs": 10000, "requestRetries": 1 },
+    "n8n": { "checkMarginUrl": "", "createLeadUrl": "" }
+  },
+  "whatsapp": { "defaultInstanceId": "default" },
+  "limits": { "sessionTtlMs": 86400000, "dedupeTtlMs": 7200000, "dedupeMax": 5000, "historyMax": 12 }
+}
+

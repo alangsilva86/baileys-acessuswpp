@@ -14,7 +14,7 @@ const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 const BAILEYS_BASE_URL = process.env.BAILEYS_BASE_URL || '';
 const BAILEYS_API_KEY = process.env.BAILEYS_API_KEY || '';
 const BAILEYS_WEBHOOK_HMAC_SECRET = process.env.BAILEYS_WEBHOOK_HMAC_SECRET || '';
-const DEFAULT_INSTANCE_ID = process.env.DEFAULT_INSTANCE_ID || '';
+const DEFAULT_INSTANCE_ID_ENV = process.env.DEFAULT_INSTANCE_ID || '';
 
 const N8N_CHECK_MARGIN_URL = process.env.N8N_CHECK_MARGIN_URL || '';
 const N8N_CREATE_LEAD_URL = process.env.N8N_CREATE_LEAD_URL || '';
@@ -22,11 +22,14 @@ const N8N_CREATE_LEAD_URL = process.env.N8N_CREATE_LEAD_URL || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const LLM_MODEL = process.env.LLM_MODEL || 'gpt-4o-mini';
 
-const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 86_400_000);
-const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 10_000);
-const REQUEST_RETRIES = Number(process.env.REQUEST_RETRIES || 1);
+const ADMIN_KEY = process.env.ADMIN_KEY || '';
 
-const BUSINESS_HOURS = process.env.BUSINESS_HOURS || 'Mon-Fri 08:00-20:00';
+// Runtime-configurable values (can be overridden by config file)
+let REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 10_000);
+let REQUEST_RETRIES = Number(process.env.REQUEST_RETRIES || 1);
+let BUSINESS_HOURS = process.env.BUSINESS_HOURS || 'Mon-Fri 08:00-20:00';
+let DEFAULT_INSTANCE_ID = DEFAULT_INSTANCE_ID_ENV;
+let SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 86_400_000);
 
 if (!BAILEYS_BASE_URL || !BAILEYS_API_KEY) {
   console.warn('[WARN] Configure BAILEYS_BASE_URL e BAILEYS_API_KEY no .env');
@@ -34,6 +37,78 @@ if (!BAILEYS_BASE_URL || !BAILEYS_API_KEY) {
 if (!OPENAI_API_KEY) console.warn('[WARN] Configure OPENAI_API_KEY no .env');
 
 const logger = pino({ level: LOG_LEVEL, base: { service: SERVICE_NAME } });
+
+// --------------------------- Config (file + schema) -----------
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+const CONFIG_PATH = path.join(process.cwd(), 'agent', 'agent.config.json');
+let CONFIG = null;
+
+const ConfigSchema = z.object({
+  general: z.object({
+    timezone: z.string().default('America/Sao_Paulo'),
+    businessHours: z.string().default('Mon-Fri 08:00-20:00')
+  }).default({}),
+  prompt: z.object({
+    system: z.string().default('')
+  }).default({}),
+  templates: z.object({
+    outOfHours: z.string().default('Estamos fora do horário de atendimento humano (Seg–Sex 08:00–20:00). Posso seguir com a consulta de margem agora ou prefere falar com um atendente depois? Responda: CONSULTA ou ATENDENTE.'),
+    llmError: z.string().default('Desculpe, estou instável agora. Podemos tentar novamente?'),
+    toolError: z.string().default('Não consegui executar essa etapa agora. Posso tentar de novo?')
+  }).default({}),
+  integrations: z.object({
+    http: z.object({ requestTimeoutMs: z.number().int().positive().default(10_000), requestRetries: z.number().int().min(0).max(3).default(1) }).default({}),
+    n8n: z.object({ checkMarginUrl: z.string().default(''), createLeadUrl: z.string().default('') }).default({})
+  }).default({}),
+  whatsapp: z.object({ defaultInstanceId: z.string().default('') }).default({}),
+  limits: z.object({
+    sessionTtlMs: z.number().int().positive().default(86_400_000),
+    dedupeTtlMs: z.number().int().positive().default(7_200_000),
+    dedupeMax: z.number().int().positive().default(5000),
+    historyMax: z.number().int().positive().default(12)
+  }).default({})
+}).strict();
+
+async function loadConfig() {
+  try {
+    const raw = await fs.readFile(CONFIG_PATH, 'utf8');
+    const json = JSON.parse(raw);
+    const parsed = ConfigSchema.parse(json);
+    applyConfig(parsed);
+    CONFIG = parsed;
+  } catch (e) {
+    CONFIG = ConfigSchema.parse({
+      general: { businessHours: BUSINESS_HOURS },
+      prompt: { system: '' },
+      templates: {},
+      integrations: { http: { requestTimeoutMs: REQUEST_TIMEOUT_MS, requestRetries: REQUEST_RETRIES }, n8n: { checkMarginUrl: N8N_CHECK_MARGIN_URL, createLeadUrl: N8N_CREATE_LEAD_URL } },
+      whatsapp: { defaultInstanceId: DEFAULT_INSTANCE_ID },
+      limits: { sessionTtlMs: SESSION_TTL_MS, dedupeTtlMs: 2 * 60 * 60 * 1000, dedupeMax: 5000, historyMax: 12 }
+    });
+    applyConfig(CONFIG);
+  }
+}
+
+async function saveConfig(newConfig) {
+  await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true }).catch(() => {});
+  const data = JSON.stringify(newConfig, null, 2);
+  await fs.writeFile(CONFIG_PATH, data);
+}
+
+function applyConfig(cfg) {
+  BUSINESS_HOURS = cfg.general.businessHours || BUSINESS_HOURS;
+  REQUEST_TIMEOUT_MS = cfg.integrations.http.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+  REQUEST_RETRIES = cfg.integrations.http.requestRetries ?? REQUEST_RETRIES;
+  DEFAULT_INSTANCE_ID = cfg.whatsapp.defaultInstanceId || DEFAULT_INSTANCE_ID_ENV;
+  SESSION_TTL_MS = cfg.limits.sessionTtlMs ?? SESSION_TTL_MS;
+  // Dedupe/limits (only used later, but applied here)
+  // These variables will be referenced in dedupe/session cleanup
+  globalThis.__DEDUPE_TTL_MS__ = cfg.limits.dedupeTtlMs;
+  globalThis.__DEDUPE_MAX__ = cfg.limits.dedupeMax;
+  globalThis.__HISTORY_MAX__ = cfg.limits.historyMax;
+}
 
 // --------------------------- OpenAI ---------------------------
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
@@ -128,7 +203,8 @@ function getSession(chatKey) {
 }
 function pushHistory(session, role, content) {
   session.history.push({ role, content });
-  if (session.history.length > HISTORY_MAX) session.history.shift();
+  const max = (globalThis.__HISTORY_MAX__ ?? HISTORY_MAX);
+  if (session.history.length > max) session.history.shift();
 }
 
 // TTL cleanup
@@ -311,18 +387,18 @@ async function llmDecide({ session, userMsg, chatKey }) {
 
 // ------------------- Dedupe de mensagens ---------------------
 const DEDUPE = new Map(); // id -> timestamp
-const DEDUPE_TTL_MS = 2 * 60 * 60 * 1000; // 2h
-const DEDUPE_MAX = 5000;
 function seenAndStore(id) {
   if (!id) return false;
   const now = Date.now();
   const prev = DEDUPE.get(id);
-  if (prev && now - prev < DEDUPE_TTL_MS) return true;
+  const ttl = (globalThis.__DEDUPE_TTL_MS__ ?? 2 * 60 * 60 * 1000);
+  if (prev && now - prev < ttl) return true;
   DEDUPE.set(id, now);
-  if (DEDUPE.size > DEDUPE_MAX) {
+  const max = (globalThis.__DEDUPE_MAX__ ?? 5000);
+  if (DEDUPE.size > max) {
     // trim oldest ~10%
     const arr = [...DEDUPE.entries()].sort((a,b)=>a[1]-b[1]);
-    for (let i=0; i<Math.floor(DEDUPE_MAX*0.1); i++) DEDUPE.delete(arr[i][0]);
+    for (let i=0; i<Math.floor(max*0.1); i++) DEDUPE.delete(arr[i][0]);
   }
   return false;
 }
@@ -350,7 +426,8 @@ async function runToolCall(tool, { chatKey, session, instanceId }) {
       const { cpf, matricula, nascimento } = Z.check_margin.parse(tool.args);
       if (!isValidCPF(cpf)) return { ok: false, error: 'CPF inválido' };
       const payload = { cpf, matricula, nascimento, chatKey };
-      const r = await n8nPOST(N8N_CHECK_MARGIN_URL, payload);
+      const checkUrl = (CONFIG?.integrations?.n8n?.checkMarginUrl || N8N_CHECK_MARGIN_URL);
+      const r = await n8nPOST(checkUrl, payload);
       session.slots.margin = r?.margin ?? null;
       session.slots.marginChecked = true;
       return { ok: true, data: r };
@@ -358,7 +435,8 @@ async function runToolCall(tool, { chatKey, session, instanceId }) {
     case 'create_lead': {
       const { cpf, matricula, nascimento, origem, chatKey: ck } = Z.create_lead.parse(tool.args);
       const payload = { cpf, matricula, nascimento, origem: origem || 'WhatsApp — Cartão Benefício', chatKey: ck || chatKey };
-      const r = await n8nPOST(N8N_CREATE_LEAD_URL, payload);
+      const createUrl = (CONFIG?.integrations?.n8n?.createLeadUrl || N8N_CREATE_LEAD_URL);
+      const r = await n8nPOST(createUrl, payload);
       return { ok: true, data: r };
     }
     case 'get_knowledge': {
@@ -425,7 +503,8 @@ async function handleEvent(evt) {
 
   // Fora do horário comercial – mensagem e pausa curta (ex.: 30 min)
   if (!isBusinessHours(new Date())) {
-    try { await sendText(evt.chatKey.replace(/@s\.whatsapp\.net$/, ''), 'Estamos fora do horário de atendimento humano (Seg–Sex 08:00–20:00). Posso seguir com a consulta de margem agora ou prefere falar com um atendente depois? Responda: CONSULTA ou ATENDENTE.', instanceId); } catch {}
+    const msg = (CONFIG?.templates?.outOfHours || 'Estamos fora do horário de atendimento humano (Seg–Sex 08:00–20:00). Posso seguir com a consulta de margem agora ou prefere falar com um atendente depois? Responda: CONSULTA ou ATENDENTE.');
+    try { await sendText(evt.chatKey.replace(/@s\.whatsapp\.net$/, ''), msg, instanceId); } catch {}
     // não interrompe o fluxo; apenas avisa
   }
 
@@ -456,7 +535,8 @@ async function handleEvent(evt) {
     decision = await llmDecide({ session, userMsg, chatKey: evt.chatKey });
   } catch (e) {
     logger.error({ err: e?.message, chatKey: evt.chatKey }, 'llm.error');
-    try { await sendText(evt.chatKey.replace(/@s\.whatsapp\.net$/, ''), 'Desculpe, estou instável agora. Podemos tentar novamente?', instanceId); } catch {}
+    const msg = (CONFIG?.templates?.llmError || 'Desculpe, estou instável agora. Podemos tentar novamente?');
+    try { await sendText(evt.chatKey.replace(/@s\.whatsapp\.net$/, ''), msg, instanceId); } catch {}
     return;
   }
 
@@ -475,7 +555,8 @@ async function handleEvent(evt) {
       }
     } catch (e) {
       logger.error({ tool: decision.name, err: e?.message, chatKey: evt.chatKey }, 'tool.error');
-      try { await sendText(evt.chatKey.replace(/@s\.whatsapp\.net$/, ''), 'Não consegui executar essa etapa agora. Posso tentar de novo?', instanceId); } catch {}
+      const msg = (CONFIG?.templates?.toolError || 'Não consegui executar essa etapa agora. Posso tentar de novo?');
+      try { await sendText(evt.chatKey.replace(/@s\.whatsapp\.net$/, ''), msg, instanceId); } catch {}
     }
   } else if (decision.type === 'text') {
     if (decision.message) {
@@ -525,5 +606,32 @@ app.use((req, _res, next) => { if (req.path === '/webhook/baileys') METRIC.webho
 app.get('/health', (req, res) => res.json({ ok: true, service: SERVICE_NAME }));
 app.get('/metrics', (req, res) => res.json({ sessions: SESSIONS.size, queueSize: QUEUE.size, dedupeSize: DEDUPE.size, webhookCalls: METRIC.webhook_calls }));
 
-app.listen(PORT, () => logger.info({ port: PORT }, 'agent.started'));
+// ---------------------- Admin Config API ---------------------
+function adminAuth(req, res, next) {
+  if (!ADMIN_KEY) {
+    if (process.env.NODE_ENV === 'development') return next();
+    return res.status(403).json({ ok: false, error: 'admin_disabled' });
+  }
+  const k = req.header('x-admin-key') || '';
+  if (timingSafeEqual(k, ADMIN_KEY)) return next();
+  return res.status(401).json({ ok: false, error: 'unauthorized' });
+}
 
+app.get('/admin/config', adminAuth, (req, res) => {
+  res.json({ config: CONFIG });
+});
+
+app.put('/admin/config', adminAuth, express.json({ limit: '1mb' }), async (req, res) => {
+  try {
+    const parsed = ConfigSchema.parse(req.body?.config || {});
+    applyConfig(parsed);
+    CONFIG = parsed;
+    await saveConfig(parsed);
+    res.json({ ok: true, config: CONFIG });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: 'invalid_config', detail: String(e?.message || e) });
+  }
+});
+
+await loadConfig();
+app.listen(PORT, () => logger.info({ port: PORT }, 'agent.started'));
