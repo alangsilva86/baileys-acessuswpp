@@ -504,7 +504,10 @@ async function refreshInstances() {
     await refreshSelected();
 
   } catch (e) {
-    showError('Erro ao listar instâncias (API key?)');
+    const msg = String(e?.message||'');
+    if (msg.includes('HTTP 401')) showError('API key inválida');
+    else if (msg.includes('HTTP 502')) showError('Serviço reiniciando/indisponível (502)');
+    else showError('Erro ao listar instâncias');
   }
 }
 
