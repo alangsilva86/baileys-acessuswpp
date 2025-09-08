@@ -411,6 +411,20 @@ els.inpApiKey.addEventListener('input', () => {
   localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
 });
 
+function showError(msg) {
+  els.badge.textContent = msg;
+  els.badge.className = 'px-3 py-1 rounded-full text-sm bg-amber-100 text-amber-800';
+}
+function requireKey() {
+  const k = els.inpApiKey.value.trim();
+  if (!k) {
+    showError('Informe x-api-key para usar ações');
+    try { els.inpApiKey.focus(); } catch {}
+    throw new Error('missing_api_key');
+  }
+  return k;
+}
+
 let chart;
 function initChart() {
   const ctx = document.getElementById('metricsChart').getContext('2d');
@@ -1312,19 +1326,6 @@ let server;
     }
   }
   server = app.listen(PORT, () => logger.info({ port: PORT }, 'http.started'));
-function showError(msg) {
-  els.badge.textContent = msg;
-  els.badge.className = 'px-3 py-1 rounded-full text-sm bg-amber-100 text-amber-800';
-}
-function requireKey() {
-  const k = els.inpApiKey.value.trim();
-  if (!k) {
-    showError('Informe x-api-key para usar ações');
-    try { els.inpApiKey.focus(); } catch {}
-    throw new Error('missing_api_key');
-  }
-  return k;
-}
 })().catch(err => {
   logger.error({ err }, 'boot.failed');
   process.exit(1);
