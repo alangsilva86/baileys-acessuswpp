@@ -635,3 +635,314 @@ app.put('/admin/config', adminAuth, express.json({ limit: '1mb' }), async (req, 
 
 await loadConfig();
 app.listen(PORT, () => logger.info({ port: PORT }, 'agent.started'));
+
+// ---------------------- Admin Panel (UI) ---------------------
+app.get('/admin', (req, res) => {
+  res.type('html').send(`<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Acessus Agent — Admin</title>
+  <style>
+    :root {
+      --bg: #0b1220; --card: #0f172a; --muted: #94a3b8; --text: #e2e8f0; --accent: #22c55e; --danger: #ef4444; --border:#1f2937;
+      --btn:#1f2937; --btn-hover:#334155; --input:#0b1220; --radius: 14px;
+    }
+    * { box-sizing: border-box }
+    body { margin: 0; font: 15px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif; background: radial-gradient(1200px 800px at 10% -10%, #0b1220 0, #0b1220 35%, #0a1328 60%, #09122a 100%); color: var(--text) }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 28px }
+    header { display:flex; align-items:center; justify-content:space-between; margin-bottom: 18px }
+    .brand { font-weight:700; font-size:20px; letter-spacing:.3px }
+    .badge { font-size:12px; padding:4px 10px; border-radius:999px; background:#0b1325; color: var(--muted); border:1px solid var(--border) }
+    .grid { display:grid; gap:16px }
+    @media(min-width: 900px){ .grid-2 { grid-template-columns: 1fr 1fr } }
+    .card { background: linear-gradient(180deg, #0f172a, #0d1528); border:1px solid var(--border); border-radius: var(--radius); padding:18px; box-shadow: inset 0 1px rgba(255,255,255,.02) }
+    .title { font-weight:600; margin:0 0 12px; font-size:14px; color:#cbd5e1 }
+    .row { display:flex; gap:10px; align-items:center }
+    .label { color: var(--muted); font-size:12px; margin-bottom:6px }
+    input[type="text"], input[type="number"], textarea { width:100%; background: var(--input); border:1px solid var(--border); color: var(--text); padding:10px 12px; border-radius:12px; outline:none }
+    textarea { min-height: 88px; resize: vertical }
+    .hint { color: var(--muted); font-size:12px }
+    .btn { background: var(--btn); color: var(--text); border:1px solid var(--border); padding:10px 14px; border-radius:12px; cursor:pointer }
+    .btn:hover { background: var(--btn-hover) }
+    .btn.primary { background: #16a34a; border-color: #16a34a }
+    .btn.primary:hover { background: #22c55e }
+    .btn.ghost { background: transparent }
+    .toolbar { display:flex; gap:10px; align-items:center; flex-wrap: wrap }
+    .ok { color:#22c55e }
+    .err { color:#ef4444 }
+    .spacer { flex:1 }
+    .footer { margin-top: 20px; color: var(--muted); font-size:12px; display:flex; align-items:center; gap:8px }
+    .pill { padding:3px 8px; border-radius:999px; border:1px solid var(--border); background:#0b1325; color: #9ca3af; font-size:11px }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">Acessus Agent — Admin</div>
+      <div class="toolbar">
+        <span id="status" class="badge">Pronto</span>
+        <div class="row">
+          <input id="adminKey" type="text" placeholder="x-admin-key" style="width:260px" />
+          <button class="btn" id="btnUseKey">Usar</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="grid grid-2">
+      <section class="card">
+        <h3 class="title">Geral</h3>
+        <label class="label">Business Hours</label>
+        <input id="businessHours" type="text" placeholder="Mon-Fri 08:00-20:00" />
+        <div class="hint">Faixas simples, ex: Mon-Fri 08:00-20:00; Tue,Thu 09:00-17:00</div>
+      </section>
+
+      <section class="card">
+        <h3 class="title">WhatsApp</h3>
+        <label class="label">Instância padrão</label>
+        <input id="defaultInstanceId" type="text" placeholder="default" />
+        <div class="hint">Usada quando o webhook não informar a instância.</div>
+      </section>
+
+      <section class="card">
+        <h3 class="title">Prompt do Agente</h3>
+        <textarea id="promptSystem" placeholder="Texto do sistema (substitui o padrão)"></textarea>
+      </section>
+
+      <section class="card">
+        <h3 class="title">Templates</h3>
+        <label class="label">Fora de horário</label>
+        <textarea id="tplOutOfHours"></textarea>
+        <label class="label" style="margin-top:10px">Erro do LLM</label>
+        <textarea id="tplLlmError"></textarea>
+        <label class="label" style="margin-top:10px">Erro de ferramenta</label>
+        <textarea id="tplToolError"></textarea>
+      </section>
+
+      <section class="card">
+        <h3 class="title">Integrações HTTP</h3>
+        <div class="row">
+          <div style="flex:1">
+            <label class="label">Timeout (ms)</label>
+            <input id="httpTimeout" type="number" min="1000" step="500" />
+          </div>
+          <div style="width:180px">
+            <label class="label">Retries</label>
+            <input id="httpRetries" type="number" min="0" max="3" />
+          </div>
+        </div>
+        <div style="height:10px"></div>
+        <label class="label">n8n — Check Margin URL</label>
+        <input id="n8nCheck" type="text" placeholder="https://n8n/webhook/check-margin" />
+        <label class="label" style="margin-top:10px">n8n — Create Lead URL</label>
+        <input id="n8nCreate" type="text" placeholder="https://n8n/webhook/create-lead" />
+      </section>
+
+      <section class="card">
+        <h3 class="title">Limites</h3>
+        <div class="row">
+          <div style="flex:1">
+            <label class="label">Session TTL (ms)</label>
+            <input id="limitSessionTtl" type="number" min="60000" step="60000" />
+          </div>
+          <div style="flex:1">
+            <label class="label">Dedupe TTL (ms)</label>
+            <input id="limitDedupeTtl" type="number" min="60000" step="60000" />
+          </div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div style="flex:1">
+            <label class="label">Dedupe Max</label>
+            <input id="limitDedupeMax" type="number" min="100" step="100" />
+          </div>
+          <div style="flex:1">
+            <label class="label">History Max</label>
+            <input id="limitHistoryMax" type="number" min="4" step="1" />
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3 class="title">Ações</h3>
+        <div class="toolbar">
+          <button class="btn" id="btnLoad">Carregar</button>
+          <button class="btn primary" id="btnSave">Salvar</button>
+          <button class="btn" id="btnReset">Restaurar padrão</button>
+          <span class="spacer"></span>
+          <button class="btn ghost" id="btnExport">Exportar</button>
+          <label class="btn ghost">
+            Importar <input id="fileImport" type="file" accept="application/json" style="display:none" />
+          </label>
+        </div>
+      </section>
+
+      <section class="card" style="grid-column: 1 / -1">
+        <h3 class="title">Pré‑visualização</h3>
+        <pre id="preview" style="white-space:pre-wrap; background:#0b1325; border:1px solid var(--border); padding:12px; border-radius:12px; color:#9ca3af; max-height:260px; overflow:auto"></pre>
+      </section>
+    </div>
+
+    <div class="footer">
+      <span class="pill">Acessus</span>
+      <span class="pill">Agent Admin</span>
+      <span class="pill">Fintech‑grade UX</span>
+    </div>
+  </div>
+
+<script>
+const els = {
+  status: document.getElementById('status'),
+  adminKey: document.getElementById('adminKey'),
+  btnUseKey: document.getElementById('btnUseKey'),
+  businessHours: document.getElementById('businessHours'),
+  defaultInstanceId: document.getElementById('defaultInstanceId'),
+  promptSystem: document.getElementById('promptSystem'),
+  tplOutOfHours: document.getElementById('tplOutOfHours'),
+  tplLlmError: document.getElementById('tplLlmError'),
+  tplToolError: document.getElementById('tplToolError'),
+  httpTimeout: document.getElementById('httpTimeout'),
+  httpRetries: document.getElementById('httpRetries'),
+  n8nCheck: document.getElementById('n8nCheck'),
+  n8nCreate: document.getElementById('n8nCreate'),
+  limitSessionTtl: document.getElementById('limitSessionTtl'),
+  limitDedupeTtl: document.getElementById('limitDedupeTtl'),
+  limitDedupeMax: document.getElementById('limitDedupeMax'),
+  limitHistoryMax: document.getElementById('limitHistoryMax'),
+  btnLoad: document.getElementById('btnLoad'),
+  btnSave: document.getElementById('btnSave'),
+  btnReset: document.getElementById('btnReset'),
+  btnExport: document.getElementById('btnExport'),
+  fileImport: document.getElementById('fileImport'),
+  preview: document.getElementById('preview')
+};
+
+els.adminKey.value = localStorage.getItem('x_admin_key') || '';
+
+function setStatus(msg, ok=true){
+  els.status.textContent = msg;
+  els.status.style.color = ok ? 'var(--text)' : 'var(--danger)';
+}
+
+function headers(){
+  const h = { 'Content-Type':'application/json' };
+  const k = els.adminKey.value.trim();
+  if (k) h['x-admin-key'] = k;
+  return h;
+}
+
+async function getConfig(){
+  const r = await fetch('/admin/config', { headers: headers(), cache:'no-store' });
+  if (!r.ok) throw new Error('HTTP '+r.status);
+  return r.json();
+}
+async function putConfig(config){
+  const r = await fetch('/admin/config', { method:'PUT', headers: headers(), body: JSON.stringify({ config }) });
+  if (!r.ok) throw new Error('HTTP '+r.status+': '+await r.text());
+  return r.json();
+}
+
+function fillForm(cfg){
+  els.businessHours.value = cfg.general?.businessHours || '';
+  els.defaultInstanceId.value = cfg.whatsapp?.defaultInstanceId || '';
+  els.promptSystem.value = cfg.prompt?.system || '';
+  els.tplOutOfHours.value = (cfg.templates?.outOfHours || '');
+  els.tplLlmError.value = (cfg.templates?.llmError || '');
+  els.tplToolError.value = (cfg.templates?.toolError || '');
+  els.httpTimeout.value = cfg.integrations?.http?.requestTimeoutMs ?? 10000;
+  els.httpRetries.value = cfg.integrations?.http?.requestRetries ?? 1;
+  els.n8nCheck.value = cfg.integrations?.n8n?.checkMarginUrl || '';
+  els.n8nCreate.value = cfg.integrations?.n8n?.createLeadUrl || '';
+  els.limitSessionTtl.value = cfg.limits?.sessionTtlMs ?? 86400000;
+  els.limitDedupeTtl.value = cfg.limits?.dedupeTtlMs ?? 7200000;
+  els.limitDedupeMax.value = cfg.limits?.dedupeMax ?? 5000;
+  els.limitHistoryMax.value = cfg.limits?.historyMax ?? 12;
+  renderPreview();
+}
+
+function readForm(){
+  const cfg = {
+    general: { businessHours: els.businessHours.value.trim(), timezone: 'America/Sao_Paulo' },
+    prompt: { system: els.promptSystem.value },
+    templates: {
+      outOfHours: els.tplOutOfHours.value,
+      llmError: els.tplLlmError.value,
+      toolError: els.tplToolError.value
+    },
+    integrations: {
+      http: { requestTimeoutMs: Number(els.httpTimeout.value||10000), requestRetries: Number(els.httpRetries.value||1) },
+      n8n: { checkMarginUrl: els.n8nCheck.value.trim(), createLeadUrl: els.n8nCreate.value.trim() }
+    },
+    whatsapp: { defaultInstanceId: els.defaultInstanceId.value.trim() },
+    limits: {
+      sessionTtlMs: Number(els.limitSessionTtl.value||86400000),
+      dedupeTtlMs: Number(els.limitDedupeTtl.value||7200000),
+      dedupeMax: Number(els.limitDedupeMax.value||5000),
+      historyMax: Number(els.limitHistoryMax.value||12)
+    }
+  };
+  return cfg;
+}
+
+function renderPreview(){
+  const cfg = readForm();
+  els.preview.textContent = JSON.stringify(cfg, null, 2);
+}
+
+['businessHours','defaultInstanceId','promptSystem','tplOutOfHours','tplLlmError','tplToolError','httpTimeout','httpRetries','n8nCheck','n8nCreate','limitSessionTtl','limitDedupeTtl','limitDedupeMax','limitHistoryMax']
+.forEach(id => { els[id].addEventListener('input', renderPreview); });
+
+els.btnUseKey.onclick = () => {
+  localStorage.setItem('x_admin_key', els.adminKey.value.trim());
+  setStatus('Chave aplicada');
+};
+
+els.btnLoad.onclick = async () => {
+  try {
+    const data = await getConfig();
+    fillForm(data.config || {});
+    setStatus('Config carregada');
+  } catch(e){ setStatus('Falha ao carregar: '+e.message, false); }
+};
+
+els.btnSave.onclick = async () => {
+  try {
+    const cfg = readForm();
+    await putConfig(cfg);
+    setStatus('Config salva', true);
+  } catch(e){ setStatus('Falha ao salvar: '+e.message, false); }
+};
+
+els.btnReset.onclick = () => {
+  fillForm({
+    general:{ businessHours:'Mon-Fri 08:00-20:00' },
+    prompt:{ system:'' },
+    templates:{ outOfHours:'Estamos fora do horário de atendimento humano (Seg–Sex 08:00–20:00). Posso seguir com a consulta de margem agora ou prefere falar com um atendente depois? Responda: CONSULTA ou ATENDENTE.', llmError:'Desculpe, estou instável agora. Podemos tentar novamente?', toolError:'Não consegui executar essa etapa agora. Posso tentar de novo?' },
+    integrations:{ http:{ requestTimeoutMs:10000, requestRetries:1 }, n8n:{ checkMarginUrl:'', createLeadUrl:'' } },
+    whatsapp:{ defaultInstanceId:'default' },
+    limits:{ sessionTtlMs:86400000, dedupeTtlMs:7200000, dedupeMax:5000, historyMax:12 }
+  });
+  setStatus('Valores padrão restaurados');
+};
+
+els.btnExport.onclick = () => {
+  const cfg = readForm();
+  const blob = new Blob([JSON.stringify(cfg, null, 2)], { type:'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'agent.config.json'; a.click();
+};
+
+els.fileImport.onchange = async (ev) => {
+  const f = ev.target.files?.[0]; if (!f) return;
+  const text = await f.text().catch(()=>null); if (!text) return;
+  try { const cfg = JSON.parse(text); fillForm(cfg); setStatus('Config carregada do arquivo'); }
+  catch(e){ setStatus('JSON inválido: '+e.message, false) }
+};
+
+// Auto-load on open
+els.btnLoad.click();
+</script>
+</body>
+</html>`);
+});
