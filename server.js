@@ -355,9 +355,10 @@ app.get('/', (req, res) => {
           <img id="qrImg" alt="QR" class="mx-auto hidden" />
           <div id="qrHint" class="text-sm text-slate-500">Selecione uma instância desconectada para ver o QR.</div>
         </div>
-        <div class="mt-3 flex gap-2">
+        <div class="mt-3 flex gap-2 flex-wrap">
           <button id="btnLogout" class="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg">Desconectar</button>
           <button id="btnWipe" class="px-3 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg">Limpar sessão</button>
+          <button id="btnPair" class="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg">Parear por código</button>
         </div>
       </div>
 
@@ -395,6 +396,7 @@ const els = {
   qrHint: document.getElementById('qrHint'),
   btnLogout: document.getElementById('btnLogout'),
   btnWipe: document.getElementById('btnWipe'),
+  btnPair: document.getElementById('btnPair'),
   inpApiKey: document.getElementById('inpApiKey'),
   inpPhone: document.getElementById('inpPhone'),
   inpMsg: document.getElementById('inpMsg'),
@@ -404,6 +406,9 @@ const els = {
 
 els.inpApiKey.value = localStorage.getItem('x_api_key') || '';
 els.sessionsRoot.textContent = ${JSON.stringify(SESSIONS_ROOT)};
+els.inpApiKey.addEventListener('input', () => {
+  localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+});
 
 let chart;
 function initChart() {
@@ -437,7 +442,10 @@ async function fetchJSON(path, auth=true, opts={}) {
     if (sel) headers['x-instance-id'] = sel;
   }
   const r = await fetch(path, { headers, cache: 'no-store', ...opts });
-  if (!r.ok) throw new Error('HTTP ' + r.status);
+  if (!r.ok) {
+    const txt = await r.text().catch(() => '');
+    throw new Error('HTTP ' + r.status + (txt ? ' — ' + txt : ''));
+  }
   try { return await r.json(); } catch { return {}; }
 }
 
@@ -481,8 +489,7 @@ async function refreshInstances() {
     await refreshSelected();
 
   } catch (e) {
-    els.badge.textContent = 'Erro';
-    els.badge.className = 'px-3 py-1 rounded-full text-sm bg-amber-100 text-amber-800';
+    showError('Erro ao listar instâncias (API key?)');
   }
 }
 
@@ -530,19 +537,22 @@ document.addEventListener('click', async (ev) => {
   const t = ev.target;
   if (!t.dataset?.act) return;
   const iid = t.dataset.iid;
-  const key = els.inpApiKey.value.trim();
-  if (!iid || !key) return;
+  if (!iid) return;
+  let key;
+  try { key = requireKey(); } catch { return; }
 
   if (t.dataset.act === 'qr') {
     els.selInstance.value = iid;
     await refreshSelected();
   }
   if (t.dataset.act === 'logout') {
-    await fetch('/instances/'+iid+'/logout', { method:'POST', headers: { 'x-api-key': key }});
+    const r = await fetch('/instances/'+iid+'/logout', { method:'POST', headers: { 'x-api-key': key }});
+    if (!r.ok) alert('Falha no logout: HTTP '+r.status);
     await refreshInstances();
   }
   if (t.dataset.act === 'wipe') {
-    await fetch('/instances/'+iid+'/session/wipe', { method:'POST', headers: { 'x-api-key': key }});
+    const r = await fetch('/instances/'+iid+'/session/wipe', { method:'POST', headers: { 'x-api-key': key }});
+    if (!r.ok) alert('Falha ao limpar sessão: HTTP '+r.status);
   }
   if (t.dataset.act === 'select') {
     els.selInstance.value = iid;
@@ -564,7 +574,8 @@ els.btnLogout.onclick = async () => {
   try {
     localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
     const iid = els.selInstance.value;
-    await fetch('/instances/'+iid+'/logout', { method:'POST', headers: { 'x-api-key': els.inpApiKey.value.trim() }});
+    const r = await fetch('/instances/'+iid+'/logout', { method:'POST', headers: { 'x-api-key': requireKey() }});
+    if (!r.ok) return alert('Falha no logout: HTTP '+r.status);
     els.qrHint.textContent = 'Desconectando… o serviço pode reiniciar e exibir um novo QR.';
   } catch {}
 };
@@ -573,9 +584,24 @@ els.btnWipe.onclick = async () => {
   try {
     localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
     const iid = els.selInstance.value;
-    await fetch('/instances/'+iid+'/session/wipe', { method:'POST', headers: { 'x-api-key': els.inpApiKey.value.trim() }});
+    const r = await fetch('/instances/'+iid+'/session/wipe', { method:'POST', headers: { 'x-api-key': requireKey() }});
+    if (!r.ok) return alert('Falha ao limpar sessão: HTTP '+r.status);
     els.qrHint.textContent = 'Limpando sessão… o serviço vai reiniciar e exibir um novo QR.';
   } catch {}
+};
+
+els.btnPair.onclick = async () => {
+  try {
+    const iid = els.selInstance.value;
+    const phone = prompt('Número no formato E.164 (ex: 5544999999999):');
+    if (!phone) return;
+    const j = await fetchJSON('/instances/'+iid+'/pair', true, { method:'POST', body: JSON.stringify({ phoneNumber: phone }) });
+    const code = j?.pairingCode || '(sem código)';
+    els.qrHint.textContent = 'Código de pareamento: ' + code + ' (copiado)';
+    try { await navigator.clipboard.writeText(code); } catch {}
+  } catch (e) {
+    alert('Falha ao gerar código: ' + e.message);
+  }
 };
 
 els.btnSend.onclick = async () => {
@@ -1285,6 +1311,19 @@ let server;
     }
   }
   server = app.listen(PORT, () => logger.info({ port: PORT }, 'http.started'));
+function showError(msg) {
+  els.badge.textContent = msg;
+  els.badge.className = 'px-3 py-1 rounded-full text-sm bg-amber-100 text-amber-800';
+}
+function requireKey() {
+  const k = els.inpApiKey.value.trim();
+  if (!k) {
+    showError('Informe x-api-key para usar ações');
+    try { els.inpApiKey.focus(); } catch {}
+    throw new Error('missing_api_key');
+  }
+  return k;
+}
 })().catch(err => {
   logger.error({ err }, 'boot.failed');
   process.exit(1);
