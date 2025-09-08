@@ -178,6 +178,13 @@ async function startInstance(iid, name) {
   const dir = path.join(SESSIONS_ROOT, iid);
   await fs.mkdir(dir, { recursive: true }).catch(() => {});
 
+  // se já existir uma instância com o mesmo id, encerra o socket anterior
+  const existing = instances.get(iid);
+  if (existing && existing.sock) {
+    try { existing.stopping = true; existing.sock.end?.(); } catch {}
+    if (existing.reconnectTimer) { try { clearTimeout(existing.reconnectTimer); } catch {} }
+  }
+
   const inst = {
     id: iid,
     name: name || iid,
@@ -186,6 +193,7 @@ async function startInstance(iid, name) {
     lastQR: null,
     reconnectDelay: RECONNECT_MIN_DELAY_MS,
     stopping: false,
+    reconnectTimer: null,
     metrics: {
       startedAt: Date.now(),
       sent: 0,
@@ -228,7 +236,12 @@ async function startInstance(iid, name) {
       if (!inst.stopping && !isLoggedOut) {
         const delay = Math.min(inst.reconnectDelay, RECONNECT_MAX_DELAY_MS);
         logger.warn({ iid, delay }, 'whatsapp.reconnect.scheduled');
-        setTimeout(() => {
+        // evita múltiplos agendamentos de reconexão concorrentes
+        if (inst.reconnectTimer) clearTimeout(inst.reconnectTimer);
+        const currentSock = sock;
+        inst.reconnectTimer = setTimeout(() => {
+          // só reconecta se ainda estamos falando do mesmo socket
+          if (inst.sock !== currentSock) return;
           inst.reconnectDelay = Math.min(inst.reconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
           startInstance(iid, inst.name).catch(err => logger.error({ iid, err }, 'whatsapp.reconnect.failed'));
         }, delay);
@@ -606,7 +619,7 @@ app.get('/instances', auth, (req, res) => {
     counters: { sent: i.metrics.sent, status: i.metrics.status_counts }
   }));
   res.json(list);
-}));
+});
 
 app.get('/instances/:iid', auth, (req, res) => {
   const i = instances.get(req.params.iid);
@@ -890,11 +903,11 @@ app.post('/instances/:iid/send-list', auth, asyncHandler(async (req, res) => {
       '',
       ...fixedSections.flatMap((sec, si) => {
         const head = sec.title ? ['*' + sec.title + '*'] : [];
-        const rows = sec.rows.map((r, i2) => \`\${si + 1}.\${i2 + 1}) \${r.title}\`);
+        const rows = sec.rows.map((r, i2) => `${si + 1}.${i2 + 1}) ${r.title}`);
         return [...head, ...rows, ''];
       }),
       'Responda com o número da opção.'
-    ].join('\\n');
+    ].join('\n');
 
     try {
       const fb = await sendWithTimeout(i, jid, { text: fallback });
@@ -963,10 +976,10 @@ app.post('/instances/:iid/send-buttons', auth, asyncHandler(async (req, res) => 
     const numbered = [
       String(text),
       '',
-      ...cleaned.map((b, idx) => \`\${idx + 1}) \${b.quickReplyButton.displayText}\`),
+      ...cleaned.map((b, idx) => `${idx + 1}) ${b.quickReplyButton.displayText}`),
       '',
       'Responda com o número da opção.'
-    ].join('\\n');
+    ].join('\n');
 
     try {
       const fb = await sendWithTimeout(i, jid, { text: numbered });
@@ -1005,7 +1018,7 @@ app.get('/qr.png', asyncHandler(async (req, res) => {
   res.type('png').send(png);
 }));
 
-app.get('/whoami', (req, res) => {
+app.get('/whoami', auth, (req, res) => {
   const i = instances.get('default');
   if (!i || !i.sock || !i.sock.user) return res.status(503).json({ error: 'socket indisponível' });
   res.json({ user: i.sock.user });
@@ -1217,10 +1230,10 @@ app.post('/send-buttons', auth, asyncHandler(async (req, res) => {
     const numbered = [
       String(text),
       '',
-      ...cleaned.map((b, idx) => \`\${idx + 1}) \${b.quickReplyButton.displayText}\`),
+      ...cleaned.map((b, idx) => `${idx + 1}) ${b.quickReplyButton.displayText}`),
       '',
       'Responda com o número da opção.'
-    ].join('\\n');
+    ].join('\n');
 
     try {
       const fb = await sendWithTimeout(i, jid, { text: numbered });
@@ -1241,9 +1254,9 @@ app.post('/send-buttons', auth, asyncHandler(async (req, res) => {
 }));
 
 app.post('/send-list', auth, asyncHandler(async (req, res) => {
-  // aponta para a instância default
-  req.params.iid = 'default';
-  return app._router.handle(req, res, () => {});
+  // Encaminha para a rota por instância (default) sem usar APIs privadas
+  req.url = '/instances/default/send-list';
+  return app.handle(req, res);
 }));
 
 // ---------------------- Error handling ------------------------
