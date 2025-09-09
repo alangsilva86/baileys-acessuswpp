@@ -261,7 +261,10 @@ async function fetchWithRetry(url, opts = {}, retries = REQUEST_RETRIES, timeout
 }
 
 async function baileysPOST(path, body, instanceId) {
-  const url = `${BAILEYS_BASE_URL}${path}`;
+  const base = String(BAILEYS_BASE_URL || '').replace(/\/+$/,'');
+  const p = String(path || '');
+  const fullPath = p.startsWith('/') ? p : `/${p}`;
+  const url = `${base}${fullPath}`;
   const headers = { 'Content-Type': 'application/json', 'x-api-key': BAILEYS_API_KEY };
   if (instanceId) headers['x-instance-id'] = instanceId;
   const r = await fetchWithRetry(url, { method: 'POST', headers, body: JSON.stringify(body) });
@@ -637,6 +640,7 @@ await loadConfig();
 app.listen(PORT, () => logger.info({ port: PORT }, 'agent.started'));
 
 // ---------------------- Admin Panel (UI) ---------------------
+app.get('/', (req, res) => res.redirect(302, '/admin'));
 app.get('/admin', (req, res) => {
   res.type('html').send(`<!doctype html>
 <html lang="pt-br">
