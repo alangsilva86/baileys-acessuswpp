@@ -496,6 +496,30 @@ app.get('/', (req, res) => {
       </div>
     </section>
 
+    <section id="kpiSection" class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div class="p-4 bg-white rounded-2xl shadow">
+        <div class="text-sm text-slate-500">Status 1 (pendentes)</div>
+        <div class="mt-2 text-2xl font-semibold" id="kpiStatus1">0%</div>
+        <div class="text-xs text-slate-400">Eventos: <span id="kpiStatus1Count">0</span></div>
+        <div class="text-xs text-slate-400 mt-1">Base: <span id="kpiBase">0</span> envios</div>
+      </div>
+      <div class="p-4 bg-white rounded-2xl shadow">
+        <div class="text-sm text-slate-500">Status 2 (entregues)</div>
+        <div class="mt-2 text-2xl font-semibold" id="kpiStatus2">0%</div>
+        <div class="text-xs text-slate-400">Eventos: <span id="kpiStatus2Count">0</span></div>
+      </div>
+      <div class="p-4 bg-white rounded-2xl shadow">
+        <div class="text-sm text-slate-500">Status 3 (lidas)</div>
+        <div class="mt-2 text-2xl font-semibold" id="kpiStatus3">0%</div>
+        <div class="text-xs text-slate-400">Eventos: <span id="kpiStatus3Count">0</span></div>
+      </div>
+      <div class="p-4 bg-white rounded-2xl shadow">
+        <div class="text-sm text-slate-500">Status 4 (reproduzidas)</div>
+        <div class="mt-2 text-2xl font-semibold" id="kpiStatus4">0%</div>
+        <div class="text-xs text-slate-400">Eventos: <span id="kpiStatus4Count">0</span></div>
+      </div>
+    </section>
+
     <section id="cards" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></section>
 
     <section class="grid md:grid-cols-3 gap-6">
@@ -549,60 +573,24 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
-  <script>
-  const els = {
-    badge: document.getElementById('badge'),
-    sessionsRoot: document.getElementById('sessionsRoot'),
-    selInstance: document.getElementById('selInstance'),
-    btnNew: document.getElementById('btnNew'),
-    cards: document.getElementById('cards'),
-    qrImg: document.getElementById('qrImg'),
-    qrHint: document.getElementById('qrHint'),
-    btnLogout: document.getElementById('btnLogout'),
-    btnWipe: document.getElementById('btnWipe'),
-    btnPair: document.getElementById('btnPair'),
-    inpApiKey: document.getElementById('inpApiKey'),
-    inpPhone: document.getElementById('inpPhone'),
-    inpMsg: document.getElementById('inpMsg'),
-    btnSend: document.getElementById('btnSend'),
-    sendOut: document.getElementById('sendOut'),
-    modalDelete: document.getElementById('modalDelete'),
-    modalInstanceName: document.getElementById('modalInstanceName'),
-    modalConfirm: document.querySelector('[data-act="modal-confirm"]'),
-    modalCancel: document.querySelector('[data-act="modal-cancel"]'),
-  };
-
-  const BADGE_STYLES = {
-    'status-connected': 'bg-emerald-100 text-emerald-800',
-    'status-disconnected': 'bg-rose-100 text-rose-800',
-    logout: 'bg-amber-100 text-amber-800',
-    wipe: 'bg-rose-200 text-rose-900',
-    delete: 'bg-rose-600 text-white',
-    update: 'bg-sky-100 text-sky-800',
-    error: 'bg-amber-100 text-amber-800',
-    info: 'bg-slate-200 text-slate-800'
-  };
-  let badgeLockUntil = 0;
-
-  function applyBadge(type, msg) {
-    const cls = BADGE_STYLES[type] || BADGE_STYLES.info;
-    els.badge.className = 'px-3 py-1 rounded-full text-sm ' + cls;
-    els.badge.textContent = msg;
-  }
-
-  function setBadgeState(type, msg, holdMs = 4000) {
-    applyBadge(type, msg);
-    badgeLockUntil = holdMs ? Date.now() + holdMs : 0;
-  }
-
-  function canUpdateBadge() {
-    return Date.now() >= badgeLockUntil;
-  }
-
-  function setStatusBadge(connected, name) {
-    if (!canUpdateBadge()) return;
-    applyBadge(connected ? 'status-connected' : 'status-disconnected', connected ? 'Conectado (' + name + ')' : 'Desconectado (' + name + ')');
-  }
+<script>
+const els = {
+  badge: document.getElementById('badge'),
+  sessionsRoot: document.getElementById('sessionsRoot'),
+  selInstance: document.getElementById('selInstance'),
+  btnNew: document.getElementById('btnNew'),
+  cards: document.getElementById('cards'),
+  qrImg: document.getElementById('qrImg'),
+  qrHint: document.getElementById('qrHint'),
+  btnLogout: document.getElementById('btnLogout'),
+  btnWipe: document.getElementById('btnWipe'),
+  btnPair: document.getElementById('btnPair'),
+  inpApiKey: document.getElementById('inpApiKey'),
+  inpPhone: document.getElementById('inpPhone'),
+  inpMsg: document.getElementById('inpMsg'),
+  btnSend: document.getElementById('btnSend'),
+  sendOut: document.getElementById('sendOut'),
+};
 
   els.inpApiKey.value = localStorage.getItem('x_api_key') || '';
 els.sessionsRoot.textContent = ${JSON.stringify(SESSIONS_ROOT)};
@@ -647,6 +635,8 @@ function initChart() {
 }
 initChart();
 
+updateKpis(null);
+
 async function fetchJSON(path, auth=true, opts={}) {
   const headers = { 'Content-Type': 'application/json' };
   if (auth) {
@@ -663,12 +653,7 @@ async function fetchJSON(path, auth=true, opts={}) {
   try { return await r.json(); } catch { return {}; }
 }
 
-  function option(v, t) { const o = document.createElement('option'); o.value=v; o.textContent=t; return o; }
-
-  const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-  function escapeHtml(val) {
-    return String(val ?? '').replace(/[&<>"']/g, ch => HTML_ESCAPES[ch] || ch);
-  }
+function option(v, t) { const o = document.createElement('option'); o.value=v; o.textContent=t; return o; }
 
   async function refreshInstances() {
     try {
@@ -687,47 +672,31 @@ async function fetchJSON(path, auth=true, opts={}) {
         els.selInstance.value = '';
       }
 
-      els.cards.innerHTML = '';
-      if (!data.length) {
-        els.cards.innerHTML = '<p class="text-sm text-slate-500">Nenhuma instância cadastrada.</p>';
-      } else {
-        data.forEach(i => {
-          const card = document.createElement('div');
-          card.className = 'p-4 bg-white rounded-2xl shadow space-y-3';
-          card.dataset.card = i.id;
-          card.dataset.iid = i.id;
-          const statusCls = i.connected ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800';
-          card.innerHTML = \`
-            <div class="flex items-start justify-between gap-3">
-              <div class="flex-1">
-                <label class="text-xs font-medium text-slate-500">Nome</label>
-                <input data-field="name" data-iid="\${i.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" value="\${escapeHtml(i.name)}" />
-              </div>
-              <span class="px-2 py-0.5 rounded text-xs \${statusCls}">
-                \${i.connected ? 'Conectado' : 'Desconectado'}
-              </span>
-            </div>
-            <div class="text-xs text-slate-500 break-all">\${escapeHtml(i.user?.id || '—')}</div>
-            <div class="text-sm">
-              <div>Enviadas: <b>\${i.counters.sent||0}</b></div>
-              <div>Status 2: <b>\${(i.counters.status||{})['2']||0}</b> • Status 3: <b>\${(i.counters.status||{})['3']||0}</b></div>
-            </div>
-            <div>
-              <label class="text-xs font-medium text-slate-500">Notas</label>
-              <textarea data-field="notes" data-iid="\${i.id}" rows="3" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm">\${escapeHtml(i.notes || '')}</textarea>
-            </div>
-            <div class="flex gap-2 flex-wrap">
-              <button data-act="qr" data-iid="\${i.id}" class="px-2 py-1 border rounded">Ver QR</button>
-              <button data-act="logout" data-iid="\${i.id}" class="px-2 py-1 border rounded">Logout</button>
-              <button data-act="wipe" data-iid="\${i.id}" class="px-2 py-1 border rounded">Wipe</button>
-              <button data-act="select" data-iid="\${i.id}" class="px-2 py-1 border rounded">Selecionar</button>
-              <button data-act="save" data-iid="\${i.id}" class="px-2 py-1 border rounded bg-sky-50">Salvar</button>
-              <button data-act="delete" data-iid="\${i.id}" class="px-2 py-1 border border-rose-500 text-rose-600 rounded">Excluir</button>
-            </div>
-          \`;
-          els.cards.appendChild(card);
-        });
-      }
+    els.cards.innerHTML = '';
+    data.forEach(i => {
+      const card = document.createElement('div');
+      card.className = 'p-4 bg-white rounded-2xl shadow';
+      card.innerHTML = \`
+        <div class="flex items-center justify-between">
+          <div class="font-semibold">\${i.name}</div>
+          <span class="px-2 py-0.5 rounded text-xs \${i.connected ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}">
+            \${i.connected ? 'Conectado' : 'Desconectado'}
+          </span>
+        </div>
+        <div class="text-sm text-slate-500 mt-1">\${i.user?.id || '—'}</div>
+        <div class="mt-3 text-sm">
+          <div>Enviadas: <b>\${i.counters.sent||0}</b></div>
+          <div>Status 2: <b>\${(i.counters.status||{})['2']||0}</b> • Status 3: <b>\${(i.counters.status||{})['3']||0}</b></div>
+        </div>
+        <div class="mt-3 flex gap-2 flex-wrap">
+          <button data-act="qr" data-iid="\${i.id}" class="px-2 py-1 border rounded">Ver QR</button>
+          <button data-act="logout" data-iid="\${i.id}" class="px-2 py-1 border rounded">Logout</button>
+          <button data-act="wipe" data-iid="\${i.id}" class="px-2 py-1 border rounded">Wipe</button>
+          <button data-act="select" data-iid="\${i.id}" class="px-2 py-1 border rounded">Selecionar</button>
+        </div>
+      \`;
+      els.cards.appendChild(card);
+    });
 
       if (els.selInstance.value) {
         await refreshSelected();
@@ -743,9 +712,13 @@ async function fetchJSON(path, auth=true, opts={}) {
 
 async function refreshSelected() {
   const iid = els.selInstance.value;
-  if (!iid) return;
+  if (!iid) {
+    updateKpis(null);
+    return;
+  }
   try {
     const m = await fetchJSON('/instances/' + iid, true);
+    updateKpis(m);
 
     const connected = !!m.connected;
     setStatusBadge(connected, m.name);
@@ -777,7 +750,9 @@ async function refreshSelected() {
       els.qrImg.classList.add('hidden');
       els.qrHint.textContent = 'Conectado — QR oculto.';
     }
-  } catch {}
+  } catch {
+    updateKpis(null);
+  }
 }
 
   function findCardByIid(iid) {
