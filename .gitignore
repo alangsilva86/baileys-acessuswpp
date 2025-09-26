@@ -1,0 +1,9 @@
+node_modules/
+agent/node_modules/
+.DS_Store
+sessions/
+.env
+logs/
+/tmp
+npm-debug.log*
+yarn-error.log*

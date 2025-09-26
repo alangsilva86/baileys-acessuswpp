@@ -66,6 +66,11 @@ const E164_BRAZIL = /^55\d{10,11}$/;
 
 const INSTANCES_INDEX = path.join(process.cwd(), 'instances.json');
 
+// Métricas avançadas
+const METRICS_TIMELINE_MAX = 288; // ~24h com amostragem de 5min
+const METRICS_TIMELINE_MIN_INTERVAL_MS = 5 * 60_000; // ignora deltas menores que 5min
+const ACK_SAMPLE_MAX_AGE_MS = 5 * 60_000;
+
 // --------------------------- Logger ---------------------------
 const logger = pino({ level: LOG_LEVEL, base: { service: SERVICE_NAME } });
 
@@ -135,7 +140,11 @@ async function saveInstancesIndex() {
     id: i.id,
     name: i.name,
     dir: i.dir,
-    notes: i.notes || ''
+    metadata: {
+      note: i.metadata?.note || i.notes || '',
+      createdAt: i.metadata?.createdAt || null,
+      updatedAt: i.metadata?.updatedAt || null,
+    },
   }));
   try { await fs.writeFile(INSTANCES_INDEX, JSON.stringify(index, null, 2)); } catch {}
 }
@@ -148,7 +157,13 @@ async function loadInstancesIndex() {
       id: item?.id,
       name: item?.name,
       dir: item?.dir,
-      notes: item?.notes || ''
+      metadata: item?.metadata && typeof item.metadata === 'object'
+        ? {
+            note: typeof item.metadata.note === 'string' ? item.metadata.note : (item?.notes || ''),
+            createdAt: item.metadata.createdAt || null,
+            updatedAt: item.metadata.updatedAt || null,
+          }
+        : { note: item?.notes || '', createdAt: null, updatedAt: null },
     })).filter(it => it.id);
   } catch {
     return [];
@@ -185,8 +200,95 @@ function waitForAck(inst, messageId, timeoutMs = 10000) {
   });
 }
 
+// ----------------------- Métricas auxiliares ----------------------
+function recordMetricsSnapshot(inst, force = false) {
+  if (!inst) return;
+  if (!inst.metrics.timeline) inst.metrics.timeline = [];
+  const now = Date.now();
+  const last = inst.metrics.timeline[inst.metrics.timeline.length - 1];
+  const failed = (inst.metrics.status_counts?.['3'] || 0) + (inst.metrics.status_counts?.['4'] || 0);
+
+  if (last && now - last.ts < METRICS_TIMELINE_MIN_INTERVAL_MS) {
+    last.sent = inst.metrics.sent;
+    last.delivered = inst.metrics.status_counts?.['2'] || 0;
+    last.failed = failed;
+    last.rateInWindow = inst.rateWindow.length;
+    if (!last.iso) last.iso = new Date(last.ts).toISOString();
+    if (!force) return;
+  }
+
+  inst.metrics.timeline.push({
+    ts: now,
+    iso: new Date(now).toISOString(),
+    sent: inst.metrics.sent,
+    delivered: inst.metrics.status_counts?.['2'] || 0,
+    failed,
+    rateInWindow: inst.rateWindow.length,
+  });
+  if (inst.metrics.timeline.length > METRICS_TIMELINE_MAX) {
+    inst.metrics.timeline.splice(0, inst.metrics.timeline.length - METRICS_TIMELINE_MAX);
+  }
+}
+
+function serializeInstance(inst) {
+  if (!inst) return null;
+  const connected = !!(inst.sock && inst.sock.user);
+  return {
+    id: inst.id,
+    name: inst.name,
+    connected,
+    user: connected ? inst.sock.user : null,
+    note: inst.metadata?.note || inst.notes || '',
+    metadata: {
+      note: inst.metadata?.note || inst.notes || '',
+      createdAt: inst.metadata?.createdAt || null,
+      updatedAt: inst.metadata?.updatedAt || null,
+    },
+    counters: {
+      sent: inst.metrics.sent,
+      byType: { ...inst.metrics.sent_by_type },
+      statusCounts: { ...inst.metrics.status_counts },
+    },
+    last: { ...inst.metrics.last },
+    rate: {
+      limit: RATE_MAX_SENDS,
+      windowMs: RATE_WINDOW_MS,
+      inWindow: inst.rateWindow.length,
+      usage: RATE_MAX_SENDS ? inst.rateWindow.length / RATE_MAX_SENDS : 0,
+    },
+    metricsStartedAt: inst.metrics.startedAt,
+  };
+}
+
+async function stopInstance(iid, { removeDir = false, logout = false } = {}) {
+  const inst = instances.get(iid);
+  if (!inst) return null;
+
+  inst.stopping = true;
+  if (inst.reconnectTimer) {
+    try { clearTimeout(inst.reconnectTimer); } catch {}
+    inst.reconnectTimer = null;
+  }
+
+  if (logout && inst.sock) {
+    try { await inst.sock.logout().catch(() => {}); } catch {}
+  }
+
+  try { inst.sock?.end?.(); } catch {}
+
+  instances.delete(iid);
+  await saveInstancesIndex();
+
+  if (removeDir) {
+    try { await fs.rm(inst.dir, { recursive: true, force: true }); }
+    catch (err) { logger.warn({ iid, err: err?.message }, 'instance.dir.remove.failed'); }
+  }
+
+  return inst;
+}
+
 // ----------------------- WhatsApp Socket (por instância) ----------------------
-async function startInstance(iid, nameOrMeta) {
+async function startInstance(iid, nameOrMeta, extraMeta = {}) {
   const dir = path.join(SESSIONS_ROOT, iid);
   await fs.mkdir(dir, { recursive: true }).catch(() => {});
 
@@ -198,33 +300,45 @@ async function startInstance(iid, nameOrMeta) {
   }
 
   const meta = (typeof nameOrMeta === 'object' && nameOrMeta !== null && !Array.isArray(nameOrMeta))
-    ? nameOrMeta
+    ? (nameOrMeta)
     : { name: nameOrMeta };
   const displayName = String(meta?.name || iid).trim() || iid;
-  const notes = meta?.notes != null ? String(meta.notes) : '';
+  // Unificar notas/metadata
+  const nowIso = new Date().toISOString();
+  const mergedMeta = {
+    note: typeof (extraMeta?.note ?? meta?.note ?? meta?.notes) === 'string' ? (extraMeta?.note ?? meta?.note ?? meta?.notes) : '',
+    createdAt: meta?.createdAt || nowIso,
+    updatedAt: nowIso,
+  };
 
   const inst = {
     id: iid,
     name: displayName,
-    notes,
     dir,
     sock: null,
     lastQR: null,
     reconnectDelay: RECONNECT_MIN_DELAY_MS,
     stopping: false,
     reconnectTimer: null,
+    metadata: mergedMeta,
     metrics: {
       startedAt: Date.now(),
       sent: 0,
       sent_by_type: { text: 0, image: 0, group: 0, buttons: 0, lists: 0 },
       status_counts: { "1": 0, "2": 0, "3": 0, "4": 0 },
-      last: { sentId: null, lastStatusId: null, lastStatusCode: null }
+      last: { sentId: null, lastStatusId: null, lastStatusCode: null },
+      ack: { totalMs: 0, count: 0, avgMs: 0, lastMs: null },
+      timeline: [],
     },
     statusMap: new Map(),
     ackWaiters: new Map(),
-    rateWindow: []
+    rateWindow: [],
+    ackSentAt: new Map(),
   };
   instances.set(iid, inst);
+
+  // primeiro snapshot
+  recordMetricsSnapshot(inst, true);
 
   const { state, saveCreds } = await useMultiFileAuthState(dir);
   const { version } = await fetchLatestBaileysVersion();
@@ -262,7 +376,7 @@ async function startInstance(iid, nameOrMeta) {
             // só reconecta se ainda estamos falando do mesmo socket
             if (inst.sock !== currentSock) return;
             inst.reconnectDelay = Math.min(inst.reconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
-            startInstance(iid, { name: inst.name, notes: inst.notes })
+            startInstance(iid, inst.name, { note: inst.metadata?.note || inst.notes || '' })
               .catch(err => logger.error({ iid, err }, 'whatsapp.reconnect.failed'));
           }, delay);
       } else if (isLoggedOut) {
@@ -324,6 +438,22 @@ async function startInstance(iid, nameOrMeta) {
         inst.metrics.status_counts[String(st)] = (inst.metrics.status_counts[String(st)] || 0) + 1;
         inst.metrics.last.lastStatusId = mid;
         inst.metrics.last.lastStatusCode = st;
+
+        // atualizar métricas de ACK
+        if (st >= 2 && inst.ackSentAt?.has(mid)) {
+          const sentAt = inst.ackSentAt.get(mid);
+          inst.ackSentAt.delete(mid);
+          if (sentAt) {
+            const delta = Math.max(0, Date.now() - sentAt);
+            inst.metrics.ack.totalMs += delta;
+            inst.metrics.ack.count += 1;
+            inst.metrics.ack.lastMs = delta;
+            inst.metrics.ack.avgMs = Math.round(inst.metrics.ack.totalMs / inst.metrics.ack.count);
+          }
+        }
+
+        // snapshot periódico
+        recordMetricsSnapshot(inst);
 
         const waiter = inst.ackWaiters.get(mid);
         if (waiter) {
@@ -915,87 +1045,75 @@ app.get('/health', (req, res) => res.json({ ok: true, service: SERVICE_NAME }));
 
 // --------------------------- Rotas de Instância ------------------------
 app.post('/instances', auth, asyncHandler(async (req, res) => {
-  const rawName = String(req.body?.name || '').trim() || null;
-  const notes = req.body?.notes != null ? String(req.body.notes) : '';
-  const iid = (rawName ? rawName.toLowerCase().replace(/[^\w]+/g, '-') : crypto.randomUUID());
+  const name = String(req.body?.name || '').trim() || null;
+  const noteRaw = typeof req.body?.note === 'string' ? req.body.note.trim() : (typeof req.body?.notes === 'string' ? req.body.notes.trim() : '');
+  const note = noteRaw ? noteRaw.slice(0, 280) : '';
+  const iid = (name ? name.toLowerCase().replace(/[^\w]+/g, '-') : crypto.randomUUID());
   if (instances.has(iid)) return res.status(409).json({ error: 'instance_exists' });
-  const inst = await startInstance(iid, { name: rawName || iid, notes });
+  const inst = await startInstance(iid, name || iid, { note });
   logger.info({ iid: inst.id, name: inst.name }, 'instance.created');
-  res.json({ id: inst.id, name: inst.name, dir: inst.dir, notes: inst.notes });
+  res.json({ id: inst.id, name: inst.name, dir: inst.dir, metadata: inst.metadata });
 }));
 
 app.get('/instances', auth, (req, res) => {
-  const list = [...instances.values()].map(i => ({
-    id: i.id,
-    name: i.name,
-    notes: i.notes || '',
-    connected: !!(i.sock && i.sock.user),
-    user: i.sock?.user || null,
-    counters: { sent: i.metrics.sent, status: i.metrics.status_counts }
-  }));
+  const list = [...instances.values()].map(inst => {
+    const s = serializeInstance(inst);
+    return {
+      id: s.id,
+      name: s.name,
+      note: s.note,
+      notes: s.note,
+      metadata: s.metadata,
+      connected: s.connected,
+      user: s.user,
+      counters: { sent: s.counters.sent, status: s.counters.statusCounts },
+      rate: s.rate,
+    };
+  });
   res.json(list);
 });
 
 app.get('/instances/:iid', auth, (req, res) => {
-  const i = instances.get(req.params.iid);
-  if (!i) return res.status(404).json({ error: 'instance_not_found' });
-  const connected = !!(i.sock && i.sock.user);
-  res.json({
-    id: i.id, name: i.name, notes: i.notes || '', connected,
-    user: connected ? i.sock.user : null,
-    counters: { sent: i.metrics.sent, byType: i.metrics.sent_by_type, statusCounts: i.metrics.status_counts }
-  });
+  const inst = instances.get(req.params.iid);
+  if (!inst) return res.status(404).json({ error: 'instance_not_found' });
+  const s = serializeInstance(inst);
+  res.json({ ...s, notes: s.note });
 });
 
 app.patch('/instances/:iid', auth, asyncHandler(async (req, res) => {
   const inst = instances.get(req.params.iid);
   if (!inst) return res.status(404).json({ error: 'instance_not_found' });
 
-  const hasName = Object.prototype.hasOwnProperty.call(req.body || {}, 'name');
-  const hasNotes = Object.prototype.hasOwnProperty.call(req.body || {}, 'notes');
-  if (!hasName && !hasNotes) return res.status(400).json({ error: 'no_fields' });
-
-  if (hasName) {
-    const next = String(req.body.name || '').trim();
-    inst.name = next || inst.id;
+  const body = req.body || {};
+  let touched = false;
+  if (Object.prototype.hasOwnProperty.call(body, 'name')) {
+    if (typeof body.name !== 'string') return res.status(400).json({ error: 'name_invalid' });
+    const nextName = body.name.trim();
+    if (!nextName) return res.status(400).json({ error: 'name_empty' });
+    inst.name = nextName.slice(0, 80);
+    touched = true;
   }
-  if (hasNotes) {
-    inst.notes = String(req.body.notes || '');
+  const patchNote = Object.prototype.hasOwnProperty.call(body, 'note') ? body.note
+                   : (Object.prototype.hasOwnProperty.call(body, 'notes') ? body.notes : undefined);
+  if (patchNote !== undefined) {
+    if (typeof patchNote !== 'string') return res.status(400).json({ error: 'note_invalid' });
+    inst.metadata = inst.metadata || {};
+    inst.metadata.note = String(patchNote).trim().slice(0, 280);
+    touched = true;
   }
-
+  if (!touched) return res.status(400).json({ error: 'no_updates' });
+  inst.metadata.updatedAt = new Date().toISOString();
   await saveInstancesIndex();
-  logger.info({ iid: inst.id, name: inst.name, notesLength: inst.notes?.length || 0 }, 'instance.metadata.updated');
-  res.json({ id: inst.id, name: inst.name, notes: inst.notes });
+  res.json(serializeInstance(inst));
 }));
 
 app.delete('/instances/:iid', auth, asyncHandler(async (req, res) => {
   const iid = req.params.iid;
-  if (iid === 'default') return res.status(400).json({ error: 'cannot_delete_default' });
+  if (iid === 'default') return res.status(400).json({ error: 'default_instance_cannot_be_deleted' });
   const inst = instances.get(iid);
   if (!inst) return res.status(404).json({ error: 'instance_not_found' });
-
-  inst.stopping = true;
-  if (inst.reconnectTimer) {
-    try { clearTimeout(inst.reconnectTimer); } catch {}
-  }
-  try { await inst.sock?.logout?.().catch(() => {}); } catch {}
-  try { inst.sock?.end?.(); } catch {}
-
-  instances.delete(iid);
-  await saveInstancesIndex();
-
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const archiveTarget = `${inst.dir}.deleted-${stamp}`;
-  let archived = null;
-  try {
-    await fs.rename(inst.dir, archiveTarget);
-    archived = archiveTarget;
-  } catch (err) {
-    try { await fs.rm(inst.dir, { recursive: true, force: true }); } catch {}
-  }
-
-  logger.warn({ iid, archived }, 'instance.deleted');
-  res.json({ ok: true, id: iid, archivedDir: archived, message: archived ? 'Instância removida e sessão arquivada.' : 'Instância removida.' });
+  await stopInstance(iid, { removeDir: true, logout: true });
+  res.json({ ok: true, message: 'Instância removida permanentemente.' });
 }));
 
 app.get('/instances/:iid/qr.png', auth, asyncHandler(async (req, res) => {
@@ -1079,27 +1197,31 @@ app.get('/instances/:iid/groups', auth, asyncHandler(async (req, res) => {
 }));
 
 app.get('/instances/:iid/metrics', auth, (req, res) => {
-  const i = instances.get(req.params.iid);
-  if (!i) return res.status(404).json({ error: 'instance_not_found' });
-  const connected = !!(i.sock && i.sock.user);
+  const inst = instances.get(req.params.iid);
+  if (!inst) return res.status(404).json({ error: 'instance_not_found' });
+
+  const summary = serializeInstance(inst);
+  const { metricsStartedAt, ...rest } = summary;
+  const timeline = (inst.metrics.timeline || []).map(entry => ({
+    ts: entry.ts,
+    iso: entry.iso || new Date(entry.ts).toISOString(),
+    sent: entry.sent,
+    delivered: entry.delivered,
+    failed: entry.failed,
+    rateInWindow: entry.rateInWindow,
+  }));
+
   res.json({
     service: SERVICE_NAME,
-    instance: { id: i.id, name: i.name },
-    connected,
-    user: connected ? i.sock.user : null,
-    startedAt: i.metrics.startedAt,
-    counters: {
-      sent: i.metrics.sent,
-      byType: i.metrics.sent_by_type,
-      statusCounts: i.metrics.status_counts
+    ...rest,
+    startedAt: metricsStartedAt,
+    timeline,
+    ack: {
+      avgMs: inst.metrics.ack?.avgMs || 0,
+      lastMs: inst.metrics.ack?.lastMs || null,
+      samples: inst.metrics.ack?.count || 0,
     },
-    last: i.metrics.last,
-    rate: {
-      limit: RATE_MAX_SENDS,
-      windowMs: RATE_WINDOW_MS,
-      inWindow: i.rateWindow.length
-    },
-    sessionDir: i.dir
+    sessionDir: inst.dir,
   });
 });
 
@@ -1132,7 +1254,15 @@ app.post('/instances/:iid/send-text', auth, asyncHandler(async (req, res) => {
   const result = await sendWithTimeout(i, jid, { text: String(message) });
   const id = result?.key?.id || null;
 
-  i.metrics.sent++; i.metrics.sent_by_type.text++; i.metrics.last.sentId = id;
+  if (id) {
+    i.metrics.last.sentId = id;
+    i.ackSentAt.set(id, Date.now());
+    setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+  }
+
+  i.metrics.sent++;
+  i.metrics.sent_by_type.text++;
+  recordMetricsSnapshot(i, true);
 
   let status = null;
   const ms = Number(waitAckMs || 0);
@@ -1160,7 +1290,15 @@ app.post('/instances/:iid/send-image', auth, asyncHandler(async (req, res) => {
   const result = await sendWithTimeout(i, jid, { image: { url: String(url) }, caption: caption ? String(caption) : undefined });
   const id = result?.key?.id || null;
 
-  i.metrics.sent++; i.metrics.sent_by_type.image++; i.metrics.last.sentId = id;
+  if (id) {
+    i.metrics.last.sentId = id;
+    i.ackSentAt.set(id, Date.now());
+    setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+  }
+
+  i.metrics.sent++;
+  i.metrics.sent_by_type.image++;
+  recordMetricsSnapshot(i, true);
 
   let status = null;
   const ms = Number(waitAckMs || 0);
@@ -1180,7 +1318,15 @@ app.post('/instances/:iid/send-group', auth, asyncHandler(async (req, res) => {
   const result = await sendWithTimeout(i, String(groupId), { text: String(message) });
   const id = result?.key?.id || null;
 
-  i.metrics.sent++; i.metrics.sent_by_type.group++; i.metrics.last.sentId = id;
+  if (id) {
+    i.metrics.last.sentId = id;
+    i.ackSentAt.set(id, Date.now());
+    setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+  }
+
+  i.metrics.sent++;
+  i.metrics.sent_by_type.group++;
+  recordMetricsSnapshot(i, true);
 
   let status = null;
   const ms = Number(waitAckMs || 0);
@@ -1200,7 +1346,14 @@ app.post('/instances/:iid/send-me', auth, asyncHandler(async (req, res) => {
   const result = await sendWithTimeout(i, i.sock.user.id, { text: String(message) });
   const id = result?.key?.id || null;
 
-  i.metrics.sent++; i.metrics.last.sentId = id;
+  if (id) {
+    i.metrics.last.sentId = id;
+    i.ackSentAt.set(id, Date.now());
+    setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+  }
+
+  i.metrics.sent++;
+  recordMetricsSnapshot(i, true);
 
   let status = null;
   const ms = Number(waitAckMs || 0);
@@ -1255,9 +1408,15 @@ app.post('/instances/:iid/send-list', auth, asyncHandler(async (req, res) => {
     result = await sendWithTimeout(i, jid, payload);
     id = result?.key?.id || null;
 
+    if (id) {
+      i.metrics.last.sentId = id;
+      i.ackSentAt.set(id, Date.now());
+      setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+    }
+
     i.metrics.sent++;
     i.metrics.sent_by_type.lists++;
-    i.metrics.last.sentId = id;
+    recordMetricsSnapshot(i, true);
 
     const ms = Number(waitAckMs || 0);
     if (id && ms > 0) status = await waitForAck(i, id, Math.min(ms, 20000));
@@ -1281,7 +1440,12 @@ app.post('/instances/:iid/send-list', auth, asyncHandler(async (req, res) => {
 
       i.metrics.sent++;
       i.metrics.sent_by_type.text++;
-      i.metrics.last.sentId = id;
+      if (id) {
+        i.metrics.last.sentId = id;
+        i.ackSentAt.set(id, Date.now());
+        setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+      }
+      recordMetricsSnapshot(i, true);
 
       return res.json({ ok: true, id, to: jid, status: null, fallback: true, error: String(err?.message || err) });
     } catch (err2) {
@@ -1329,9 +1493,14 @@ app.post('/instances/:iid/send-buttons', auth, asyncHandler(async (req, res) => 
     const result = await sendWithTimeout(i, jid, { text: String(text), templateButtons: cleaned });
     id = result?.key?.id || null;
 
+    if (id) {
+      i.metrics.last.sentId = id;
+      i.ackSentAt.set(id, Date.now());
+      setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+    }
     i.metrics.sent++;
     i.metrics.sent_by_type.buttons++;
-    i.metrics.last.sentId = id;
+    recordMetricsSnapshot(i, true);
 
     const ms = Number(waitAckMs || 0);
     if (id && ms > 0) status = await waitForAck(i, id, Math.min(ms, 20000));
@@ -1353,7 +1522,12 @@ app.post('/instances/:iid/send-buttons', auth, asyncHandler(async (req, res) => 
 
       i.metrics.sent++;
       i.metrics.sent_by_type.text++;
-      i.metrics.last.sentId = id;
+      if (id) {
+        i.metrics.last.sentId = id;
+        i.ackSentAt.set(id, Date.now());
+        setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+      }
+      recordMetricsSnapshot(i, true);
 
       const ms = Number(waitAckMs || 0);
       if (id && ms > 0) status = await waitForAck(i, id, Math.min(ms, 20000));
@@ -1638,18 +1812,18 @@ let server;
 (async () => {
   await fs.mkdir(SESSIONS_ROOT, { recursive: true }).catch(() => {});
   const index = await loadInstancesIndex();
-    if (!index.length) {
-      await startInstance('default', { name: 'default', notes: '' });
-    } else {
-      for (const it of index) {
-        // se diretório mudou/env var, ainda assim tenta montar por id
-        await startInstance(it.id, { name: it.name, notes: it.notes });
-      }
-      if (!instances.has('default')) {
-        // garante uma default para retrocompat
-        await startInstance('default', { name: 'default', notes: '' });
-      }
+  if (!index.length) {
+    await startInstance('default', 'default', { note: '' });
+  } else {
+    for (const it of index) {
+      // se diretório mudou/env var, ainda assim tenta montar por id
+      await startInstance(it.id, it.name, it.metadata || { note: '' });
     }
+    if (!instances.has('default')) {
+      // garante uma default para retrocompat
+      await startInstance('default', 'default', { note: '' });
+    }
+  }
   server = app.listen(PORT, () => logger.info({ port: PORT }, 'http.started'));
 })().catch(err => {
   logger.error({ err }, 'boot.failed');
