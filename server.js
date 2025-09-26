@@ -346,6 +346,30 @@ app.get('/', (req, res) => {
       </div>
     </section>
 
+    <section id="kpiSection" class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div class="p-4 bg-white rounded-2xl shadow">
+        <div class="text-sm text-slate-500">Status 1 (pendentes)</div>
+        <div class="mt-2 text-2xl font-semibold" id="kpiStatus1">0%</div>
+        <div class="text-xs text-slate-400">Eventos: <span id="kpiStatus1Count">0</span></div>
+        <div class="text-xs text-slate-400 mt-1">Base: <span id="kpiBase">0</span> envios</div>
+      </div>
+      <div class="p-4 bg-white rounded-2xl shadow">
+        <div class="text-sm text-slate-500">Status 2 (entregues)</div>
+        <div class="mt-2 text-2xl font-semibold" id="kpiStatus2">0%</div>
+        <div class="text-xs text-slate-400">Eventos: <span id="kpiStatus2Count">0</span></div>
+      </div>
+      <div class="p-4 bg-white rounded-2xl shadow">
+        <div class="text-sm text-slate-500">Status 3 (lidas)</div>
+        <div class="mt-2 text-2xl font-semibold" id="kpiStatus3">0%</div>
+        <div class="text-xs text-slate-400">Eventos: <span id="kpiStatus3Count">0</span></div>
+      </div>
+      <div class="p-4 bg-white rounded-2xl shadow">
+        <div class="text-sm text-slate-500">Status 4 (reproduzidas)</div>
+        <div class="mt-2 text-2xl font-semibold" id="kpiStatus4">0%</div>
+        <div class="text-xs text-slate-400">Eventos: <span id="kpiStatus4Count">0</span></div>
+      </div>
+    </section>
+
     <section id="cards" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></section>
 
     <section class="grid md:grid-cols-3 gap-6">
@@ -393,6 +417,15 @@ const els = {
   selInstance: document.getElementById('selInstance'),
   btnNew: document.getElementById('btnNew'),
   cards: document.getElementById('cards'),
+  kpiStatus1: document.getElementById('kpiStatus1'),
+  kpiStatus1Count: document.getElementById('kpiStatus1Count'),
+  kpiStatus2: document.getElementById('kpiStatus2'),
+  kpiStatus2Count: document.getElementById('kpiStatus2Count'),
+  kpiStatus3: document.getElementById('kpiStatus3'),
+  kpiStatus3Count: document.getElementById('kpiStatus3Count'),
+  kpiStatus4: document.getElementById('kpiStatus4'),
+  kpiStatus4Count: document.getElementById('kpiStatus4Count'),
+  kpiBase: document.getElementById('kpiBase'),
   qrImg: document.getElementById('qrImg'),
   qrHint: document.getElementById('qrHint'),
   btnLogout: document.getElementById('btnLogout'),
@@ -448,6 +481,8 @@ function initChart() {
 }
 initChart();
 
+updateKpis(null);
+
 async function fetchJSON(path, auth=true, opts={}) {
   const headers = { 'Content-Type': 'application/json' };
   if (auth) {
@@ -466,6 +501,52 @@ async function fetchJSON(path, auth=true, opts={}) {
 
 function option(v, t) { const o = document.createElement('option'); o.value=v; o.textContent=t; return o; }
 
+// --- Helpers ---
+function percent(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '0%';
+  const clamped = Math.min(Math.max(num, 0), 1);
+  return Math.round(clamped * 100) + '%';
+}
+
+function rateBase(sent, statusCounts) {
+  const numericSent = Number(sent) || 0;
+  const counts = statusCounts || {};
+  const sum = Object.values(counts).reduce((acc, val) => acc + (Number(val) || 0), 0);
+  const base = numericSent > 0 ? numericSent : sum > 0 ? sum : 1;
+  return { base, sent: numericSent, sum };
+}
+
+function updateKpis(instance) {
+  const statusTargets = [
+    ['1', els.kpiStatus1, els.kpiStatus1Count],
+    ['2', els.kpiStatus2, els.kpiStatus2Count],
+    ['3', els.kpiStatus3, els.kpiStatus3Count],
+    ['4', els.kpiStatus4, els.kpiStatus4Count],
+  ];
+
+  if (!instance) {
+    statusTargets.forEach(([, valueEl, countEl]) => {
+      if (valueEl) valueEl.textContent = '0%';
+      if (countEl) countEl.textContent = '0';
+    });
+    if (els.kpiBase) els.kpiBase.textContent = '0';
+    return;
+  }
+
+  const counters = instance.counters || {};
+  const statusCounts = counters.statusCounts || {};
+  const { base, sent, sum } = rateBase(counters.sent, statusCounts);
+  const baseDisplay = sent > 0 ? sent : (sum > 0 ? sum : 0);
+  if (els.kpiBase) els.kpiBase.textContent = String(baseDisplay);
+
+  statusTargets.forEach(([key, valueEl, countEl]) => {
+    const count = Number(statusCounts?.[key] || 0);
+    if (valueEl) valueEl.textContent = percent(count / base);
+    if (countEl) countEl.textContent = String(count);
+  });
+}
+
 async function refreshInstances() {
   try {
     const data = await fetchJSON('/instances', true);
@@ -479,6 +560,12 @@ async function refreshInstances() {
     data.forEach(i => {
       const card = document.createElement('div');
       card.className = 'p-4 bg-white rounded-2xl shadow';
+      const statusCounts = i.counters.status || {};
+      const { base } = rateBase(i.counters.sent, statusCounts);
+      const status2Count = Number(statusCounts['2'] || 0);
+      const status3Count = Number(statusCounts['3'] || 0);
+      const status2Rate = percent(status2Count / base);
+      const status3Rate = percent(status3Count / base);
       card.innerHTML = \`
         <div class="flex items-center justify-between">
           <div class="font-semibold">\${i.name}</div>
@@ -489,7 +576,7 @@ async function refreshInstances() {
         <div class="text-sm text-slate-500 mt-1">\${i.user?.id || '—'}</div>
         <div class="mt-3 text-sm">
           <div>Enviadas: <b>\${i.counters.sent||0}</b></div>
-          <div>Status 2: <b>\${(i.counters.status||{})['2']||0}</b> • Status 3: <b>\${(i.counters.status||{})['3']||0}</b></div>
+          <div>Status 2: <b>\${status2Rate}</b> (\${status2Count}) • Status 3: <b>\${status3Rate}</b> (\${status3Count})</div>
         </div>
         <div class="mt-3 flex gap-2 flex-wrap">
           <button data-act="qr" data-iid="\${i.id}" class="px-2 py-1 border rounded">Ver QR</button>
@@ -513,9 +600,13 @@ async function refreshInstances() {
 
 async function refreshSelected() {
   const iid = els.selInstance.value;
-  if (!iid) return;
+  if (!iid) {
+    updateKpis(null);
+    return;
+  }
   try {
     const m = await fetchJSON('/instances/' + iid, true);
+    updateKpis(m);
 
     const connected = !!m.connected;
     els.badge.textContent = connected ? 'Conectado ('+m.name+')' : 'Desconectado ('+m.name+')';
@@ -548,7 +639,9 @@ async function refreshSelected() {
       els.qrImg.classList.add('hidden');
       els.qrHint.textContent = 'Conectado — QR oculto.';
     }
-  } catch {}
+  } catch {
+    updateKpis(null);
+  }
 }
 
 document.addEventListener('click', async (ev) => {
