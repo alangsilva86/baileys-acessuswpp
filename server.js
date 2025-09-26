@@ -66,6 +66,11 @@ const E164_BRAZIL = /^55\d{10,11}$/;
 
 const INSTANCES_INDEX = path.join(process.cwd(), 'instances.json');
 
+// Métricas avançadas
+const METRICS_TIMELINE_MAX = 288; // ~24h com amostragem de 5min
+const METRICS_TIMELINE_MIN_INTERVAL_MS = 5 * 60_000; // ignora deltas menores que 5min
+const ACK_SAMPLE_MAX_AGE_MS = 5 * 60_000;
+
 // --------------------------- Logger ---------------------------
 const logger = pino({ level: LOG_LEVEL, base: { service: SERVICE_NAME } });
 
@@ -131,13 +136,35 @@ function buildSignature(payload, secret) {
 const instances = new Map();
 
 async function saveInstancesIndex() {
-  const index = [...instances.values()].map(i => ({ id: i.id, name: i.name, dir: i.dir }));
+  const index = [...instances.values()].map(i => ({
+    id: i.id,
+    name: i.name,
+    dir: i.dir,
+    metadata: {
+      note: i.metadata?.note || i.notes || '',
+      createdAt: i.metadata?.createdAt || null,
+      updatedAt: i.metadata?.updatedAt || null,
+    },
+  }));
   try { await fs.writeFile(INSTANCES_INDEX, JSON.stringify(index, null, 2)); } catch {}
 }
 async function loadInstancesIndex() {
   try {
     const raw = await fs.readFile(INSTANCES_INDEX, 'utf8');
-    return JSON.parse(raw);
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return [];
+    return list.map(item => ({
+      id: item?.id,
+      name: item?.name,
+      dir: item?.dir,
+      metadata: item?.metadata && typeof item.metadata === 'object'
+        ? {
+            note: typeof item.metadata.note === 'string' ? item.metadata.note : (item?.notes || ''),
+            createdAt: item.metadata.createdAt || null,
+            updatedAt: item.metadata.updatedAt || null,
+          }
+        : { note: item?.notes || '', createdAt: null, updatedAt: null },
+    })).filter(it => it.id);
   } catch {
     return [];
   }
@@ -173,8 +200,95 @@ function waitForAck(inst, messageId, timeoutMs = 10000) {
   });
 }
 
+// ----------------------- Métricas auxiliares ----------------------
+function recordMetricsSnapshot(inst, force = false) {
+  if (!inst) return;
+  if (!inst.metrics.timeline) inst.metrics.timeline = [];
+  const now = Date.now();
+  const last = inst.metrics.timeline[inst.metrics.timeline.length - 1];
+  const failed = (inst.metrics.status_counts?.['3'] || 0) + (inst.metrics.status_counts?.['4'] || 0);
+
+  if (last && now - last.ts < METRICS_TIMELINE_MIN_INTERVAL_MS) {
+    last.sent = inst.metrics.sent;
+    last.delivered = inst.metrics.status_counts?.['2'] || 0;
+    last.failed = failed;
+    last.rateInWindow = inst.rateWindow.length;
+    if (!last.iso) last.iso = new Date(last.ts).toISOString();
+    if (!force) return;
+  }
+
+  inst.metrics.timeline.push({
+    ts: now,
+    iso: new Date(now).toISOString(),
+    sent: inst.metrics.sent,
+    delivered: inst.metrics.status_counts?.['2'] || 0,
+    failed,
+    rateInWindow: inst.rateWindow.length,
+  });
+  if (inst.metrics.timeline.length > METRICS_TIMELINE_MAX) {
+    inst.metrics.timeline.splice(0, inst.metrics.timeline.length - METRICS_TIMELINE_MAX);
+  }
+}
+
+function serializeInstance(inst) {
+  if (!inst) return null;
+  const connected = !!(inst.sock && inst.sock.user);
+  return {
+    id: inst.id,
+    name: inst.name,
+    connected,
+    user: connected ? inst.sock.user : null,
+    note: inst.metadata?.note || inst.notes || '',
+    metadata: {
+      note: inst.metadata?.note || inst.notes || '',
+      createdAt: inst.metadata?.createdAt || null,
+      updatedAt: inst.metadata?.updatedAt || null,
+    },
+    counters: {
+      sent: inst.metrics.sent,
+      byType: { ...inst.metrics.sent_by_type },
+      statusCounts: { ...inst.metrics.status_counts },
+    },
+    last: { ...inst.metrics.last },
+    rate: {
+      limit: RATE_MAX_SENDS,
+      windowMs: RATE_WINDOW_MS,
+      inWindow: inst.rateWindow.length,
+      usage: RATE_MAX_SENDS ? inst.rateWindow.length / RATE_MAX_SENDS : 0,
+    },
+    metricsStartedAt: inst.metrics.startedAt,
+  };
+}
+
+async function stopInstance(iid, { removeDir = false, logout = false } = {}) {
+  const inst = instances.get(iid);
+  if (!inst) return null;
+
+  inst.stopping = true;
+  if (inst.reconnectTimer) {
+    try { clearTimeout(inst.reconnectTimer); } catch {}
+    inst.reconnectTimer = null;
+  }
+
+  if (logout && inst.sock) {
+    try { await inst.sock.logout().catch(() => {}); } catch {}
+  }
+
+  try { inst.sock?.end?.(); } catch {}
+
+  instances.delete(iid);
+  await saveInstancesIndex();
+
+  if (removeDir) {
+    try { await fs.rm(inst.dir, { recursive: true, force: true }); }
+    catch (err) { logger.warn({ iid, err: err?.message }, 'instance.dir.remove.failed'); }
+  }
+
+  return inst;
+}
+
 // ----------------------- WhatsApp Socket (por instância) ----------------------
-async function startInstance(iid, name) {
+async function startInstance(iid, nameOrMeta, extraMeta = {}) {
   const dir = path.join(SESSIONS_ROOT, iid);
   await fs.mkdir(dir, { recursive: true }).catch(() => {});
 
@@ -185,27 +299,46 @@ async function startInstance(iid, name) {
     if (existing.reconnectTimer) { try { clearTimeout(existing.reconnectTimer); } catch {} }
   }
 
+  const meta = (typeof nameOrMeta === 'object' && nameOrMeta !== null && !Array.isArray(nameOrMeta))
+    ? (nameOrMeta)
+    : { name: nameOrMeta };
+  const displayName = String(meta?.name || iid).trim() || iid;
+  // Unificar notas/metadata
+  const nowIso = new Date().toISOString();
+  const mergedMeta = {
+    note: typeof (extraMeta?.note ?? meta?.note ?? meta?.notes) === 'string' ? (extraMeta?.note ?? meta?.note ?? meta?.notes) : '',
+    createdAt: meta?.createdAt || nowIso,
+    updatedAt: nowIso,
+  };
+
   const inst = {
     id: iid,
-    name: name || iid,
+    name: displayName,
     dir,
     sock: null,
     lastQR: null,
     reconnectDelay: RECONNECT_MIN_DELAY_MS,
     stopping: false,
     reconnectTimer: null,
+    metadata: mergedMeta,
     metrics: {
       startedAt: Date.now(),
       sent: 0,
       sent_by_type: { text: 0, image: 0, group: 0, buttons: 0, lists: 0 },
       status_counts: { "1": 0, "2": 0, "3": 0, "4": 0 },
-      last: { sentId: null, lastStatusId: null, lastStatusCode: null }
+      last: { sentId: null, lastStatusId: null, lastStatusCode: null },
+      ack: { totalMs: 0, count: 0, avgMs: 0, lastMs: null },
+      timeline: [],
     },
     statusMap: new Map(),
     ackWaiters: new Map(),
-    rateWindow: []
+    rateWindow: [],
+    ackSentAt: new Map(),
   };
   instances.set(iid, inst);
+
+  // primeiro snapshot
+  recordMetricsSnapshot(inst, true);
 
   const { state, saveCreds } = await useMultiFileAuthState(dir);
   const { version } = await fetchLatestBaileysVersion();
@@ -239,12 +372,13 @@ async function startInstance(iid, name) {
         // evita múltiplos agendamentos de reconexão concorrentes
         if (inst.reconnectTimer) clearTimeout(inst.reconnectTimer);
         const currentSock = sock;
-        inst.reconnectTimer = setTimeout(() => {
-          // só reconecta se ainda estamos falando do mesmo socket
-          if (inst.sock !== currentSock) return;
-          inst.reconnectDelay = Math.min(inst.reconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
-          startInstance(iid, inst.name).catch(err => logger.error({ iid, err }, 'whatsapp.reconnect.failed'));
-        }, delay);
+          inst.reconnectTimer = setTimeout(() => {
+            // só reconecta se ainda estamos falando do mesmo socket
+            if (inst.sock !== currentSock) return;
+            inst.reconnectDelay = Math.min(inst.reconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
+            startInstance(iid, inst.name, { note: inst.metadata?.note || inst.notes || '' })
+              .catch(err => logger.error({ iid, err }, 'whatsapp.reconnect.failed'));
+          }, delay);
       } else if (isLoggedOut) {
         logger.error({ iid }, 'session.loggedOut');
       }
@@ -305,6 +439,22 @@ async function startInstance(iid, name) {
         inst.metrics.last.lastStatusId = mid;
         inst.metrics.last.lastStatusCode = st;
 
+        // atualizar métricas de ACK
+        if (st >= 2 && inst.ackSentAt?.has(mid)) {
+          const sentAt = inst.ackSentAt.get(mid);
+          inst.ackSentAt.delete(mid);
+          if (sentAt) {
+            const delta = Math.max(0, Date.now() - sentAt);
+            inst.metrics.ack.totalMs += delta;
+            inst.metrics.ack.count += 1;
+            inst.metrics.ack.lastMs = delta;
+            inst.metrics.ack.avgMs = Math.round(inst.metrics.ack.totalMs / inst.metrics.ack.count);
+          }
+        }
+
+        // snapshot periódico
+        recordMetricsSnapshot(inst);
+
         const waiter = inst.ackWaiters.get(mid);
         if (waiter) {
           clearTimeout(waiter.timer);
@@ -332,11 +482,11 @@ app.get('/', (req, res) => {
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body class="bg-slate-50 text-slate-800">
-  <div class="max-w-6xl mx-auto p-6 space-y-6">
-    <header class="flex items-center justify-between">
-      <h1 class="text-2xl font-bold">Baileys API — Dashboard</h1>
-      <span id="badge" class="px-3 py-1 rounded-full text-sm bg-slate-200">—</span>
-    </header>
+    <div class="max-w-6xl mx-auto p-6 space-y-6">
+      <header class="flex items-center justify-between">
+        <h1 class="text-2xl font-bold">Baileys API — Dashboard</h1>
+        <span id="badge" class="px-3 py-1 rounded-full text-sm bg-slate-200">—</span>
+      </header>
 
     <section class="p-4 bg-white rounded-2xl shadow">
       <div class="flex items-center gap-3 flex-wrap">
@@ -410,6 +560,19 @@ app.get('/', (req, res) => {
     <footer class="text-xs text-slate-400 pt-4">© ${SERVICE_NAME}</footer>
   </div>
 
+    <div id="modalDelete" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm items-center justify-center z-50">
+      <div class="bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 p-6 space-y-4">
+        <div>
+          <h3 class="text-lg font-semibold">Confirmar exclusão</h3>
+          <p class="text-sm text-slate-500 mt-1">Deseja excluir a instância <span id="modalInstanceName" class="font-medium text-slate-900"></span>? A sessão será arquivada.</p>
+        </div>
+        <div class="flex justify-end gap-2">
+          <button data-act="modal-cancel" class="px-3 py-2 border rounded-lg">Cancelar</button>
+          <button data-act="modal-confirm" class="px-3 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg">Excluir</button>
+        </div>
+      </div>
+    </div>
+
 <script>
 const els = {
   badge: document.getElementById('badge'),
@@ -417,15 +580,6 @@ const els = {
   selInstance: document.getElementById('selInstance'),
   btnNew: document.getElementById('btnNew'),
   cards: document.getElementById('cards'),
-  kpiStatus1: document.getElementById('kpiStatus1'),
-  kpiStatus1Count: document.getElementById('kpiStatus1Count'),
-  kpiStatus2: document.getElementById('kpiStatus2'),
-  kpiStatus2Count: document.getElementById('kpiStatus2Count'),
-  kpiStatus3: document.getElementById('kpiStatus3'),
-  kpiStatus3Count: document.getElementById('kpiStatus3Count'),
-  kpiStatus4: document.getElementById('kpiStatus4'),
-  kpiStatus4Count: document.getElementById('kpiStatus4Count'),
-  kpiBase: document.getElementById('kpiBase'),
   qrImg: document.getElementById('qrImg'),
   qrHint: document.getElementById('qrHint'),
   btnLogout: document.getElementById('btnLogout'),
@@ -438,16 +592,16 @@ const els = {
   sendOut: document.getElementById('sendOut'),
 };
 
-els.inpApiKey.value = localStorage.getItem('x_api_key') || '';
+  els.inpApiKey.value = localStorage.getItem('x_api_key') || '';
 els.sessionsRoot.textContent = ${JSON.stringify(SESSIONS_ROOT)};
 els.inpApiKey.addEventListener('input', () => {
   localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
 });
 
-function showError(msg) {
-  els.badge.textContent = msg;
-  els.badge.className = 'px-3 py-1 rounded-full text-sm bg-amber-100 text-amber-800';
-}
+  function showError(msg) {
+    console.error('[dashboard] erro:', msg);
+    setBadgeState('error', msg, 5000);
+  }
 function requireKey() {
   const k = els.inpApiKey.value.trim();
   if (!k) {
@@ -501,71 +655,27 @@ async function fetchJSON(path, auth=true, opts={}) {
 
 function option(v, t) { const o = document.createElement('option'); o.value=v; o.textContent=t; return o; }
 
-// --- Helpers ---
-function percent(value) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return '0%';
-  const clamped = Math.min(Math.max(num, 0), 1);
-  return Math.round(clamped * 100) + '%';
-}
+  async function refreshInstances() {
+    try {
+      const data = await fetchJSON('/instances', true);
+      const prev = els.selInstance.value;
+      els.selInstance.textContent = '';
+      data.forEach(i => {
+        els.selInstance.appendChild(option(i.id, i.name + (i.connected ? ' (on)' : ' (off)')));
+      });
 
-function rateBase(sent, statusCounts) {
-  const numericSent = Number(sent) || 0;
-  const counts = statusCounts || {};
-  const sum = Object.values(counts).reduce((acc, val) => acc + (Number(val) || 0), 0);
-  const base = numericSent > 0 ? numericSent : sum > 0 ? sum : 1;
-  return { base, sent: numericSent, sum };
-}
-
-function updateKpis(instance) {
-  const statusTargets = [
-    ['1', els.kpiStatus1, els.kpiStatus1Count],
-    ['2', els.kpiStatus2, els.kpiStatus2Count],
-    ['3', els.kpiStatus3, els.kpiStatus3Count],
-    ['4', els.kpiStatus4, els.kpiStatus4Count],
-  ];
-
-  if (!instance) {
-    statusTargets.forEach(([, valueEl, countEl]) => {
-      if (valueEl) valueEl.textContent = '0%';
-      if (countEl) countEl.textContent = '0';
-    });
-    if (els.kpiBase) els.kpiBase.textContent = '0';
-    return;
-  }
-
-  const counters = instance.counters || {};
-  const statusCounts = counters.statusCounts || {};
-  const { base, sent, sum } = rateBase(counters.sent, statusCounts);
-  const baseDisplay = sent > 0 ? sent : (sum > 0 ? sum : 0);
-  if (els.kpiBase) els.kpiBase.textContent = String(baseDisplay);
-
-  statusTargets.forEach(([key, valueEl, countEl]) => {
-    const count = Number(statusCounts?.[key] || 0);
-    if (valueEl) valueEl.textContent = percent(count / base);
-    if (countEl) countEl.textContent = String(count);
-  });
-}
-
-async function refreshInstances() {
-  try {
-    const data = await fetchJSON('/instances', true);
-    els.selInstance.textContent = '';
-    data.forEach(i => {
-      els.selInstance.appendChild(option(i.id, i.name + (i.connected ? ' (on)' : ' (off)')));
-    });
-    if (!els.selInstance.value && data[0]) els.selInstance.value = data[0].id;
+      if (prev && data.some(i => i.id === prev)) {
+        els.selInstance.value = prev;
+      } else if (data[0]) {
+        els.selInstance.value = data[0].id;
+      } else {
+        els.selInstance.value = '';
+      }
 
     els.cards.innerHTML = '';
     data.forEach(i => {
       const card = document.createElement('div');
       card.className = 'p-4 bg-white rounded-2xl shadow';
-      const statusCounts = i.counters.status || {};
-      const { base } = rateBase(i.counters.sent, statusCounts);
-      const status2Count = Number(statusCounts['2'] || 0);
-      const status3Count = Number(statusCounts['3'] || 0);
-      const status2Rate = percent(status2Count / base);
-      const status3Rate = percent(status3Count / base);
       card.innerHTML = \`
         <div class="flex items-center justify-between">
           <div class="font-semibold">\${i.name}</div>
@@ -576,7 +686,7 @@ async function refreshInstances() {
         <div class="text-sm text-slate-500 mt-1">\${i.user?.id || '—'}</div>
         <div class="mt-3 text-sm">
           <div>Enviadas: <b>\${i.counters.sent||0}</b></div>
-          <div>Status 2: <b>\${status2Rate}</b> (\${status2Count}) • Status 3: <b>\${status3Rate}</b> (\${status3Count})</div>
+          <div>Status 2: <b>\${(i.counters.status||{})['2']||0}</b> • Status 3: <b>\${(i.counters.status||{})['3']||0}</b></div>
         </div>
         <div class="mt-3 flex gap-2 flex-wrap">
           <button data-act="qr" data-iid="\${i.id}" class="px-2 py-1 border rounded">Ver QR</button>
@@ -588,15 +698,17 @@ async function refreshInstances() {
       els.cards.appendChild(card);
     });
 
-    await refreshSelected();
+      if (els.selInstance.value) {
+        await refreshSelected();
+      }
 
-  } catch (e) {
-    const msg = String(e?.message||'');
-    if (msg.includes('HTTP 401')) showError('API key inválida');
-    else if (msg.includes('HTTP 502')) showError('Serviço reiniciando/indisponível (502)');
-    else showError('Erro ao listar instâncias');
+    } catch (e) {
+      const msg = String(e?.message||'');
+      if (msg.includes('HTTP 401')) showError('API key inválida');
+      else if (msg.includes('HTTP 502')) showError('Serviço reiniciando/indisponível (502)');
+      else showError('Erro ao listar instâncias');
+    }
   }
-}
 
 async function refreshSelected() {
   const iid = els.selInstance.value;
@@ -609,8 +721,7 @@ async function refreshSelected() {
     updateKpis(m);
 
     const connected = !!m.connected;
-    els.badge.textContent = connected ? 'Conectado ('+m.name+')' : 'Desconectado ('+m.name+')';
-    els.badge.className = 'px-3 py-1 rounded-full text-sm ' + (connected ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800');
+    setStatusBadge(connected, m.name);
 
     chart.data.datasets[0].data = [
       m.counters.sent || 0,
@@ -644,62 +755,231 @@ async function refreshSelected() {
   }
 }
 
-document.addEventListener('click', async (ev) => {
-  const t = ev.target;
-  if (!t.dataset?.act) return;
-  const iid = t.dataset.iid;
-  if (!iid) return;
-  let key;
-  try { key = requireKey(); } catch { return; }
+  function findCardByIid(iid) {
+    return Array.from(els.cards.querySelectorAll('[data-card]')).find(el => el.dataset.card === iid) || null;
+  }
 
-  if (t.dataset.act === 'qr') {
-    els.selInstance.value = iid;
-    await refreshSelected();
+  function getInstanceDisplayName(iid) {
+    const card = findCardByIid(iid);
+    const value = card?.querySelector('[data-field="name"]')?.value?.trim();
+    if (value) return value;
+    const opt = Array.from(els.selInstance.options).find(o => o.value === iid);
+    if (opt) {
+      const label = (opt.textContent || '').replace(/\s+\((on|off)\)$/i, '').trim();
+      if (label) return label;
+    }
+    return iid;
   }
-  if (t.dataset.act === 'logout') {
-    const r = await fetch('/instances/'+iid+'/logout', { method:'POST', headers: { 'x-api-key': key }});
-    if (!r.ok) alert('Falha no logout: HTTP '+r.status);
-    await refreshInstances();
-  }
-  if (t.dataset.act === 'wipe') {
-    const r = await fetch('/instances/'+iid+'/session/wipe', { method:'POST', headers: { 'x-api-key': key }});
-    if (!r.ok) alert('Falha ao limpar sessão: HTTP '+r.status);
-  }
-  if (t.dataset.act === 'select') {
-    els.selInstance.value = iid;
-    await refreshSelected();
-  }
-});
 
-els.btnNew.onclick = async () => {
-  const name = prompt('Nome da nova instância (ex: suporte-goiania)');
-  if (!name) return;
-  localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
-  await fetchJSON('/instances', true, { method:'POST', body: JSON.stringify({ name }) });
-  await refreshInstances();
-};
+  function openDeleteModal(iid, name) {
+    els.modalDelete.dataset.iid = iid;
+    els.modalDelete.dataset.name = name;
+    els.modalInstanceName.textContent = name;
+    els.modalDelete.classList.remove('hidden');
+    els.modalDelete.classList.add('flex');
+  }
+
+  function closeDeleteModal() {
+    delete els.modalDelete.dataset.iid;
+    delete els.modalDelete.dataset.name;
+    els.modalDelete.classList.add('hidden');
+    els.modalDelete.classList.remove('flex');
+  }
+
+  async function performInstanceAction(action, iid, key, context = {}) {
+    const endpoints = {
+      logout: '/instances/' + iid + '/logout',
+      wipe: '/instances/' + iid + '/session/wipe'
+    };
+    const badgeTypes = { logout: 'logout', wipe: 'wipe' };
+    const fallbackMessages = {
+      logout: (name) => 'Logout solicitado (' + name + ')',
+      wipe: (name) => 'Wipe solicitado (' + name + ')'
+    };
+    const holdTimes = { logout: 5000, wipe: 7000 };
+    const url = endpoints[action];
+    if (!url) return false;
+    const button = context.button || null;
+    const name = context.name || getInstanceDisplayName(iid);
+    if (button) button.disabled = true;
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'x-api-key': key } });
+      if (!r.ok) {
+        const txt = await r.text().catch(() => '');
+        alert('Falha ao executar ' + action + ': HTTP ' + r.status + (txt ? ' — ' + txt : ''));
+        setBadgeState('error', 'Falha em ' + action + ' (' + name + ')', 5000);
+        return false;
+      }
+      const payload = await r.json().catch(() => ({}));
+      const message = payload?.message || fallbackMessages[action](name);
+      setBadgeState(badgeTypes[action], message, holdTimes[action]);
+      console.info('[dashboard] ação ' + action, { iid, payload });
+      if (context.refresh !== false) await refreshInstances();
+      return true;
+    } catch (err) {
+      console.error('[dashboard] erro em ' + action, err);
+      showError('Erro ao executar ' + action);
+      return false;
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function handleSaveMetadata(iid) {
+    const card = findCardByIid(iid);
+    const nameInput = card?.querySelector('[data-field="name"]');
+    const notesInput = card?.querySelector('[data-field="notes"]');
+    const payload = {
+      name: nameInput?.value || '',
+      notes: notesInput?.value || ''
+    };
+    try {
+      const result = await fetchJSON('/instances/' + iid, true, { method: 'PATCH', body: JSON.stringify(payload) });
+      const displayName = result?.name || iid;
+      setBadgeState('update', 'Metadados salvos (' + displayName + ')', 4000);
+      console.info('[dashboard] instância atualizada', { iid, result });
+      await refreshInstances();
+    } catch (err) {
+      console.error('[dashboard] erro ao atualizar instância', err);
+      showError('Falha ao atualizar instância');
+      alert('Falha ao atualizar: ' + err.message);
+    }
+  }
+
+  els.modalDelete.addEventListener('click', (ev) => {
+    if (ev.target === els.modalDelete) closeDeleteModal();
+  });
+
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !els.modalDelete.classList.contains('hidden')) closeDeleteModal();
+  });
+
+  document.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('[data-act]');
+    if (!btn) return;
+    const act = btn.dataset.act;
+
+    if (act === 'modal-cancel') {
+      ev.preventDefault();
+      closeDeleteModal();
+      return;
+    }
+
+    if (act === 'delete') {
+      const card = btn.closest('[data-card]');
+      const iidTarget = btn.dataset.iid || card?.dataset.iid;
+      if (!iidTarget) return;
+      const name = getInstanceDisplayName(iidTarget);
+      openDeleteModal(iidTarget, name);
+      return;
+    }
+
+    if (act === 'modal-confirm') {
+      const iidTarget = els.modalDelete.dataset.iid;
+      if (!iidTarget) { closeDeleteModal(); return; }
+      let key;
+      try { key = requireKey(); } catch { return; }
+      localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+      btn.disabled = true;
+      try {
+        const r = await fetch('/instances/' + iidTarget, { method: 'DELETE', headers: { 'x-api-key': key } });
+        if (!r.ok) {
+          const txt = await r.text().catch(() => '');
+          alert('Falha ao excluir: HTTP ' + r.status + (txt ? ' — ' + txt : ''));
+          setBadgeState('error', 'Falha ao excluir ' + iidTarget, 5000);
+          return;
+        }
+        const payload = await r.json().catch(() => ({}));
+        const name = els.modalDelete.dataset.name || iidTarget;
+        setBadgeState('delete', payload?.message || ('Instância removida (' + name + ')'), 7000);
+        console.info('[dashboard] instância removida', { iid: iidTarget, payload });
+        closeDeleteModal();
+        await refreshInstances();
+      } catch (err) {
+        console.error('[dashboard] erro ao excluir instância', err);
+        showError('Erro ao excluir instância');
+      } finally {
+        btn.disabled = false;
+      }
+      return;
+    }
+
+    const iid = btn.dataset.iid;
+    if (!iid) return;
+
+    let key;
+    try { key = requireKey(); } catch { return; }
+    localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+
+    if (act === 'qr') {
+      els.selInstance.value = iid;
+      await refreshSelected();
+      return;
+    }
+    if (act === 'logout') {
+      await performInstanceAction('logout', iid, key, { button: btn });
+      return;
+    }
+    if (act === 'wipe') {
+      await performInstanceAction('wipe', iid, key, { button: btn });
+      return;
+    }
+    if (act === 'select') {
+      els.selInstance.value = iid;
+      await refreshSelected();
+      return;
+    }
+    if (act === 'save') {
+      await handleSaveMetadata(iid);
+      return;
+    }
+  });
+
+  els.btnNew.onclick = async () => {
+    const name = prompt('Nome da nova instância (ex: suporte-goiania)');
+    if (!name) return;
+    localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+    try {
+      const payload = await fetchJSON('/instances', true, { method:'POST', body: JSON.stringify({ name }) });
+      setBadgeState('update', 'Instância criada (' + (payload?.name || payload?.id || name) + ')', 4000);
+      console.info('[dashboard] instância criada', payload);
+      await refreshInstances();
+    } catch (err) {
+      console.error('[dashboard] erro ao criar instância', err);
+      showError('Falha ao criar instância');
+      alert('Falha ao criar instância: ' + err.message);
+    }
+  };
 
 els.selInstance.onchange = refreshSelected;
 
-els.btnLogout.onclick = async () => {
-  try {
-    localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
-    const iid = els.selInstance.value;
-    const r = await fetch('/instances/'+iid+'/logout', { method:'POST', headers: { 'x-api-key': requireKey() }});
-    if (!r.ok) return alert('Falha no logout: HTTP '+r.status);
-    els.qrHint.textContent = 'Desconectando… o serviço pode reiniciar e exibir um novo QR.';
-  } catch {}
-};
+  els.btnLogout.onclick = async () => {
+    try {
+      localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+      const iid = els.selInstance.value;
+      if (!iid) return;
+      const key = requireKey();
+      const name = getInstanceDisplayName(iid);
+      const ok = await performInstanceAction('logout', iid, key, { name, button: null });
+      if (ok) {
+        els.qrHint.textContent = 'Desconectando… o serviço pode reiniciar e exibir um novo QR.';
+      }
+    } catch {}
+  };
 
-els.btnWipe.onclick = async () => {
-  try {
-    localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
-    const iid = els.selInstance.value;
-    const r = await fetch('/instances/'+iid+'/session/wipe', { method:'POST', headers: { 'x-api-key': requireKey() }});
-    if (!r.ok) return alert('Falha ao limpar sessão: HTTP '+r.status);
-    els.qrHint.textContent = 'Limpando sessão… o serviço vai reiniciar e exibir um novo QR.';
-  } catch {}
-};
+  els.btnWipe.onclick = async () => {
+    try {
+      localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+      const iid = els.selInstance.value;
+      if (!iid) return;
+      const key = requireKey();
+      const name = getInstanceDisplayName(iid);
+      const ok = await performInstanceAction('wipe', iid, key, { name, button: null });
+      if (ok) {
+        els.qrHint.textContent = 'Limpando sessão… o serviço vai reiniciar e exibir um novo QR.';
+      }
+    } catch {}
+  };
 
 els.btnPair.onclick = async () => {
   try {
@@ -741,33 +1021,75 @@ app.get('/health', (req, res) => res.json({ ok: true, service: SERVICE_NAME }));
 // --------------------------- Rotas de Instância ------------------------
 app.post('/instances', auth, asyncHandler(async (req, res) => {
   const name = String(req.body?.name || '').trim() || null;
+  const noteRaw = typeof req.body?.note === 'string' ? req.body.note.trim() : (typeof req.body?.notes === 'string' ? req.body.notes.trim() : '');
+  const note = noteRaw ? noteRaw.slice(0, 280) : '';
   const iid = (name ? name.toLowerCase().replace(/[^\w]+/g, '-') : crypto.randomUUID());
   if (instances.has(iid)) return res.status(409).json({ error: 'instance_exists' });
-  const inst = await startInstance(iid, name || iid);
-  res.json({ id: inst.id, name: inst.name, dir: inst.dir });
+  const inst = await startInstance(iid, name || iid, { note });
+  logger.info({ iid: inst.id, name: inst.name }, 'instance.created');
+  res.json({ id: inst.id, name: inst.name, dir: inst.dir, metadata: inst.metadata });
 }));
 
 app.get('/instances', auth, (req, res) => {
-  const list = [...instances.values()].map(i => ({
-    id: i.id,
-    name: i.name,
-    connected: !!(i.sock && i.sock.user),
-    user: i.sock?.user || null,
-    counters: { sent: i.metrics.sent, status: i.metrics.status_counts }
-  }));
+  const list = [...instances.values()].map(inst => {
+    const s = serializeInstance(inst);
+    return {
+      id: s.id,
+      name: s.name,
+      note: s.note,
+      notes: s.note,
+      metadata: s.metadata,
+      connected: s.connected,
+      user: s.user,
+      counters: { sent: s.counters.sent, status: s.counters.statusCounts },
+      rate: s.rate,
+    };
+  });
   res.json(list);
 });
 
 app.get('/instances/:iid', auth, (req, res) => {
-  const i = instances.get(req.params.iid);
-  if (!i) return res.status(404).json({ error: 'instance_not_found' });
-  const connected = !!(i.sock && i.sock.user);
-  res.json({
-    id: i.id, name: i.name, connected,
-    user: connected ? i.sock.user : null,
-    counters: { sent: i.metrics.sent, byType: i.metrics.sent_by_type, statusCounts: i.metrics.status_counts }
-  });
+  const inst = instances.get(req.params.iid);
+  if (!inst) return res.status(404).json({ error: 'instance_not_found' });
+  const s = serializeInstance(inst);
+  res.json({ ...s, notes: s.note });
 });
+
+app.patch('/instances/:iid', auth, asyncHandler(async (req, res) => {
+  const inst = instances.get(req.params.iid);
+  if (!inst) return res.status(404).json({ error: 'instance_not_found' });
+
+  const body = req.body || {};
+  let touched = false;
+  if (Object.prototype.hasOwnProperty.call(body, 'name')) {
+    if (typeof body.name !== 'string') return res.status(400).json({ error: 'name_invalid' });
+    const nextName = body.name.trim();
+    if (!nextName) return res.status(400).json({ error: 'name_empty' });
+    inst.name = nextName.slice(0, 80);
+    touched = true;
+  }
+  const patchNote = Object.prototype.hasOwnProperty.call(body, 'note') ? body.note
+                   : (Object.prototype.hasOwnProperty.call(body, 'notes') ? body.notes : undefined);
+  if (patchNote !== undefined) {
+    if (typeof patchNote !== 'string') return res.status(400).json({ error: 'note_invalid' });
+    inst.metadata = inst.metadata || {};
+    inst.metadata.note = String(patchNote).trim().slice(0, 280);
+    touched = true;
+  }
+  if (!touched) return res.status(400).json({ error: 'no_updates' });
+  inst.metadata.updatedAt = new Date().toISOString();
+  await saveInstancesIndex();
+  res.json(serializeInstance(inst));
+}));
+
+app.delete('/instances/:iid', auth, asyncHandler(async (req, res) => {
+  const iid = req.params.iid;
+  if (iid === 'default') return res.status(400).json({ error: 'default_instance_cannot_be_deleted' });
+  const inst = instances.get(iid);
+  if (!inst) return res.status(404).json({ error: 'instance_not_found' });
+  await stopInstance(iid, { removeDir: true, logout: true });
+  res.json({ ok: true, message: 'Instância removida permanentemente.' });
+}));
 
 app.get('/instances/:iid/qr.png', auth, asyncHandler(async (req, res) => {
   const i = instances.get(req.params.iid);
@@ -850,27 +1172,31 @@ app.get('/instances/:iid/groups', auth, asyncHandler(async (req, res) => {
 }));
 
 app.get('/instances/:iid/metrics', auth, (req, res) => {
-  const i = instances.get(req.params.iid);
-  if (!i) return res.status(404).json({ error: 'instance_not_found' });
-  const connected = !!(i.sock && i.sock.user);
+  const inst = instances.get(req.params.iid);
+  if (!inst) return res.status(404).json({ error: 'instance_not_found' });
+
+  const summary = serializeInstance(inst);
+  const { metricsStartedAt, ...rest } = summary;
+  const timeline = (inst.metrics.timeline || []).map(entry => ({
+    ts: entry.ts,
+    iso: entry.iso || new Date(entry.ts).toISOString(),
+    sent: entry.sent,
+    delivered: entry.delivered,
+    failed: entry.failed,
+    rateInWindow: entry.rateInWindow,
+  }));
+
   res.json({
     service: SERVICE_NAME,
-    instance: { id: i.id, name: i.name },
-    connected,
-    user: connected ? i.sock.user : null,
-    startedAt: i.metrics.startedAt,
-    counters: {
-      sent: i.metrics.sent,
-      byType: i.metrics.sent_by_type,
-      statusCounts: i.metrics.status_counts
+    ...rest,
+    startedAt: metricsStartedAt,
+    timeline,
+    ack: {
+      avgMs: inst.metrics.ack?.avgMs || 0,
+      lastMs: inst.metrics.ack?.lastMs || null,
+      samples: inst.metrics.ack?.count || 0,
     },
-    last: i.metrics.last,
-    rate: {
-      limit: RATE_MAX_SENDS,
-      windowMs: RATE_WINDOW_MS,
-      inWindow: i.rateWindow.length
-    },
-    sessionDir: i.dir
+    sessionDir: inst.dir,
   });
 });
 
@@ -903,7 +1229,15 @@ app.post('/instances/:iid/send-text', auth, asyncHandler(async (req, res) => {
   const result = await sendWithTimeout(i, jid, { text: String(message) });
   const id = result?.key?.id || null;
 
-  i.metrics.sent++; i.metrics.sent_by_type.text++; i.metrics.last.sentId = id;
+  if (id) {
+    i.metrics.last.sentId = id;
+    i.ackSentAt.set(id, Date.now());
+    setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+  }
+
+  i.metrics.sent++;
+  i.metrics.sent_by_type.text++;
+  recordMetricsSnapshot(i, true);
 
   let status = null;
   const ms = Number(waitAckMs || 0);
@@ -931,7 +1265,15 @@ app.post('/instances/:iid/send-image', auth, asyncHandler(async (req, res) => {
   const result = await sendWithTimeout(i, jid, { image: { url: String(url) }, caption: caption ? String(caption) : undefined });
   const id = result?.key?.id || null;
 
-  i.metrics.sent++; i.metrics.sent_by_type.image++; i.metrics.last.sentId = id;
+  if (id) {
+    i.metrics.last.sentId = id;
+    i.ackSentAt.set(id, Date.now());
+    setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+  }
+
+  i.metrics.sent++;
+  i.metrics.sent_by_type.image++;
+  recordMetricsSnapshot(i, true);
 
   let status = null;
   const ms = Number(waitAckMs || 0);
@@ -951,7 +1293,15 @@ app.post('/instances/:iid/send-group', auth, asyncHandler(async (req, res) => {
   const result = await sendWithTimeout(i, String(groupId), { text: String(message) });
   const id = result?.key?.id || null;
 
-  i.metrics.sent++; i.metrics.sent_by_type.group++; i.metrics.last.sentId = id;
+  if (id) {
+    i.metrics.last.sentId = id;
+    i.ackSentAt.set(id, Date.now());
+    setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+  }
+
+  i.metrics.sent++;
+  i.metrics.sent_by_type.group++;
+  recordMetricsSnapshot(i, true);
 
   let status = null;
   const ms = Number(waitAckMs || 0);
@@ -971,7 +1321,14 @@ app.post('/instances/:iid/send-me', auth, asyncHandler(async (req, res) => {
   const result = await sendWithTimeout(i, i.sock.user.id, { text: String(message) });
   const id = result?.key?.id || null;
 
-  i.metrics.sent++; i.metrics.last.sentId = id;
+  if (id) {
+    i.metrics.last.sentId = id;
+    i.ackSentAt.set(id, Date.now());
+    setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+  }
+
+  i.metrics.sent++;
+  recordMetricsSnapshot(i, true);
 
   let status = null;
   const ms = Number(waitAckMs || 0);
@@ -1026,9 +1383,15 @@ app.post('/instances/:iid/send-list', auth, asyncHandler(async (req, res) => {
     result = await sendWithTimeout(i, jid, payload);
     id = result?.key?.id || null;
 
+    if (id) {
+      i.metrics.last.sentId = id;
+      i.ackSentAt.set(id, Date.now());
+      setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+    }
+
     i.metrics.sent++;
     i.metrics.sent_by_type.lists++;
-    i.metrics.last.sentId = id;
+    recordMetricsSnapshot(i, true);
 
     const ms = Number(waitAckMs || 0);
     if (id && ms > 0) status = await waitForAck(i, id, Math.min(ms, 20000));
@@ -1052,7 +1415,12 @@ app.post('/instances/:iid/send-list', auth, asyncHandler(async (req, res) => {
 
       i.metrics.sent++;
       i.metrics.sent_by_type.text++;
-      i.metrics.last.sentId = id;
+      if (id) {
+        i.metrics.last.sentId = id;
+        i.ackSentAt.set(id, Date.now());
+        setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+      }
+      recordMetricsSnapshot(i, true);
 
       return res.json({ ok: true, id, to: jid, status: null, fallback: true, error: String(err?.message || err) });
     } catch (err2) {
@@ -1100,9 +1468,14 @@ app.post('/instances/:iid/send-buttons', auth, asyncHandler(async (req, res) => 
     const result = await sendWithTimeout(i, jid, { text: String(text), templateButtons: cleaned });
     id = result?.key?.id || null;
 
+    if (id) {
+      i.metrics.last.sentId = id;
+      i.ackSentAt.set(id, Date.now());
+      setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+    }
     i.metrics.sent++;
     i.metrics.sent_by_type.buttons++;
-    i.metrics.last.sentId = id;
+    recordMetricsSnapshot(i, true);
 
     const ms = Number(waitAckMs || 0);
     if (id && ms > 0) status = await waitForAck(i, id, Math.min(ms, 20000));
@@ -1124,7 +1497,12 @@ app.post('/instances/:iid/send-buttons', auth, asyncHandler(async (req, res) => 
 
       i.metrics.sent++;
       i.metrics.sent_by_type.text++;
-      i.metrics.last.sentId = id;
+      if (id) {
+        i.metrics.last.sentId = id;
+        i.ackSentAt.set(id, Date.now());
+        setTimeout(() => i.ackSentAt.delete(id), ACK_SAMPLE_MAX_AGE_MS).unref?.();
+      }
+      recordMetricsSnapshot(i, true);
 
       const ms = Number(waitAckMs || 0);
       if (id && ms > 0) status = await waitForAck(i, id, Math.min(ms, 20000));
@@ -1410,15 +1788,15 @@ let server;
   await fs.mkdir(SESSIONS_ROOT, { recursive: true }).catch(() => {});
   const index = await loadInstancesIndex();
   if (!index.length) {
-    await startInstance('default', 'default');
+    await startInstance('default', 'default', { note: '' });
   } else {
     for (const it of index) {
       // se diretório mudou/env var, ainda assim tenta montar por id
-      await startInstance(it.id, it.name);
+      await startInstance(it.id, it.name, it.metadata || { note: '' });
     }
     if (!instances.has('default')) {
       // garante uma default para retrocompat
-      await startInstance('default', 'default');
+      await startInstance('default', 'default', { note: '' });
     }
   }
   server = app.listen(PORT, () => logger.info({ port: PORT }, 'http.started'));
