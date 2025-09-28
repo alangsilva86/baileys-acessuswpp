@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: baileys-acessuswpp
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_LEVEL
+        value: info
+      - key: SERVICE_NAME
+        value: baileys-api
+      - key: RATE_MAX_SENDS
+        value: 20
+      - key: RATE_WINDOW_MS
+        value: 15000
