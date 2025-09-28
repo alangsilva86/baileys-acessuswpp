@@ -6,7 +6,7 @@ const {
   fetchLatestBaileysVersion,
   DisconnectReason,
 } = require("@whiskeysockets/baileys");
-const { recordMetricsSnapshot } = require("./utils");
+const { recordMetricsSnapshot, buildSignature } = require("./utils");
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info" });
 

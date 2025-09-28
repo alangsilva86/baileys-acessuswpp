@@ -1,4 +1,3 @@
-'''
 const crypto = require('crypto');
 
 const RATE_MAX_SENDS = Number(process.env.RATE_MAX_SENDS || 20);
@@ -93,4 +92,3 @@ module.exports = {
   waitForAck,
   recordMetricsSnapshot,
 };
-'''

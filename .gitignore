@@ -7,3 +7,15 @@ logs/
 /tmp
 npm-debug.log*
 yarn-error.log*
+
+# Environment variables
+.env
+
+# Logs
+*.log
+
+# Sessions data
+sessions/
+
+# Instance data
+instances.json

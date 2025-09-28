@@ -1,5 +1,6 @@
 const express = require("express");
 const crypto = require("crypto");
+const fs = require("fs/promises");
 const QRCode = require("qrcode");
 const {
   createInstance,
@@ -13,6 +14,7 @@ const {
   sendWithTimeout,
   waitForAck,
   normalizeToE164BR,
+  buildSignature,
 } = require("../utils");
 
 const router = express.Router();
