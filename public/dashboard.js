@@ -324,6 +324,56 @@ async function refreshInstances() {
   }
 }
 
+/* Carregar QR code com autenticação */
+async function loadQRCode(iid) {
+  try {
+    const k = els.inpApiKey?.value?.trim();
+    if (!k) {
+      els.qrImg.classList.add('hidden');
+      els.qrHint.textContent = 'Informe a API Key para ver o QR code.';
+      return;
+    }
+    
+    const headers = { 'x-api-key': k };
+    const response = await fetch('/instances/' + iid + '/qr.png?t=' + Date.now(), { 
+      headers, 
+      cache: 'no-store' 
+    });
+    
+    if (!response.ok) {
+      if (response.status === 401) {
+        els.qrImg.classList.add('hidden');
+        els.qrHint.textContent = 'API Key inválida.';
+        return;
+      }
+      if (response.status === 404) {
+        els.qrImg.classList.add('hidden');
+        els.qrHint.textContent = 'QR code não disponível ainda.';
+        return;
+      }
+      throw new Error('HTTP ' + response.status);
+    }
+    
+    const blob = await response.blob();
+    const imageUrl = URL.createObjectURL(blob);
+    els.qrImg.src = imageUrl;
+    els.qrImg.classList.remove('hidden');
+    
+    // Limpar URL anterior para evitar vazamento de memória
+    els.qrImg.onload = () => {
+      if (els.qrImg.previousImageUrl) {
+        URL.revokeObjectURL(els.qrImg.previousImageUrl);
+      }
+      els.qrImg.previousImageUrl = imageUrl;
+    };
+    
+  } catch (err) {
+    console.error('[dashboard] erro ao carregar QR code', err);
+    els.qrImg.classList.add('hidden');
+    els.qrHint.textContent = 'Erro ao carregar QR code.';
+  }
+}
+
 async function refreshSelected() {
   const iid = els.selInstance.value;
   if (!iid) {
@@ -343,8 +393,8 @@ async function refreshSelected() {
       els.qrImg.classList.add('hidden');
       els.qrHint.textContent = 'Instância conectada.';
     } else {
-      els.qrImg.src = '/instances/' + iid + '/qr.png?t=' + Date.now();
-      els.qrImg.classList.remove('hidden');
+      // Carregar QR code via fetch com autenticação
+      await loadQRCode(iid);
       els.qrHint.textContent = 'Aponte o WhatsApp para o QR code.';
     }
 
