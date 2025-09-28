@@ -1,8 +1,13 @@
-cat > .dockerignore <<'EOF'
 node_modules
-sessions
-.env
-npm-debug.log*
-Dockerfile*
+npm-debug.log
 .git
-EOF
+.gitignore
+README.md
+.env
+.nyc_output
+coverage
+.DS_Store
+sessions
+instances.json
+*.log
+.cache
