@@ -44,6 +44,53 @@ const els = {
   modalCancel: document.querySelector('[data-act="modal-cancel"]'),
 };
 
+const STATUS_META = {
+  '1': {
+    name: 'Pendentes',
+    description: 'A mensagem saiu do app, mas ainda não foi entregue ao servidor do WhatsApp.',
+    textClass: 'text-amber-600',
+    chartColor: '#f59e0b',
+    chartBackground: 'rgba(245,158,11,0.15)',
+  },
+  '2': {
+    name: 'Servidor recebeu',
+    description: 'O servidor do WhatsApp confirmou o recebimento (✔ cinza).',
+    textClass: 'text-sky-600',
+    chartColor: '#3b82f6',
+    chartBackground: 'rgba(59,130,246,0.15)',
+  },
+  '3': {
+    name: 'Entregues',
+    description: 'A mensagem chegou ao dispositivo do destinatário (✔✔ cinza).',
+    textClass: 'text-emerald-600',
+    chartColor: '#22c55e',
+    chartBackground: 'rgba(34,197,94,0.15)',
+  },
+  '4': {
+    name: 'Lidas',
+    description: 'O destinatário visualizou a mensagem (✔✔ azul).',
+    textClass: 'text-indigo-600',
+    chartColor: '#6366f1',
+    chartBackground: 'rgba(99,102,241,0.15)',
+  },
+  '5': {
+    name: 'Reproduzidas',
+    description: 'Áudio ou mensagem de voz reproduzidos (ícone play azul).',
+    textClass: 'text-pink-600',
+    chartColor: '#ec4899',
+    chartBackground: 'rgba(236,72,153,0.15)',
+  },
+};
+
+const STATUS_CODES = ['1', '2', '3', '4', '5'];
+const TIMELINE_FIELDS = {
+  '1': 'pending',
+  '2': 'serverAck',
+  '3': 'delivered',
+  '4': 'read',
+  '5': 'played',
+};
+
 /* ---------- Helpers UI ---------- */
 const BADGE_STYLES = {
   'status-connected': 'bg-emerald-100 text-emerald-800',
@@ -74,6 +121,16 @@ function setStatusBadge(connected, name) {
 
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escapeHtml(val) { return String(val ?? '').replace(/[&<>"']/g, ch => HTML_ESCAPES[ch] || ch); }
+
+function getStatusCounts(src) {
+  const base = src || {};
+  const result = {};
+  STATUS_CODES.forEach(code => {
+    const num = Number(base[code]);
+    result[code] = Number.isFinite(num) ? num : 0;
+  });
+  return result;
+}
 
 const dateTimeFmt = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
 const timeLabelFmt = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit' });
@@ -154,14 +211,25 @@ function percent(v) {
 let chart;
 function initChart() {
   const ctx = document.getElementById('metricsChart').getContext('2d');
+  const statusDatasets = STATUS_CODES.map(code => {
+    const meta = STATUS_META[code] || {};
+    const label = meta.name ? `${meta.name}` : `Status ${code}`;
+    return {
+      label: `Status ${code} (${label})`,
+      data: [],
+      borderColor: meta.chartColor || '#94a3b8',
+      backgroundColor: meta.chartBackground || 'rgba(148,163,184,0.15)',
+      tension: 0.25,
+      fill: false,
+    };
+  });
   chart = new Chart(ctx, {
     type: 'line',
     data: {
       labels: [],
       datasets: [
-        { label: 'Enviadas', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)', tension: 0.25, fill: false },
-        { label: 'Status 2 (entregues)', data: [], borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,0.12)', tension: 0.25, fill: false },
-        { label: 'Falhas (status 3+4)', data: [], borderColor: '#f97316', backgroundColor: 'rgba(249,115,22,0.12)', tension: 0.25, fill: false }
+        { label: 'Enviadas', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.25, fill: false },
+        ...statusDatasets,
       ]
     },
     options: {
@@ -185,24 +253,31 @@ function resetChart() {
 }
 function updateKpis(metrics) {
   const counters = metrics?.counters || {};
-  const statusCounts = counters.statusCounts || {};
+  const statusCounts = getStatusCounts(counters.statusCounts || counters.status || {});
   const sent = counters.sent || 0;
-  const delivered = statusCounts['2'] || 0;
-  const failed = (statusCounts['3'] || 0) + (statusCounts['4'] || 0);
+  const pending = statusCounts['1'];
+  const serverAck = statusCounts['2'];
+  const delivered = statusCounts['3'];
+  const read = statusCounts['4'];
+  const played = statusCounts['5'];
 
   if (sent) {
     const deliveryPct = Math.round((delivered / sent) * 100);
     els.kpiDeliveryValue.textContent = deliveryPct + '%';
-    els.kpiDeliveryHint.textContent = `${delivered} de ${sent} mensagens com status 2`;
+    els.kpiDeliveryHint.textContent = `${delivered} de ${sent} mensagens entregues (status 3). Pendentes: ${pending} • Servidor recebeu: ${serverAck}`;
   } else {
     els.kpiDeliveryValue.textContent = '—';
     els.kpiDeliveryHint.textContent = 'Envie uma mensagem para iniciar o monitoramento.';
   }
 
-  els.kpiFailureValue.textContent = String(failed || 0);
-  els.kpiFailureHint.textContent = sent
-    ? `Status 3: ${statusCounts['3'] || 0} • Status 4: ${statusCounts['4'] || 0}`
-    : 'Sem ocorrências registradas.';
+  els.kpiFailureValue.className = 'mt-1 text-2xl font-semibold text-indigo-600';
+  if (sent) {
+    els.kpiFailureValue.textContent = String(read || 0);
+    els.kpiFailureHint.textContent = `Status 4 (Lidas): ${read} • Status 5 (Reproduzidas): ${played}`;
+  } else {
+    els.kpiFailureValue.textContent = '0';
+    els.kpiFailureHint.textContent = 'Envie mensagens para acompanhar leituras e reproduções.';
+  }
 
   const usage = metrics?.rate?.usage || 0;
   const ratePercent = percent(usage);
@@ -257,9 +332,17 @@ async function refreshInstances() {
       const connected = !!i.connected;
       const badgeClass = connected ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700';
       const sent = i.counters?.sent || 0;
-      const status2 = (i.counters?.status || {})['2'] || 0;
-      const status3 = (i.counters?.status || {})['3'] || 0;
-      const status4 = (i.counters?.status || {})['4'] || 0;
+      const statusCounts = getStatusCounts(i.counters?.statusCounts || i.counters?.status || {});
+      const statusCardsHtml = STATUS_CODES.map(code => {
+        const meta = STATUS_META[code] || {};
+        const titleAttr = meta.description ? ` title="${escapeHtml(meta.description)}"` : '';
+        const label = escapeHtml(meta.name || `Status ${code}`);
+        return `
+          <div class="rounded-lg bg-slate-50 p-2"${titleAttr}>
+            <span class="block text-[11px] uppercase tracking-wide text-slate-400">Status ${code} • ${label}</span>
+            <span class="text-sm font-semibold ${meta.textClass || 'text-slate-600'}">${statusCounts[code] || 0}</span>
+          </div>`;
+      }).join('');
       const usagePercent = percent(i.rate?.usage || 0);
       const meterColor = usagePercent >= 90 ? 'bg-rose-400' : usagePercent >= 70 ? 'bg-amber-400' : 'bg-emerald-400';
       const userId = i.user?.id ? escapeHtml(i.user.id) : '—';
@@ -278,16 +361,13 @@ async function refreshInstances() {
 
         <div class="text-xs text-slate-500 break-all">WhatsApp: ${userId}</div>
 
-        <div class="grid grid-cols-2 gap-2 text-xs">
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
           <div class="rounded-lg bg-slate-50 p-2">
             <span class="block text-[11px] uppercase tracking-wide text-slate-400">Enviadas</span>
             <span class="text-sm font-semibold text-slate-700">${sent}</span>
           </div>
-          <div class="rounded-lg bg-slate-50 p-2">
-            <span class="block text-[11px] uppercase tracking-wide text-slate-400">Status 2</span>
-            <span class="text-sm font-semibold text-emerald-600">${status2}</span>
-          </div>
-          <div class="col-span-2 space-y-1">
+          ${statusCardsHtml}
+          <div class="col-span-2 md:col-span-3 space-y-1">
             <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
               <span>Uso do limite</span>
               <span>${usagePercent}%</span>
@@ -295,7 +375,7 @@ async function refreshInstances() {
             <div class="h-2 bg-slate-100 rounded-full overflow-hidden">
               <div class="h-full ${meterColor}" style="width:${Math.min(usagePercent, 100)}%"></div>
             </div>
-            <div class="text-[11px] text-slate-400">Status 3: ${status3} • Status 4: ${status4}</div>
+            <div class="text-[11px] text-slate-400">Status 1: ${statusCounts['1'] || 0} • Status 2: ${statusCounts['2'] || 0} • Status 3: ${statusCounts['3'] || 0} • Status 4: ${statusCounts['4'] || 0} • Status 5: ${statusCounts['5'] || 0}</div>
           </div>
         </div>
 
@@ -416,9 +496,11 @@ async function refreshSelected() {
 
     if (timeline.length > 1) {
       chart.data.labels = timeline.map(p => formatTimelineLabel(p.iso));
-      chart.data.datasets[0].data = timeline.map(p => p.sent);
-      chart.data.datasets[1].data = timeline.map(p => p.delivered);
-      chart.data.datasets[2].data = timeline.map(p => p.failed);
+      chart.data.datasets[0].data = timeline.map(p => p.sent ?? 0);
+      STATUS_CODES.forEach((code, idx) => {
+        const key = TIMELINE_FIELDS[code];
+        chart.data.datasets[idx + 1].data = timeline.map(p => (key ? (p[key] ?? 0) : 0));
+      });
       chart.update();
       els.chartHint.textContent = `Exibindo ${timeline.length} pontos de dados.`;
     } else {
