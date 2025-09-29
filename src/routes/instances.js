@@ -259,14 +259,29 @@ router.get("/:iid/metrics", (req, res) => {
 
   const summary = serializeInstance(inst);
   const { metricsStartedAt, ...rest } = summary;
-  const timeline = (inst.metrics.timeline || []).map((entry) => ({
-    ts: entry.ts,
-    iso: entry.iso || new Date(entry.ts).toISOString(),
-    sent: entry.sent,
-    delivered: entry.delivered,
-    failed: entry.failed,
-    rateInWindow: entry.rateInWindow,
-  }));
+  const timeline = (inst.metrics.timeline || []).map((entry) => {
+    const hasNewStatusFields =
+      Object.prototype.hasOwnProperty.call(entry, "serverAck") ||
+      Object.prototype.hasOwnProperty.call(entry, "pending") ||
+      Object.prototype.hasOwnProperty.call(entry, "read") ||
+      Object.prototype.hasOwnProperty.call(entry, "played");
+
+    const serverAck =
+      entry.serverAck ?? (hasNewStatusFields ? 0 : entry.delivered ?? 0);
+
+    return {
+      ts: entry.ts,
+      iso: entry.iso || new Date(entry.ts).toISOString(),
+      sent: entry.sent ?? 0,
+      pending: entry.pending ?? 0,
+      serverAck,
+      delivered: hasNewStatusFields ? entry.delivered ?? 0 : 0,
+      read: entry.read ?? 0,
+      played: entry.played ?? 0,
+      failed: entry.failed ?? 0,
+      rateInWindow: entry.rateInWindow ?? 0,
+    };
+  });
 
   res.json({
     service: process.env.SERVICE_NAME || "baileys-api",

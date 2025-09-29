@@ -54,13 +54,27 @@ function recordMetricsSnapshot(inst, force = false) {
   if (!inst.metrics.timeline) inst.metrics.timeline = [];
   const now = Date.now();
   const last = inst.metrics.timeline[inst.metrics.timeline.length - 1];
-  const failed =
-    (inst.metrics.status_counts?.['3'] || 0) +
-    (inst.metrics.status_counts?.['4'] || 0);
+  const statusCounts = inst.metrics.status_counts || {};
+  const pending = statusCounts['1'] || 0;
+  const serverAck = statusCounts['2'] || 0;
+  const delivered = statusCounts['3'] || 0;
+  const read = statusCounts['4'] || 0;
+  const played = statusCounts['5'] || 0;
+  const failed = Object.entries(statusCounts).reduce((acc, [code, value]) => {
+    const numericCode = Number(code);
+    if (Number.isFinite(numericCode) && numericCode >= 6) {
+      return acc + (Number(value) || 0);
+    }
+    return acc;
+  }, 0);
 
   if (last && now - last.ts < METRICS_TIMELINE_MIN_INTERVAL_MS) {
     last.sent = inst.metrics.sent;
-    last.delivered = inst.metrics.status_counts?.['2'] || 0;
+    last.pending = pending;
+    last.serverAck = serverAck;
+    last.delivered = delivered;
+    last.read = read;
+    last.played = played;
     last.failed = failed;
     last.rateInWindow = inst.rateWindow.length;
     if (!last.iso) last.iso = new Date(last.ts).toISOString();
@@ -71,7 +85,11 @@ function recordMetricsSnapshot(inst, force = false) {
     ts: now,
     iso: new Date(now).toISOString(),
     sent: inst.metrics.sent,
-    delivered: inst.metrics.status_counts?.['2'] || 0,
+    pending,
+    serverAck,
+    delivered,
+    read,
+    played,
     failed,
     rateInWindow: inst.rateWindow.length,
   });
