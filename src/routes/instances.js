@@ -78,45 +78,44 @@ function createRouter(ctx) {
   const metricsHandler = (req, res) => {
     if (!ensureInstance(req, res)) return;
 
-      const summary = serializeInstance(ctx);
-      const { metricsStartedAt, ...rest } = summary;
-      const timeline = (ctx.metrics.timeline || []).map((entry) => {
-        const hasNewStatusFields =
-          Object.prototype.hasOwnProperty.call(entry, "serverAck") ||
-          Object.prototype.hasOwnProperty.call(entry, "pending") ||
-          Object.prototype.hasOwnProperty.call(entry, "read") ||
-          Object.prototype.hasOwnProperty.call(entry, "played");
+    const summary = serializeInstance(ctx);
+    const { metricsStartedAt, ...rest } = summary;
+    const timeline = (ctx.metrics.timeline || []).map((entry) => {
+      const hasNewStatusFields =
+        Object.prototype.hasOwnProperty.call(entry, "serverAck") ||
+        Object.prototype.hasOwnProperty.call(entry, "pending") ||
+        Object.prototype.hasOwnProperty.call(entry, "read") ||
+        Object.prototype.hasOwnProperty.call(entry, "played");
 
-        const serverAck =
-          entry.serverAck ?? (hasNewStatusFields ? 0 : entry.delivered ?? 0);
+      const serverAck =
+        entry.serverAck ?? (hasNewStatusFields ? 0 : entry.delivered ?? 0);
 
-        return {
-          ts: entry.ts,
-          iso: entry.iso || new Date(entry.ts).toISOString(),
-          sent: entry.sent ?? 0,
-          pending: entry.pending ?? 0,
-          serverAck,
-          delivered: hasNewStatusFields ? entry.delivered ?? 0 : 0,
-          read: entry.read ?? 0,
-          played: entry.played ?? 0,
-          failed: entry.failed ?? 0,
-          rateInWindow: entry.rateInWindow ?? 0,
-        };
-      });
+      return {
+        ts: entry.ts,
+        iso: entry.iso || new Date(entry.ts).toISOString(),
+        sent: entry.sent ?? 0,
+        pending: entry.pending ?? 0,
+        serverAck,
+        delivered: hasNewStatusFields ? entry.delivered ?? 0 : 0,
+        read: entry.read ?? 0,
+        played: entry.played ?? 0,
+        failed: entry.failed ?? 0,
+        rateInWindow: entry.rateInWindow ?? 0,
+      };
+    });
 
-      res.json({
-        service: process.env.SERVICE_NAME || "baileys-api",
-        ...rest,
-        startedAt: metricsStartedAt,
-        timeline,
-        ack: {
-          avgMs: ctx.metrics.ack?.avgMs || 0,
-          lastMs: ctx.metrics.ack?.lastMs || null,
-          samples: ctx.metrics.ack?.count || 0,
-        },
-        sessionDir: ctx.dir,
-      });
-    }
+    res.json({
+      service: process.env.SERVICE_NAME || "baileys-api",
+      ...rest,
+      startedAt: metricsStartedAt,
+      timeline,
+      ack: {
+        avgMs: ctx.metrics.ack?.avgMs || 0,
+        lastMs: ctx.metrics.ack?.lastMs || null,
+        samples: ctx.metrics.ack?.count || 0,
+      },
+      sessionDir: ctx.dir,
+    });
   };
 
   router.get("/:iid/metrics", metricsHandler);
