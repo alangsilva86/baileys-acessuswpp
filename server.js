@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('ts-node/register/transpile-only');
 
 const path = require('path');
 const express = require('express');

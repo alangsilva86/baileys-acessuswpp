@@ -11,10 +11,8 @@ const {
 } = require("../instanceManager");
 const {
   allowSend,
-  sendWithTimeout,
   waitForAck,
   normalizeToE164BR,
-  buildSignature,
 } = require("../utils");
 
 const router = express.Router();
@@ -331,7 +329,13 @@ router.post(
     if (!entry || !entry.exists)
       return res.status(404).json({ error: "whatsapp_not_found" });
 
-    const sent = await sendWithTimeout(i, normalized, { text: message });
+    const messageService = i.context?.messageService;
+    if (!messageService)
+      return res.status(503).json({ error: "message_service_unavailable" });
+
+    const sent = await messageService.sendText(normalized, message, {
+      timeoutMs: Number(process.env.SEND_TIMEOUT_MS || 25_000),
+    });
     i.metrics.sent += 1;
     i.metrics.sent_by_type.text += 1;
     i.metrics.last.sentId = sent.key.id;

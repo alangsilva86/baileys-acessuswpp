@@ -1,32 +1,32 @@
-const fs = require("fs/promises");
 const pino = require("pino");
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  DisconnectReason,
-} = require("@whiskeysockets/baileys");
-const { recordMetricsSnapshot, buildSignature } = require("./utils");
+const { DisconnectReason } = require("@whiskeysockets/baileys");
+const { recordMetricsSnapshot } = require("./utils");
+const { bootBaileys } = require('./baileys/index.ts');
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info" });
 
 const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
-const WEBHOOK_URL = process.env.WEBHOOK_URL || "";
-const API_KEYS = String(process.env.API_KEY || "change-me")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
 async function startWhatsAppInstance(inst) {
-  const { state, saveCreds } = await useMultiFileAuthState(inst.dir);
-  const { version } = await fetchLatestBaileysVersion();
-  logger.info({ iid: inst.id, version }, "baileys.version");
+  const instanceLogger = logger.child({ iid: inst.id });
+  const previousAuthDir = process.env.AUTH_DIR;
+  process.env.AUTH_DIR = inst.dir;
 
-  const sock = makeWASocket({ version, auth: state, logger });
+  const context = await bootBaileys({
+    authDir: inst.dir,
+    instanceId: inst.id,
+    logger: instanceLogger,
+  });
+
+  if (previousAuthDir === undefined) {
+    delete process.env.AUTH_DIR;
+  } else {
+    process.env.AUTH_DIR = previousAuthDir;
+  }
+
+  const sock = context.sock;
   inst.sock = sock;
-
-  sock.ev.on("creds.update", saveCreds);
+  inst.context = context;
 
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr, receivedPendingNotifications } = update;
@@ -34,21 +34,21 @@ async function startWhatsAppInstance(inst) {
 
     if (qr) {
       inst.lastQR = qr;
-      logger.info({ iid }, "qr.updated");
+      instanceLogger.info({ iid }, "qr.updated");
     }
     if (connection === "open") {
       inst.lastQR = null;
       inst.reconnectDelay = RECONNECT_MIN_DELAY_MS;
-      logger.info({ iid, receivedPendingNotifications }, "whatsapp.connected");
+      instanceLogger.info({ iid, receivedPendingNotifications }, "whatsapp.connected");
     }
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
-      logger.warn({ iid, statusCode }, "whatsapp.disconnected");
+      instanceLogger.warn({ iid, statusCode }, "whatsapp.disconnected");
 
       if (!inst.stopping && !isLoggedOut) {
         const delay = Math.min(inst.reconnectDelay, RECONNECT_MAX_DELAY_MS);
-        logger.warn({ iid, delay }, "whatsapp.reconnect.scheduled");
+        instanceLogger.warn({ iid, delay }, "whatsapp.reconnect.scheduled");
         if (inst.reconnectTimer) clearTimeout(inst.reconnectTimer);
         const currentSock = sock;
         inst.reconnectTimer = setTimeout(() => {
@@ -58,11 +58,11 @@ async function startWhatsAppInstance(inst) {
             RECONNECT_MAX_DELAY_MS
           );
           startWhatsAppInstance(inst).catch((err) =>
-            logger.error({ iid, err }, "whatsapp.reconnect.failed")
+            instanceLogger.error({ iid, err }, "whatsapp.reconnect.failed")
           );
         }, delay);
       } else if (isLoggedOut) {
-        logger.error({ iid }, "session.loggedOut");
+        instanceLogger.error({ iid }, "session.loggedOut");
       }
     }
   });
@@ -70,7 +70,7 @@ async function startWhatsAppInstance(inst) {
   sock.ev.on("messages.upsert", async (evt) => {
     const count = evt.messages?.length || 0;
     const iid = inst.id;
-    logger.info({ iid, type: evt.type, count }, "messages.upsert");
+    instanceLogger.info({ iid, type: evt.type, count }, "messages.upsert");
 
     // log rudimentar de interações (botões/listas)
     if (count) {
@@ -81,7 +81,7 @@ async function startWhatsAppInstance(inst) {
           m.message?.templateButtonReplyMessage ||
           m.message?.buttonsResponseMessage;
         if (btn) {
-          logger.info(
+          instanceLogger.info(
             {
               iid,
               from,
@@ -94,7 +94,7 @@ async function startWhatsAppInstance(inst) {
 
         const list = m.message?.listResponseMessage;
         if (list) {
-          logger.info(
+          instanceLogger.info(
             {
               iid,
               from,
@@ -107,20 +107,6 @@ async function startWhatsAppInstance(inst) {
       }
     }
 
-    // Webhook outbound (1 vez por evento)
-    if (WEBHOOK_URL && count) {
-      try {
-        const body = JSON.stringify({ iid, ...evt });
-        const sig = buildSignature(body, API_KEYS[0] || "change-me");
-        await fetch(WEBHOOK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Signature-256": sig },
-          body,
-        }).catch(() => {});
-      } catch (e) {
-        logger.warn({ iid, err: e?.message }, "webhook.relay.error");
-      }
-    }
   });
 
   sock.ev.on("messages.update", (updates) => {
@@ -159,7 +145,7 @@ async function startWhatsAppInstance(inst) {
           waiter.resolve(st);
         }
       }
-      logger.info({ iid, mid, status: st }, "messages.status");
+      instanceLogger.info({ iid, mid, status: st }, "messages.status");
     }
   });
 
@@ -171,6 +157,7 @@ async function stopWhatsAppInstance(inst, { logout = false } = {}) {
   if (!inst) return;
 
   inst.stopping = true;
+  inst.context = null;
 
   if (inst.reconnectTimer) {
     try {

@@ -1,9 +1,6 @@
-const crypto = require('crypto');
-
 const RATE_MAX_SENDS = Number(process.env.RATE_MAX_SENDS || 20);
 const RATE_WINDOW_MS = Number(process.env.RATE_WINDOW_MS || 15_000);
 const E164_BRAZIL = /^55\d{10,11}$/;
-const SEND_TIMEOUT_MS = 25_000;
 const METRICS_TIMELINE_MAX = 288; // ~24h (amostra a cada ~5min)
 const METRICS_TIMELINE_MIN_INTERVAL_MS = 5 * 60_000; // 5 min
 
@@ -14,12 +11,6 @@ function normalizeToE164BR(val) {
   return null;
 }
 
-function buildSignature(payload, secret) {
-  const h = crypto.createHmac('sha256', String(secret));
-  h.update(payload);
-  return `sha256=${h.digest('hex')}`;
-}
-
 function allowSend(inst) {
   const now = Date.now();
   while (inst.rateWindow.length && now - inst.rateWindow[0] > RATE_WINDOW_MS) {
@@ -28,15 +19,6 @@ function allowSend(inst) {
   if (inst.rateWindow.length >= RATE_MAX_SENDS) return false;
   inst.rateWindow.push(now);
   return true;
-}
-
-async function sendWithTimeout(inst, jid, content) {
-  return await Promise.race([
-    inst.sock.sendMessage(jid, content),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('send timeout')), SEND_TIMEOUT_MS)
-    ),
-  ]);
 }
 
 function waitForAck(inst, messageId, timeoutMs = 10000) {
@@ -104,9 +86,7 @@ function recordMetricsSnapshot(inst, force = false) {
 
 module.exports = {
   normalizeToE164BR,
-  buildSignature,
   allowSend,
-  sendWithTimeout,
   waitForAck,
   recordMetricsSnapshot,
 };

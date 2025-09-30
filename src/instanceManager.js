@@ -58,7 +58,8 @@ async function loadInstances() {
             statusMap: new Map(),
             ackWaiters: new Map(),
             rateWindow: [],
-            ackSentAt: new Map()
+            ackSentAt: new Map(),
+            context: null
         };
         instances.set(item.id, inst);
     }
@@ -115,7 +116,8 @@ async function createInstance(id, name, meta) {
         statusMap: new Map(),
         ackWaiters: new Map(),
         rateWindow: [],
-        ackSentAt: new Map()
+        ackSentAt: new Map(),
+        context: null
     };
 
     instances.set(id, inst);
