@@ -1,16 +1,20 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 
 import type { RuntimeContext } from '../context';
 import { env } from '../env';
 import { allowSend, normalizeToE164BR, sendWithTimeout, waitForAck } from '../utils';
 
+type ExistsRequestBody = { to?: string };
+type SendTextRequestBody = { to?: string; message?: string; waitAckMs?: number };
+
 function serializeInstance(instance: RuntimeContext['instance']) {
-  const connected = Boolean(instance.sock && instance.sock.user);
+  const user = instance.sock?.user ?? null;
+  const connected = Boolean(user);
   return {
     id: instance.id,
     name: instance.name,
     connected,
-    user: connected ? instance.sock.user : null,
+    user,
     metadata: instance.metadata,
     counters: {
       sent: instance.metrics.sent,
@@ -36,7 +40,7 @@ function ensureInstance(ctx: RuntimeContext, id: string) {
 export function createInstancesRouter(ctx: RuntimeContext): Router {
   const router = Router();
 
-  router.get('/', (_req, res) => {
+  router.get('/', (_req: Request, res: Response) => {
     const summary = serializeInstance(ctx.instance);
     res.json([
       {
@@ -48,7 +52,7 @@ export function createInstancesRouter(ctx: RuntimeContext): Router {
     ]);
   });
 
-  router.get('/:id', (req, res) => {
+  router.get('/:id', (req: Request, res: Response) => {
     const instance = ensureInstance(ctx, req.params.id);
     if (!instance) {
       return res.status(404).json({ error: 'instance_not_found' });
@@ -56,7 +60,7 @@ export function createInstancesRouter(ctx: RuntimeContext): Router {
     res.json(serializeInstance(instance));
   });
 
-  router.get('/:id/qr', (req, res) => {
+  router.get('/:id/qr', (req: Request, res: Response) => {
     const instance = ensureInstance(ctx, req.params.id);
     if (!instance) {
       return res.status(404).json({ error: 'instance_not_found' });
@@ -67,7 +71,7 @@ export function createInstancesRouter(ctx: RuntimeContext): Router {
     res.json({ id: instance.id, qr: instance.lastQR });
   });
 
-  router.get('/:id/status', (req, res) => {
+  router.get('/:id/status', (req: Request, res: Response) => {
     const instance = ensureInstance(ctx, req.params.id);
     if (!instance) {
       return res.status(404).json({ error: 'instance_not_found' });
@@ -80,57 +84,66 @@ export function createInstancesRouter(ctx: RuntimeContext): Router {
     res.json({ id: messageId, status });
   });
 
-  router.post('/:id/exists', async (req, res) => {
-    const instance = ensureInstance(ctx, req.params.id);
-    if (!instance || !instance.sock) {
-      return res.status(503).json({ error: 'instance_unavailable' });
-    }
-    const normalized = normalizeToE164BR(req.body?.to);
-    if (!normalized) {
-      return res.status(400).json({ error: 'invalid_recipient' });
-    }
-    const results = await instance.sock.onWhatsApp(normalized);
-    res.json({ results });
-  });
+  router.post(
+    '/:id/exists',
+    async (req: Request<{ id: string }, unknown, ExistsRequestBody>, res: Response) => {
+      const instance = ensureInstance(ctx, req.params.id);
+      const sock = instance?.sock;
+      if (!instance || !sock) {
+        return res.status(503).json({ error: 'instance_unavailable' });
+      }
+      const normalized = normalizeToE164BR(req.body?.to);
+      if (!normalized) {
+        return res.status(400).json({ error: 'invalid_recipient' });
+      }
+      const results = await sock.onWhatsApp(normalized);
+      res.json({ results });
+    },
+  );
 
-  router.post('/:id/send-text', async (req, res) => {
-    const instance = ensureInstance(ctx, req.params.id);
-    if (!instance || !instance.sock) {
-      return res.status(503).json({ error: 'instance_unavailable' });
-    }
-    if (!allowSend(instance)) {
-      return res.status(429).json({ error: 'rate_limit_exceeded' });
-    }
+  router.post(
+    '/:id/send-text',
+    async (req: Request<{ id: string }, unknown, SendTextRequestBody>, res: Response) => {
+      const instance = ensureInstance(ctx, req.params.id);
+      const sock = instance?.sock;
+      if (!instance || !sock) {
+        return res.status(503).json({ error: 'instance_unavailable' });
+      }
+      if (!allowSend(instance)) {
+        return res.status(429).json({ error: 'rate_limit_exceeded' });
+      }
 
-    const { to, message, waitAckMs } = req.body || {};
-    if (!to || !message) {
-      return res.status(400).json({ error: 'missing_to_or_message' });
-    }
+      const { to, message, waitAckMs } = req.body || {};
+      if (!to || !message) {
+        return res.status(400).json({ error: 'missing_to_or_message' });
+      }
 
-    const normalized = normalizeToE164BR(to);
-    if (!normalized) {
-      return res.status(400).json({ error: 'invalid_recipient' });
-    }
+      const normalized = normalizeToE164BR(to);
+      if (!normalized) {
+        return res.status(400).json({ error: 'invalid_recipient' });
+      }
 
-    const check = await instance.sock.onWhatsApp(normalized);
-    const entry = Array.isArray(check) ? check[0] : null;
-    if (!entry || !entry.exists) {
-      return res.status(404).json({ error: 'whatsapp_not_found' });
-    }
+      const check = await sock.onWhatsApp(normalized);
+      const entry = Array.isArray(check) ? check[0] : null;
+      if (!entry || !entry.exists) {
+        return res.status(404).json({ error: 'whatsapp_not_found' });
+      }
 
-    const sent = await sendWithTimeout(instance, normalized, { text: message });
-    instance.metrics.sent += 1;
-    instance.metrics.sent_by_type.text += 1;
-    instance.metrics.last.sentId = sent.key.id;
-    instance.ackSentAt.set(sent.key.id, Date.now());
+      const sent = await sendWithTimeout(instance, normalized, { text: message });
+      instance.metrics.sent += 1;
+      instance.metrics.sent_by_type.text += 1;
+      instance.metrics.last.sentId = sent.key.id;
+      instance.ackSentAt.set(sent.key.id, Date.now());
 
-    let ackStatus: number | null = null;
-    if (waitAckMs) {
-      ackStatus = await waitForAck(instance, sent.key.id, waitAckMs);
-    }
+      let ackStatus: number | null = null;
+      const ackTimeout = Number(waitAckMs);
+      if (Number.isFinite(ackTimeout) && ackTimeout > 0) {
+        ackStatus = await waitForAck(instance, sent.key.id, ackTimeout);
+      }
 
-    res.json({ id: sent.key.id, status: sent.status, ack: ackStatus });
-  });
+      res.json({ id: sent.key.id, status: sent.status, ack: ackStatus });
+    },
+  );
 
   return router;
 }

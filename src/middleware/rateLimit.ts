@@ -14,7 +14,7 @@ export function createRateLimitMiddleware(config: RateLimitConfig): RequestHandl
 
   const buckets = new Map<string, Bucket>();
 
-  return (req, res, next) => {
+  const middleware: RequestHandler = (req, res, next) => {
     const now = Date.now();
     const key = req.ip || req.connection.remoteAddress || 'unknown';
     const existing = buckets.get(key);
@@ -32,4 +32,6 @@ export function createRateLimitMiddleware(config: RateLimitConfig): RequestHandl
     buckets.set(key, existing);
     return next();
   };
+
+  return middleware;
 }

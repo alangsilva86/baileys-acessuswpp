@@ -1,14 +1,26 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 
 import type { RuntimeContext } from '../context';
 import { allowSend, normalizeToE164BR, sendWithTimeout, waitForAck } from '../utils';
 
+interface PollRequestBody {
+  to?: string;
+  question?: string;
+  options?: unknown[];
+  selectableCount?: number;
+  waitAckMs?: number;
+}
+
 export function createPollsRouter(ctx: RuntimeContext): Router {
   const router = Router();
 
-  router.post('/', async (req, res) => {
+  router.post('/', async (
+    req: Request<unknown, unknown, PollRequestBody>,
+    res: Response,
+  ) => {
     const instance = ctx.instance;
-    if (!instance || !instance.sock) {
+    const sock = instance.sock;
+    if (!instance || !sock) {
       return res.status(503).json({ error: 'instance_unavailable' });
     }
 
@@ -38,11 +50,12 @@ export function createPollsRouter(ctx: RuntimeContext): Router {
       return res.status(400).json({ error: 'invalid_options' });
     }
 
-    const selectable = Number.isFinite(Number(selectableCount))
-      ? Math.max(1, Math.min(Number(selectableCount), sanitizedOptions.length))
+    const selectableRaw = Number(selectableCount);
+    const selectable = Number.isFinite(selectableRaw)
+      ? Math.max(1, Math.min(Math.floor(selectableRaw), sanitizedOptions.length))
       : 1;
 
-    const check = await instance.sock.onWhatsApp(normalized);
+    const check = await sock.onWhatsApp(normalized);
     const entry = Array.isArray(check) ? check[0] : null;
     if (!entry || !entry.exists) {
       return res.status(404).json({ error: 'whatsapp_not_found' });
@@ -62,8 +75,9 @@ export function createPollsRouter(ctx: RuntimeContext): Router {
     instance.ackSentAt.set(sent.key.id, Date.now());
 
     let ackStatus: number | null = null;
-    if (waitAckMs) {
-      ackStatus = await waitForAck(instance, sent.key.id, waitAckMs);
+    const ackTimeout = Number(waitAckMs);
+    if (Number.isFinite(ackTimeout) && ackTimeout > 0) {
+      ackStatus = await waitForAck(instance, sent.key.id, ackTimeout);
     }
 
     res.status(201).json({ id: sent.key.id, status: sent.status, ack: ackStatus });

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import cors from 'cors';
-import express from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
 import helmet from 'helmet';
 
 import { createRuntimeContext } from './context';
@@ -22,7 +22,7 @@ async function bootstrap() {
   app.use(cors());
   app.use(express.json({ limit: '1mb' }));
 
-  app.use((req, res, next) => {
+  app.use((req: Request, res: Response, next: NextFunction) => {
     const reqId = randomUUID();
     (req as any).id = reqId;
     const start = Date.now();
@@ -55,7 +55,12 @@ async function bootstrap() {
 
   app.use(protectedRouter);
 
-  app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  app.use((
+    err: unknown,
+    req: Request,
+    res: Response,
+    _next: NextFunction,
+  ) => {
     logger.error({ err, path: req.originalUrl }, 'request.error');
     res.status(500).json({ error: 'internal_server_error' });
   });

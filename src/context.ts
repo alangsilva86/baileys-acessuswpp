@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { WASocket } from '@whiskeysockets/baileys';
 import pino from 'pino';
 
 import { env } from './env';
@@ -14,7 +15,7 @@ export interface ManagedInstance {
   id: string;
   name: string;
   dir: string;
-  sock: any;
+  sock: WASocket | null;
   lastQR: string | null;
   reconnectDelay: number;
   stopping: boolean;
@@ -97,9 +98,9 @@ export async function createRuntimeContext(): Promise<RuntimeContext> {
     ackSentAt: new Map(),
   };
 
-  await startWhatsAppInstance(managedInstance);
-
   const logger = pino({ level: env.logLevel, base: { service: env.serviceName } });
+
+  await startWhatsAppInstance(managedInstance, logger);
 
   return {
     logger,

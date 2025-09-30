@@ -13,7 +13,7 @@ function timingSafeEqual(a: string, b: string): boolean {
 export function createApiKeyMiddleware(keys: string[]): RequestHandler {
   const normalizedKeys = keys.map((key) => key.trim()).filter(Boolean);
 
-  return (req, res, next) => {
+  const middleware: RequestHandler = (req, res, next) => {
     if (!normalizedKeys.length) {
       return res.status(401).json({ error: 'unauthorized', message: 'API key not configured.' });
     }
@@ -34,4 +34,6 @@ export function createApiKeyMiddleware(keys: string[]): RequestHandler {
 
     return next();
   };
+
+  return middleware;
 }
