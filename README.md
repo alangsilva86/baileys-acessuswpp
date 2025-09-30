@@ -4,7 +4,7 @@ Uma API completa para WhatsApp usando a biblioteca Baileys, com interface web pa
 
 ## Características
 
-- ✅ Múltiplas instâncias de WhatsApp
+- ✅ Contexto único de WhatsApp simplificado
 - ✅ Interface web com dashboard
 - ✅ Métricas e estatísticas em tempo real
 - ✅ Rate limiting configurável
@@ -56,7 +56,7 @@ npm start
 
 Acesse `http://localhost:3000` para usar o dashboard web onde você pode:
 
-- Criar e gerenciar instâncias
+- Acompanhar o status da sessão única
 - Visualizar QR codes para autenticação
 - Monitorar métricas em tempo real
 - Enviar mensagens de teste
@@ -65,40 +65,31 @@ Acesse `http://localhost:3000` para usar o dashboard web onde você pode:
 
 Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 
-#### Instâncias
+#### Sessão
 
-- `POST /instances` - Criar nova instância
-- `GET /instances` - Listar todas as instâncias
-- `GET /instances/:id` - Obter detalhes de uma instância
-- `PATCH /instances/:id` - Atualizar instância
-- `DELETE /instances/:id` - Deletar instância
-
-#### Autenticação
-
-- `GET /instances/:id/qr.png` - Obter QR code como imagem
-- `POST /instances/:id/pair` - Solicitar código de pareamento
-- `POST /instances/:id/logout` - Desconectar sessão
+- `GET /instances` - Obter informações da instância padrão
+- `GET /instances/:id` - Obter detalhes (para compatibilidade)
+- `GET /instances/qr.png` - Obter QR code como imagem
 
 #### Mensagens
 
-- `POST /instances/:id/send-text` - Enviar mensagem de texto
-- `POST /instances/:id/exists` - Verificar se número existe no WhatsApp
-- `GET /instances/:id/status` - Verificar status de mensagem
+- `POST /instances/send-text` - Enviar mensagem de texto
+- `POST /instances/exists` - Verificar se número existe no WhatsApp
+- `GET /instances/status` - Verificar status de mensagem
 
 #### Grupos
 
-- `GET /instances/:id/groups` - Listar grupos da instância
+- `GET /instances/groups` - Listar grupos da instância
 
 #### Métricas
 
-- `GET /instances/:id/metrics` - Obter métricas detalhadas
+- `GET /instances/metrics` - Obter métricas detalhadas
 
 ## Estrutura do Projeto
 
 ```
 ├── src/
-│   ├── instanceManager.js    # Gerenciamento de instâncias
-│   ├── whatsapp.js          # Integração com Baileys
+│   ├── whatsapp.js          # Inicialização do Baileys e contexto
 │   ├── utils.js             # Funções utilitárias
 │   └── routes/
 │       └── instances.js     # Rotas da API

@@ -4,8 +4,8 @@ const path = require('path');
 const express = require('express');
 const crypto = require('crypto');
 const pino = require('pino');
-const { loadInstances, startAllInstances } = require('./src/instanceManager');
-const instanceRoutes = require('./src/routes/instances');
+const { bootBaileys } = require('./src/whatsapp');
+const createInstanceRoutes = require('./src/routes/instances');
 
 // --------------------------- Config ---------------------------
 const PORT = Number(process.env.PORT || 3000);
@@ -34,9 +34,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// --------------------------- Routes ---------------------------
-app.use('/instances', instanceRoutes);
-
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -49,8 +46,8 @@ app.use((err, req, res, next) => {
 
 // --------------------------- Start ----------------------------
 async function main() {
-  await loadInstances();
-  await startAllInstances();
+  const ctx = await bootBaileys();
+  app.use('/instances', createInstanceRoutes(ctx));
   app.listen(PORT, () => {
     logger.info({ port: PORT }, 'server.listening');
   });
