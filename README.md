@@ -45,6 +45,8 @@ npm start
 - `PORT`: Porta do servidor (padrão: 3000)
 - `API_KEY`: Chave de API para autenticação (obrigatório)
 - `SESSION_DIR`: Diretório para armazenar sessões (padrão: ./sessions)
+- `BROKER_MODE`: Quando definido como `true`, inicializa o servidor no modo broker minimalista (desabilita o dashboard e rotas legadas)
+- `LEADENGINE_INSTANCE_ID`: Identificador padrão da sessão usada no modo broker (padrão: `leadengine`)
 - `LOG_LEVEL`: Nível de log (padrão: info)
 - `SERVICE_NAME`: Nome do serviço para logs (padrão: baileys-api)
 - `WEBHOOK_URL`: URL para receber webhooks de eventos
@@ -102,6 +104,25 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 
 - `GET /instances/:id/metrics` - Obter métricas detalhadas
 
+### Modo Broker Minimalista
+
+O modo broker é pensado para integrações server-to-server com o LeadEngine, mantendo o backend enxuto e orientado a filas HTTP. Para habilitar:
+
+```bash
+BROKER_MODE=true npm start
+```
+
+Quando ativo, as rotas legadas `/instances` e o dashboard são desabilitados. Os endpoints disponíveis ficam sob o prefixo `/broker`:
+
+- `POST /broker/session/connect` — inicializa (ou reutiliza) a sessão declarada em `LEADENGINE_INSTANCE_ID` e retorna o status atual (incluindo QR se disponível).
+- `POST /broker/session/logout` — encerra a sessão atual; envie `{ "wipe": true }` para remover o diretório em disco.
+- `GET /broker/session/status` — consulta o estado e métricas básicas da sessão.
+- `POST /broker/messages` — envia mensagens de texto; suporta `waitAckMs` para aguardar ACK e `timeoutMs` para sobrescrever o timeout padrão.
+- `GET /broker/events` — lista eventos pendentes na fila HTTP (mensagens inbound/outbound e votos de enquete) com suporte a filtros (`instanceId`, `type`, `direction`).
+- `POST /broker/events/ack` — confirma o consumo de eventos informando uma lista de IDs.
+
+O endpoint `/health` passa a incluir a chave `queue` com estatísticas da fila (`pending`, `total`, `lastEventAt`, `lastAckAt`).
+
 ## Estrutura do Projeto
 
 ```
@@ -110,9 +131,11 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 │   ├── whatsapp.ts           # Integração com Baileys e serviços auxiliares
 │   ├── utils.ts              # Funções utilitárias
 │   ├── server.ts             # Servidor HTTP (Express)
+│   ├── broker/               # Componentes do modo broker (event store)
 │   ├── baileys/              # Serviços de mensagens e enquetes
 │   ├── services/             # Camada de integração externa (webhook, lead mapper)
 │   └── routes/
+│       ├── broker.ts         # Rotas minimalistas para o LeadEngine
 │       └── instances.ts      # Rotas da API
 ├── public/
 │   ├── index.html          # Interface web

@@ -7,6 +7,8 @@ import { startWhatsAppInstance, stopWhatsAppInstance, type InstanceContext } fro
 const SESSIONS_ROOT = process.env.SESSION_DIR || './sessions';
 const INSTANCES_INDEX = path.join(process.cwd(), 'instances.json');
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+const BROKER_MODE = process.env.BROKER_MODE === 'true';
+const BROKER_INSTANCE_ID = process.env.LEADENGINE_INSTANCE_ID || 'leadengine';
 
 type AckStatusCode = number;
 
@@ -102,7 +104,35 @@ function createMetadata(base?: Partial<InstanceMetadata>): InstanceMetadata {
   };
 }
 
+function createInstanceRecord(
+  id: string,
+  name: string,
+  dir: string,
+  meta?: Partial<InstanceMetadata>,
+): Instance {
+  return {
+    id,
+    name,
+    dir,
+    sock: null,
+    lastQR: null,
+    reconnectDelay: 1000,
+    stopping: false,
+    reconnectTimer: null,
+    metadata: createMetadata(meta),
+    metrics: createEmptyMetrics(),
+    statusMap: new Map(),
+    statusTimestamps: new Map(),
+    statusCleanupTimer: null,
+    ackWaiters: new Map(),
+    rateWindow: [],
+    ackSentAt: new Map(),
+    context: null,
+  };
+}
+
 async function saveInstancesIndex(): Promise<void> {
+  if (BROKER_MODE) return;
   const index = [...instances.values()].map((instance) => ({
     id: instance.id,
     name: instance.name,
@@ -124,6 +154,17 @@ async function saveInstancesIndex(): Promise<void> {
 async function loadInstances(): Promise<void> {
   try {
     await mkdir(SESSIONS_ROOT, { recursive: true });
+    if (BROKER_MODE) {
+      if (!instances.has(BROKER_INSTANCE_ID)) {
+        const dir = path.join(SESSIONS_ROOT, BROKER_INSTANCE_ID);
+        const instance = createInstanceRecord(BROKER_INSTANCE_ID, BROKER_INSTANCE_ID, dir, {
+          note: 'LeadEngine broker instance',
+        });
+        instances.set(BROKER_INSTANCE_ID, instance);
+      }
+      logger.info({ count: instances.size }, 'instances.broker.loaded');
+      return;
+    }
     const raw = await readFile(INSTANCES_INDEX, 'utf8');
     const list = JSON.parse(raw);
     if (!Array.isArray(list)) return;
@@ -131,25 +172,12 @@ async function loadInstances(): Promise<void> {
     for (const item of list) {
       if (!item?.id) continue;
       const metadata = createMetadata(item.metadata);
-      const instance: Instance = {
-        id: item.id,
-        name: item.name || item.id,
-        dir: item.dir || path.join(SESSIONS_ROOT, item.id),
-        sock: null,
-        lastQR: null,
-        reconnectDelay: 1000,
-        stopping: false,
-        reconnectTimer: null,
+      const instance = createInstanceRecord(
+        item.id,
+        item.name || item.id,
+        item.dir || path.join(SESSIONS_ROOT, item.id),
         metadata,
-        metrics: createEmptyMetrics(),
-        statusMap: new Map(),
-        statusTimestamps: new Map(),
-        statusCleanupTimer: null,
-        ackWaiters: new Map(),
-        rateWindow: [],
-        ackSentAt: new Map(),
-        context: null,
-      };
+      );
       instances.set(item.id, instance);
     }
 
@@ -163,6 +191,10 @@ async function loadInstances(): Promise<void> {
 }
 
 async function startAllInstances(): Promise<void> {
+  if (BROKER_MODE) {
+    logger.info('broker.mode active, skipping auto start for instances');
+    return;
+  }
   logger.info({ count: instances.size }, 'instances.starting');
   for (const instance of instances.values()) {
     try {
@@ -173,33 +205,33 @@ async function startAllInstances(): Promise<void> {
   }
 }
 
-async function createInstance(id: string, name: string, meta?: Partial<InstanceMetadata>): Promise<Instance> {
-  const dir = path.join(SESSIONS_ROOT, id);
-  await mkdir(dir, { recursive: true });
+interface CreateInstanceOptions {
+  persist?: boolean;
+  autoStart?: boolean;
+  dir?: string;
+}
 
-  const instance: Instance = {
-    id,
-    name,
-    dir,
-    sock: null,
-    lastQR: null,
-    reconnectDelay: 1000,
-    stopping: false,
-    reconnectTimer: null,
-    metadata: createMetadata(meta),
-    metrics: createEmptyMetrics(),
-    statusMap: new Map(),
-    statusTimestamps: new Map(),
-    statusCleanupTimer: null,
-    ackWaiters: new Map(),
-    rateWindow: [],
-    ackSentAt: new Map(),
-    context: null,
-  };
+async function createInstance(
+  id: string,
+  name: string,
+  meta?: Partial<InstanceMetadata>,
+  options: CreateInstanceOptions = {},
+): Promise<Instance> {
+  const { persist = !BROKER_MODE, autoStart = true, dir } = options;
+  const targetDir = dir ?? path.join(SESSIONS_ROOT, id);
+  await mkdir(targetDir, { recursive: true });
 
+  const instance = createInstanceRecord(id, name, targetDir, meta);
   instances.set(id, instance);
-  await startWhatsAppInstance(instance);
-  await saveInstancesIndex();
+
+  if (autoStart) {
+    await startWhatsAppInstance(instance);
+  }
+
+  if (persist) {
+    await saveInstancesIndex();
+  }
+
   return instance;
 }
 
@@ -212,7 +244,9 @@ async function deleteInstance(
 
   await stopWhatsAppInstance(instance, { logout });
   instances.delete(iid);
-  await saveInstancesIndex();
+  if (!BROKER_MODE) {
+    await saveInstancesIndex();
+  }
 
   if (removeDir) {
     try {
@@ -233,4 +267,51 @@ function getAllInstances(): Instance[] {
   return [...instances.values()];
 }
 
-export { loadInstances, saveInstancesIndex, startAllInstances, createInstance, deleteInstance, getInstance, getAllInstances };
+async function ensureInstance(
+  id: string,
+  options: { name?: string; meta?: Partial<InstanceMetadata>; autoStart?: boolean } = {},
+): Promise<Instance> {
+  const existing = getInstance(id);
+  if (existing) {
+    if (options.autoStart && !existing.sock) {
+      await startWhatsAppInstance(existing);
+    }
+    return existing;
+  }
+
+  const name = options.name || id;
+  const instance = await createInstance(id, name, options.meta, {
+    persist: !BROKER_MODE,
+    autoStart: options.autoStart ?? false,
+  });
+  return instance;
+}
+
+async function ensureInstanceStarted(id: string, options: { name?: string } = {}): Promise<Instance> {
+  const instance = await ensureInstance(id, { ...options, autoStart: true });
+  if (!instance.sock) {
+    await startWhatsAppInstance(instance);
+  }
+  return instance;
+}
+
+async function removeInstance(id: string, options: { logout?: boolean; removeDir?: boolean } = {}): Promise<void> {
+  const instance = instances.get(id);
+  if (!instance) return;
+  await deleteInstance(id, options);
+}
+
+export {
+  loadInstances,
+  saveInstancesIndex,
+  startAllInstances,
+  createInstance,
+  deleteInstance,
+  getInstance,
+  getAllInstances,
+  ensureInstance,
+  ensureInstanceStarted,
+  removeInstance,
+  BROKER_MODE,
+  BROKER_INSTANCE_ID,
+};
