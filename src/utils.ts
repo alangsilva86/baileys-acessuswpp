@@ -5,7 +5,7 @@ import type { Instance } from './instanceManager.js';
 const RATE_MAX_SENDS = Number(process.env.RATE_MAX_SENDS || 20);
 const RATE_WINDOW_MS = Number(process.env.RATE_WINDOW_MS || 15_000);
 const E164_BRAZIL = /^55\d{10,11}$/;
-const SEND_TIMEOUT_MS = 25_000;
+const DEFAULT_SEND_TIMEOUT_MS = 25_000;
 const METRICS_TIMELINE_MAX = 288;
 const METRICS_TIMELINE_MIN_INTERVAL_MS = 5 * 60_000;
 
@@ -32,6 +32,14 @@ export function allowSend(inst: Instance): boolean {
   return true;
 }
 
+export function getSendTimeoutMs(): number {
+  const parsed = Number(process.env.SEND_TIMEOUT_MS);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return DEFAULT_SEND_TIMEOUT_MS;
+}
+
 export async function sendWithTimeout(
   inst: Instance,
   jid: string,
@@ -41,10 +49,12 @@ export async function sendWithTimeout(
     throw new Error('socket unavailable');
   }
 
+  const timeoutMs = getSendTimeoutMs();
+
   return Promise.race([
     inst.sock.sendMessage(jid, content),
     new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('send timeout')), SEND_TIMEOUT_MS);
+      setTimeout(() => reject(new Error('send timeout')), timeoutMs);
     }),
   ]);
 }

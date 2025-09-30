@@ -52,7 +52,7 @@ npm start
 - `WEBHOOK_HMAC_SECRET`: Segredo opcional para assinar os eventos via HMAC
 - `RATE_MAX_SENDS`: Máximo de mensagens por janela de tempo (padrão: 20)
 - `RATE_WINDOW_MS`: Janela de tempo para rate limiting em ms (padrão: 15000)
-- `SEND_TIMEOUT_MS`: Timeout padrão para envios ativos (padrão: 25000)
+- `SEND_TIMEOUT_MS`: Timeout padrão para envios ativos, aplicado tanto às rotas HTTP quanto ao `MessageService` (padrão: 25000)
 - `POLL_STORE_TTL_MS`: Tempo de retenção das mensagens de enquete (padrão: 6h)
 - `POLL_FEEDBACK_TEMPLATE`: Template opcional para resposta automática após voto em enquete
 

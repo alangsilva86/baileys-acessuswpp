@@ -9,6 +9,7 @@ import { getAggregateVotesInPollMessage } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { mapLeadFromMessage } from '../services/leadMapper.js';
 import { WebhookClient } from '../services/webhook.js';
+import { getSendTimeoutMs } from '../utils.js';
 import { PollMessageStore } from './store.js';
 import type { MessageService } from './messageService.js';
 
@@ -163,7 +164,7 @@ export class PollService {
     try {
       if (this.messageService) {
         await this.messageService.sendText(voterJid, text, {
-          timeoutMs: Number(process.env.SEND_TIMEOUT_MS || 25_000),
+          timeoutMs: getSendTimeoutMs(),
         });
       } else {
         await this.sock.sendMessage(voterJid, { text });
