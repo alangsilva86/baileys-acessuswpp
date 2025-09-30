@@ -45,6 +45,10 @@ if (BROKER_FLAG) {
             'https://cdn.tailwindcss.com',
             'https://cdn.jsdelivr.net',
           ],
+          'img-src': [
+            ...(defaultCsp['img-src'] ?? []),
+            'blob:',
+          ],
         },
       },
     }),
