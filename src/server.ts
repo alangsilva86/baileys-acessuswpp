@@ -2,9 +2,10 @@ import 'dotenv/config';
 import path from 'path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import helmet from 'helmet';
+import cors from 'cors';
 import crypto from 'node:crypto';
 import pino from 'pino';
-import { loadInstances, startAllInstances } from './instanceManager.js';
+import { getAllInstances, loadInstances, startAllInstances } from './instanceManager.js';
 import instanceRoutes from './routes/instances.js';
 
 const PORT = Number(process.env.PORT || 3000);
@@ -20,7 +21,9 @@ interface RequestWithId extends Request {
 const PUBLIC_DIR = path.resolve(process.cwd(), 'public');
 
 const app = express();
+app.disable('x-powered-by');
 app.use(helmet());
+app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(PUBLIC_DIR));
 
@@ -45,6 +48,14 @@ app.use((req, res, next) => {
 });
 
 app.use('/instances', instanceRoutes);
+
+app.get('/health', (_req, res) => {
+  const instances = getAllInstances().map((inst) => ({
+    id: inst.id,
+    connected: Boolean(inst.sock?.user),
+  }));
+  res.json({ status: 'ok', uptime: process.uptime(), instances });
+});
 
 app.get('/', (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));

@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile, rm } from 'fs/promises';
 import path from 'path';
 import pino from 'pino';
 import type { WASocket } from '@whiskeysockets/baileys';
-import { startWhatsAppInstance, stopWhatsAppInstance } from './whatsapp.js';
+import { startWhatsAppInstance, stopWhatsAppInstance, type InstanceContext } from './whatsapp.js';
 
 const SESSIONS_ROOT = process.env.SESSION_DIR || './sessions';
 const INSTANCES_INDEX = path.join(process.cwd(), 'instances.json');
@@ -74,6 +74,7 @@ export interface Instance {
   ackWaiters: Map<string, AckWaiter>;
   rateWindow: number[];
   ackSentAt: Map<string, number>;
+  context: InstanceContext | null;
 }
 
 const instances = new Map<string, Instance>();
@@ -143,6 +144,7 @@ async function loadInstances(): Promise<void> {
         ackWaiters: new Map(),
         rateWindow: [],
         ackSentAt: new Map(),
+        context: null,
       };
       instances.set(item.id, instance);
     }
@@ -186,6 +188,7 @@ async function createInstance(id: string, name: string, meta?: Partial<InstanceM
     ackWaiters: new Map(),
     rateWindow: [],
     ackSentAt: new Map(),
+    context: null,
   };
 
   instances.set(id, instance);

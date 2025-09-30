@@ -8,10 +8,11 @@ Uma API completa para WhatsApp usando a biblioteca Baileys, com interface web pa
 - ✅ Interface web com dashboard
 - ✅ Métricas e estatísticas em tempo real
 - ✅ Rate limiting configurável
-- ✅ Webhooks para eventos
+- ✅ Webhooks para eventos estruturados
 - ✅ Autenticação por API Key
 - ✅ Logs estruturados com Pino
 - ✅ Suporte a QR Code e pareamento por código
+- ✅ Envio de enquetes (polls) com feedback opcional
 
 ## Instalação
 
@@ -47,8 +48,13 @@ npm start
 - `LOG_LEVEL`: Nível de log (padrão: info)
 - `SERVICE_NAME`: Nome do serviço para logs (padrão: baileys-api)
 - `WEBHOOK_URL`: URL para receber webhooks de eventos
+- `WEBHOOK_API_KEY`: Chave opcional para autenticar o webhook
+- `WEBHOOK_HMAC_SECRET`: Segredo opcional para assinar os eventos via HMAC
 - `RATE_MAX_SENDS`: Máximo de mensagens por janela de tempo (padrão: 20)
 - `RATE_WINDOW_MS`: Janela de tempo para rate limiting em ms (padrão: 15000)
+- `SEND_TIMEOUT_MS`: Timeout padrão para envios ativos (padrão: 25000)
+- `POLL_STORE_TTL_MS`: Tempo de retenção das mensagens de enquete (padrão: 6h)
+- `POLL_FEEDBACK_TEMPLATE`: Template opcional para resposta automática após voto em enquete
 
 ## Uso
 
@@ -64,6 +70,8 @@ Acesse `http://localhost:3000` para usar o dashboard web onde você pode:
 ### API Endpoints
 
 Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
+
+- `GET /health` - Status da API e conexões ativas
 
 #### Instâncias
 
@@ -82,6 +90,7 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 #### Mensagens
 
 - `POST /instances/:id/send-text` - Enviar mensagem de texto
+- `POST /instances/:id/send-poll` - Enviar enquete para um contato ou grupo
 - `POST /instances/:id/exists` - Verificar se número existe no WhatsApp
 - `GET /instances/:id/status` - Verificar status de mensagem
 
@@ -97,16 +106,18 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 
 ```
 ├── src/
-│   ├── instanceManager.js    # Gerenciamento de instâncias
-│   ├── whatsapp.js          # Integração com Baileys
-│   ├── utils.js             # Funções utilitárias
+│   ├── instanceManager.ts    # Gerenciamento de instâncias
+│   ├── whatsapp.ts           # Integração com Baileys e serviços auxiliares
+│   ├── utils.ts              # Funções utilitárias
+│   ├── server.ts             # Servidor HTTP (Express)
+│   ├── baileys/              # Serviços de mensagens e enquetes
+│   ├── services/             # Camada de integração externa (webhook, lead mapper)
 │   └── routes/
-│       └── instances.js     # Rotas da API
+│       └── instances.ts      # Rotas da API
 ├── public/
 │   ├── index.html          # Interface web
 │   └── dashboard.js        # JavaScript do dashboard
 ├── sessions/               # Diretório de sessões (criado automaticamente)
-├── server.js              # Servidor principal
 ├── package.json           # Dependências
 └── .env                   # Configurações (criar a partir do .env.example)
 ```
