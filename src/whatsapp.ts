@@ -20,6 +20,22 @@ const API_KEYS = String(process.env.API_KEY || 'change-me')
   .map((s) => s.trim())
   .filter(Boolean);
 
+const STATUS_HISTORY_LIMIT = 1000;
+
+function isTerminalStatus(status: number): boolean {
+  return Number.isFinite(status) && status >= 5;
+}
+
+function rememberFinalStatus(inst: Instance, messageId: string, status: number): void {
+  inst.statusHistory.set(messageId, status);
+  if (inst.statusHistory.size > STATUS_HISTORY_LIMIT) {
+    const oldest = inst.statusHistory.keys().next();
+    if (!oldest.done && oldest.value) {
+      inst.statusHistory.delete(oldest.value);
+    }
+  }
+}
+
 export interface InstanceContext {
   messageService: MessageService;
   pollService: PollService;
@@ -148,49 +164,56 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       .catch((err: any) => logger.warn({ iid, err: err?.message }, 'poll.service.messages.update.failed'));
     for (const update of updates) {
       const messageId = update.key?.id;
-      const status = update.update?.status;
-      if (messageId && status != null) {
-        const prevStatus = inst.statusMap.get(messageId);
-        const prevKey = prevStatus == null ? null : String(prevStatus);
-        const nextKey = String(status);
+      const statusRaw = update.update?.status;
+      if (!messageId || statusRaw == null) {
+        logger.info({ iid, mid: messageId, status: statusRaw }, 'messages.status.ignored');
+        continue;
+      }
 
-        if (prevKey && prevKey !== nextKey) {
-          const prevCount = inst.metrics.status_counts[prevKey] || 0;
-          inst.metrics.status_counts[prevKey] = Math.max(prevCount - 1, 0);
-        }
+      const status = Number(statusRaw);
+      if (!Number.isFinite(status)) {
+        logger.info({ iid, mid: messageId, status: statusRaw }, 'messages.status.invalid');
+        continue;
+      }
 
-        if (prevKey !== nextKey) {
-          inst.metrics.status_counts[nextKey] =
-            (inst.metrics.status_counts[nextKey] || 0) + 1;
-        }
+      const wasFinal = inst.statusHistory.get(messageId);
+      if (wasFinal != null && !isTerminalStatus(status)) {
+        inst.statusHistory.delete(messageId);
+      }
 
-        inst.statusMap.set(messageId, status);
-        inst.metrics.last.lastStatusId = messageId;
-        inst.metrics.last.lastStatusCode = status;
+      inst.statusMap.set(messageId, status);
+      inst.metrics.last.lastStatusId = messageId;
+      inst.metrics.last.lastStatusCode = status;
 
-        if (status >= 2 && inst.ackSentAt?.has(messageId)) {
-          const sentAt = inst.ackSentAt.get(messageId);
-          inst.ackSentAt.delete(messageId);
-          if (sentAt) {
-            const delta = Math.max(0, Date.now() - sentAt);
-            inst.metrics.ack.totalMs += delta;
-            inst.metrics.ack.count += 1;
-            inst.metrics.ack.lastMs = delta;
-            inst.metrics.ack.avgMs = Math.round(
-              inst.metrics.ack.totalMs / Math.max(inst.metrics.ack.count, 1),
-            );
-          }
-        }
-
-        recordMetricsSnapshot(inst);
-
-        const waiter = inst.ackWaiters.get(messageId);
-        if (waiter) {
-          clearTimeout(waiter.timer);
-          inst.ackWaiters.delete(messageId);
-          waiter.resolve(status);
+      if (status >= 2 && inst.ackSentAt?.has(messageId)) {
+        const sentAt = inst.ackSentAt.get(messageId);
+        inst.ackSentAt.delete(messageId);
+        if (sentAt) {
+          const delta = Math.max(0, Date.now() - sentAt);
+          inst.metrics.ack.totalMs += delta;
+          inst.metrics.ack.count += 1;
+          inst.metrics.ack.lastMs = delta;
+          inst.metrics.ack.avgMs = Math.round(
+            inst.metrics.ack.totalMs / Math.max(inst.metrics.ack.count, 1),
+          );
         }
       }
+
+      recordMetricsSnapshot(inst);
+
+      if (isTerminalStatus(status)) {
+        inst.statusMap.delete(messageId);
+        rememberFinalStatus(inst, messageId, status);
+        recordMetricsSnapshot(inst, true);
+      }
+
+      const waiter = inst.ackWaiters.get(messageId);
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        inst.ackWaiters.delete(messageId);
+        waiter.resolve(status);
+      }
+
       logger.info({ iid, mid: messageId, status }, 'messages.status');
     }
   });

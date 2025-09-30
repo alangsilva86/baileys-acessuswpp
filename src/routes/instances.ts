@@ -301,8 +301,11 @@ router.get('/:iid/status', (req, res) => {
     res.status(400).json({ error: 'id obrigatório' });
     return;
   }
-  const status = inst.statusMap.get(id) ?? null;
-  res.json({ id, status });
+  const activeStatus = inst.statusMap.get(id);
+  const historicalStatus = inst.statusHistory.get(id) ?? null;
+  const status = activeStatus ?? historicalStatus ?? null;
+  const final = activeStatus == null && historicalStatus != null;
+  res.json({ id, status, final });
 });
 
 router.get(

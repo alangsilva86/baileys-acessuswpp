@@ -71,6 +71,7 @@ export interface Instance {
   metadata: InstanceMetadata;
   metrics: InstanceMetrics;
   statusMap: Map<string, AckStatusCode>;
+  statusHistory: Map<string, AckStatusCode>;
   ackWaiters: Map<string, AckWaiter>;
   rateWindow: number[];
   ackSentAt: Map<string, number>;
@@ -141,6 +142,7 @@ async function loadInstances(): Promise<void> {
         metadata,
         metrics: createEmptyMetrics(),
         statusMap: new Map(),
+        statusHistory: new Map(),
         ackWaiters: new Map(),
         rateWindow: [],
         ackSentAt: new Map(),
@@ -185,6 +187,7 @@ async function createInstance(id: string, name: string, meta?: Partial<InstanceM
     metadata: createMetadata(meta),
     metrics: createEmptyMetrics(),
     statusMap: new Map(),
+    statusHistory: new Map(),
     ackWaiters: new Map(),
     rateWindow: [],
     ackSentAt: new Map(),
