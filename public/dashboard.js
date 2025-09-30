@@ -5,11 +5,15 @@ const els = {
   selInstance: document.getElementById('selInstance'),
   btnNew: document.getElementById('btnNew'),
   cards: document.getElementById('cards'),
+  cardsSkeleton: document.getElementById('cardsSkeleton'),
+  instanceLoading: document.getElementById('instanceLoading'),
 
   // Note card
   noteCard: document.getElementById('noteCard'),
   noteMeta: document.getElementById('noteMeta'),
   instanceNote: document.getElementById('instanceNote'),
+  noteStatus: document.getElementById('noteStatus'),
+  noteRetry: document.getElementById('noteRetry'),
 
   // KPIs
   selRange: document.getElementById('selRange'),
@@ -22,10 +26,13 @@ const els = {
   kpiAckValue: document.getElementById('kpiAckValue'),
   kpiAckHint: document.getElementById('kpiAckHint'),
   chartHint: document.getElementById('chartHint'),
+  metricsSkeleton: document.getElementById('metricsSkeleton'),
 
   // QR / ações rápidas
+  qrWrap: document.getElementById('qrWrap'),
   qrImg: document.getElementById('qrImg'),
   qrHint: document.getElementById('qrHint'),
+  qrLoader: document.getElementById('qrLoader'),
   btnLogout: document.getElementById('btnLogout'),
   btnWipe: document.getElementById('btnWipe'),
   btnPair: document.getElementById('btnPair'),
@@ -36,12 +43,19 @@ const els = {
   inpMsg: document.getElementById('inpMsg'),
   btnSend: document.getElementById('btnSend'),
   sendOut: document.getElementById('sendOut'),
+  msgCounter: document.getElementById('msgCounter'),
 
   // Modal
   modalDelete: document.getElementById('modalDelete'),
   modalInstanceName: document.getElementById('modalInstanceName'),
   modalConfirm: document.querySelector('[data-act="modal-confirm"]'),
   modalCancel: document.querySelector('[data-act="modal-cancel"]'),
+
+  // Pair modal
+  pairModal: document.getElementById('pairModal'),
+  pairModalCode: document.getElementById('pairModalCode'),
+  pairModalClose: document.getElementById('pairModalClose'),
+  pairModalCopy: document.getElementById('pairModalCopy'),
 };
 
 const STATUS_META = {
@@ -91,6 +105,17 @@ const TIMELINE_FIELDS = {
   '5': 'played',
 };
 
+const NOTE_STATE = {
+  lastSaved: '',
+  createdAt: null,
+  updatedAt: null,
+  timer: null,
+  pending: '',
+  saving: false,
+};
+
+const REFRESH_INTERVAL_MS = 5000;
+
 /* ---------- Helpers UI ---------- */
 const BADGE_STYLES = {
   'status-connected': 'bg-emerald-100 text-emerald-800',
@@ -122,6 +147,78 @@ function setStatusBadge(connected, name) {
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escapeHtml(val) { return String(val ?? '').replace(/[&<>"']/g, ch => HTML_ESCAPES[ch] || ch); }
 
+function toggleHidden(el, hidden) {
+  if (!el) return;
+  el.classList[hidden ? 'add' : 'remove']('hidden');
+}
+
+function setBusy(button, busy, label) {
+  if (!button) return;
+  if (busy) {
+    if (!button.dataset.originalLabel) button.dataset.originalLabel = button.textContent;
+    button.disabled = true;
+    button.innerHTML = `<span class="inline-flex items-center gap-2 justify-center"><span class="h-4 w-4 border-2 border-white/50 border-t-transparent rounded-full animate-spin"></span>${label || button.dataset.originalLabel}</span>`;
+  } else {
+    button.disabled = false;
+    if (button.dataset.originalLabel) {
+      button.textContent = button.dataset.originalLabel;
+      delete button.dataset.originalLabel;
+    }
+  }
+}
+
+function setCardsLoading(isLoading) {
+  toggleHidden(els.cardsSkeleton, !isLoading);
+  toggleHidden(els.instanceLoading, !isLoading);
+}
+
+function setMetricsLoading(isLoading) {
+  toggleHidden(els.metricsSkeleton, !isLoading);
+}
+
+function setQrState(state, message) {
+  if (els.qrWrap) {
+    els.qrWrap.classList.remove('border-emerald-300', 'border-rose-300', 'border-slate-200', 'border-sky-300', 'border-amber-300');
+    const classMap = {
+      connected: 'border-emerald-300',
+      disconnected: 'border-sky-300',
+      error: 'border-rose-300',
+      'needs-key': 'border-amber-300',
+    };
+    els.qrWrap.classList.add(classMap[state] || 'border-slate-200');
+  }
+  toggleHidden(els.qrLoader, state !== 'loading');
+  if (message && els.qrHint) els.qrHint.textContent = message;
+}
+
+function validateE164(value) {
+  return /^\+?[1-9]\d{7,14}$/.test(value);
+}
+
+const SEND_OUT_CLASSES = {
+  success: 'text-emerald-700 bg-emerald-50',
+  error: 'text-rose-700 bg-rose-50',
+  info: 'text-slate-600 bg-slate-50',
+};
+
+function setSendOut(message, tone = 'info') {
+  if (!els.sendOut) return;
+  els.sendOut.textContent = message;
+  const toneClass = SEND_OUT_CLASSES[tone] || SEND_OUT_CLASSES.info;
+  els.sendOut.className = 'text-xs rounded p-2 min-h-[2rem] ' + toneClass;
+}
+
+function updateMsgCounter() {
+  if (!els.msgCounter || !els.inpMsg) return;
+  const len = els.inpMsg.value.length;
+  els.msgCounter.textContent = len;
+  if (len > 4096) {
+    els.msgCounter.classList.add('text-rose-600');
+  } else {
+    els.msgCounter.classList.remove('text-rose-600');
+  }
+}
+
 function getStatusCounts(src) {
   const base = src || {};
   const result = {};
@@ -134,11 +231,103 @@ function getStatusCounts(src) {
 
 const dateTimeFmt = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
 const timeLabelFmt = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit' });
+const relativeTimeFmt = new Intl.RelativeTimeFormat('pt-BR', { numeric: 'auto' });
+
 function formatDateTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
   return dateTimeFmt.format(d);
+}
+
+function formatRelativeTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const diffMs = d.getTime() - Date.now();
+  const diffSec = Math.round(diffMs / 1000);
+  const absSec = Math.abs(diffSec);
+  if (absSec < 60) return relativeTimeFmt.format(Math.round(diffSec), 'second');
+  if (absSec < 3600) return relativeTimeFmt.format(Math.round(diffSec / 60), 'minute');
+  if (absSec < 86400) return relativeTimeFmt.format(Math.round(diffSec / 3600), 'hour');
+  return relativeTimeFmt.format(Math.round(diffSec / 86400), 'day');
+}
+
+const NOTE_STATUS_VARIANTS = {
+  synced: { text: 'Notas sincronizadas', className: 'text-emerald-600' },
+  saving: { text: 'Salvando…', className: 'text-slate-500' },
+  needsKey: { text: 'Informe a API Key para salvar automaticamente.', className: 'text-amber-600' },
+  error: { text: 'Erro ao salvar notas', className: 'text-rose-600' },
+};
+
+function setNoteStatus(state, extra = '') {
+  if (!els.noteStatus) return;
+  const variant = NOTE_STATUS_VARIANTS[state] || { text: '', className: 'text-slate-500' };
+  const baseText = variant.text || '';
+  const text = extra ? (baseText ? `${baseText} — ${extra}` : extra) : baseText;
+  els.noteStatus.textContent = text;
+  els.noteStatus.className = 'text-[11px] ' + (variant.className || 'text-slate-500');
+  if (state === 'error' || state === 'needsKey') {
+    toggleHidden(els.noteRetry, false);
+  } else {
+    toggleHidden(els.noteRetry, true);
+  }
+}
+
+function updateNoteMetaText() {
+  if (!els.noteMeta) return;
+  const created = formatDateTime(NOTE_STATE.createdAt);
+  const updated = formatDateTime(NOTE_STATE.updatedAt);
+  const relative = formatRelativeTime(NOTE_STATE.updatedAt);
+  const parts = [];
+  if (created) parts.push(`Criado: ${created}`);
+  if (updated) parts.push(`Atualizado: ${updated}${relative ? ` (${relative})` : ''}`);
+  els.noteMeta.textContent = parts.join(' • ');
+}
+
+const NOTE_AUTOSAVE_DEBOUNCE = 800;
+
+function scheduleNoteAutosave(immediate = false) {
+  if (!els.instanceNote || !els.selInstance?.value) return;
+  const value = els.instanceNote.value;
+  NOTE_STATE.pending = value;
+  if (value.trim() === NOTE_STATE.lastSaved.trim()) {
+    setNoteStatus('synced');
+    return;
+  }
+  setNoteStatus('saving');
+  if (NOTE_STATE.timer) clearTimeout(NOTE_STATE.timer);
+  NOTE_STATE.timer = setTimeout(runNoteAutosave, immediate ? 0 : NOTE_AUTOSAVE_DEBOUNCE);
+}
+
+async function runNoteAutosave() {
+  if (!els.selInstance?.value) return;
+  if (NOTE_STATE.timer) {
+    clearTimeout(NOTE_STATE.timer);
+    NOTE_STATE.timer = null;
+  }
+  const key = els.inpApiKey?.value?.trim();
+  if (!key) {
+    setNoteStatus('needsKey');
+    return;
+  }
+  NOTE_STATE.saving = true;
+  try {
+    const payload = await fetchJSON('/instances/' + els.selInstance.value, true, {
+      method: 'PATCH',
+      body: JSON.stringify({ note: NOTE_STATE.pending }),
+    });
+    NOTE_STATE.lastSaved = (NOTE_STATE.pending || '').trim();
+    NOTE_STATE.updatedAt = payload?.metadata?.updatedAt || new Date().toISOString();
+    NOTE_STATE.createdAt = payload?.metadata?.createdAt || NOTE_STATE.createdAt;
+    updateNoteMetaText();
+    setNoteStatus('synced');
+  } catch (err) {
+    console.error('[dashboard] erro ao salvar notas', err);
+    setNoteStatus('error', err.message || 'Falha inesperada');
+  } finally {
+    NOTE_STATE.saving = false;
+  }
 }
 function formatTimelineLabel(iso) {
   if (!iso) return '';
@@ -166,9 +355,25 @@ if (els.selRange) {
   if (values.includes(savedRange)) els.selRange.value = savedRange;
   els.selRange.addEventListener('change', () => {
     localStorage.setItem('metrics_range', els.selRange.value);
-    refreshSelected();
+    refreshSelected({ withSkeleton: true });
   });
 }
+
+if (els.instanceNote) {
+  els.instanceNote.addEventListener('input', () => scheduleNoteAutosave());
+  els.instanceNote.addEventListener('blur', () => scheduleNoteAutosave(true));
+}
+if (els.noteRetry) {
+  els.noteRetry.addEventListener('click', () => scheduleNoteAutosave(true));
+}
+
+if (els.inpMsg) {
+  els.inpMsg.addEventListener('input', updateMsgCounter);
+  updateMsgCounter();
+}
+
+setInterval(updateNoteMetaText, 60000);
+setNoteStatus('synced');
 
 /* ---------- Requisições ---------- */
 function showError(msg) {
@@ -209,6 +414,9 @@ function percent(v) {
 }
 
 let chart;
+let hasLoadedInstances = false;
+let refreshInstancesInFlight = null;
+let hasLoadedSelected = false;
 function initChart() {
   const ctx = document.getElementById('metricsChart').getContext('2d');
   const statusDatasets = STATUS_CODES.map(code => {
@@ -298,57 +506,70 @@ function updateKpis(metrics) {
 }
 
 /* ---------- Instâncias ---------- */
-async function refreshInstances() {
-  try {
-    const data = await fetchJSON('/instances', true);
-    const prev = els.selInstance.value;
-    els.selInstance.textContent = '';
+async function refreshInstances(options = {}) {
+  if (refreshInstancesInFlight) return refreshInstancesInFlight;
+  const { silent = false, withSkeleton, skipSelected = false } = options;
+  const shouldShowSkeleton = withSkeleton ?? (!hasLoadedInstances && !silent);
+  if (shouldShowSkeleton || !hasLoadedInstances) setCardsLoading(true);
 
-    if (!Array.isArray(data) || !data.length) {
-      els.selInstance.value = '';
-      els.cards.innerHTML = '<div class="p-4 bg-white rounded-2xl shadow text-sm text-slate-500">Nenhuma instância cadastrada ainda. Clique em “+ Nova instância”.</div>';
-      if (els.noteCard) els.noteCard.classList.add('hidden');
-      resetChart();
-      setBadgeState('info', 'Crie uma instância para começar', 4000);
-      return;
-    }
+  refreshInstancesInFlight = (async () => {
+    try {
+      const data = await fetchJSON('/instances', true);
+      const prev = els.selInstance.value;
+      els.selInstance.textContent = '';
 
-    let keepPrev = false;
-    data.forEach(inst => {
-      const label = `${inst.name}${inst.connected ? ' • on-line' : ' • off-line'}`;
-      const opt = option(inst.id, label);
-      if (inst.id === prev) { opt.selected = true; keepPrev = true; }
-      els.selInstance.appendChild(opt);
-    });
-    if (!keepPrev && data[0]) els.selInstance.value = data[0].id;
+      if (!Array.isArray(data) || !data.length) {
+        els.selInstance.value = '';
+        els.cards.innerHTML = '<div class="p-4 bg-white rounded-2xl shadow text-sm text-slate-500">Nenhuma instância cadastrada ainda. Clique em “+ Nova instância”.</div>';
+        if (els.noteCard) els.noteCard.classList.add('hidden');
+        NOTE_STATE.lastSaved = '';
+        NOTE_STATE.createdAt = null;
+        NOTE_STATE.updatedAt = null;
+        updateNoteMetaText();
+        resetChart();
+        toggleHidden(els.qrImg, true);
+        setQrState('idle', 'Selecione uma instância para visualizar o QR.');
+        setBadgeState('info', 'Crie uma instância para começar', 4000);
+        hasLoadedInstances = true;
+        hasLoadedSelected = false;
+        return;
+      }
 
-    // Recria cards
-    els.cards.innerHTML = '';
-    const selected = els.selInstance.value;
-    data.forEach(i => {
-      const card = document.createElement('article');
-      card.className = 'p-4 bg-white rounded-2xl shadow transition ring-emerald-200/50 space-y-3';
-      if (i.id === selected) card.classList.add('ring-2', 'ring-emerald-200');
-      const connected = !!i.connected;
-      const badgeClass = connected ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700';
-      const sent = i.counters?.sent || 0;
-      const statusCounts = getStatusCounts(i.counters?.statusCounts || i.counters?.status || {});
-      const statusCardsHtml = STATUS_CODES.map(code => {
-        const meta = STATUS_META[code] || {};
-        const titleAttr = meta.description ? ` title="${escapeHtml(meta.description)}"` : '';
-        const label = escapeHtml(meta.name || `Status ${code}`);
-        return `
+      let keepPrev = false;
+      data.forEach(inst => {
+        const label = `${inst.name}${inst.connected ? ' • on-line' : ' • off-line'}`;
+        const opt = option(inst.id, label);
+        if (inst.id === prev) { opt.selected = true; keepPrev = true; }
+        els.selInstance.appendChild(opt);
+      });
+      if (!keepPrev && data[0]) els.selInstance.value = data[0].id;
+
+      els.cards.innerHTML = '';
+      const selected = els.selInstance.value;
+      data.forEach(i => {
+        const card = document.createElement('article');
+        card.className = 'p-4 bg-white rounded-2xl shadow transition ring-emerald-200/50 space-y-3';
+        if (i.id === selected) card.classList.add('ring-2', 'ring-emerald-200');
+        const connected = !!i.connected;
+        const badgeClass = connected ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700';
+        const sent = i.counters?.sent || 0;
+        const statusCounts = getStatusCounts(i.counters?.statusCounts || i.counters?.status || {});
+        const statusCardsHtml = STATUS_CODES.map(code => {
+          const meta = STATUS_META[code] || {};
+          const titleAttr = meta.description ? ` title="${escapeHtml(meta.description)}"` : '';
+          const label = escapeHtml(meta.name || `Status ${code}`);
+          return `
           <div class="rounded-lg bg-slate-50 p-2"${titleAttr}>
             <span class="block text-[11px] uppercase tracking-wide text-slate-400">Status ${code} • ${label}</span>
             <span class="text-sm font-semibold ${meta.textClass || 'text-slate-600'}">${statusCounts[code] || 0}</span>
           </div>`;
-      }).join('');
-      const usagePercent = percent(i.rate?.usage || 0);
-      const meterColor = usagePercent >= 90 ? 'bg-rose-400' : usagePercent >= 70 ? 'bg-amber-400' : 'bg-emerald-400';
-      const userId = i.user?.id ? escapeHtml(i.user.id) : '—';
-      const noteVal = (i.note || i.notes || '').trim();
+        }).join('');
+        const usagePercent = percent(i.rate?.usage || 0);
+        const meterColor = usagePercent >= 90 ? 'bg-rose-400' : usagePercent >= 70 ? 'bg-amber-400' : 'bg-emerald-400';
+        const userId = i.user?.id ? escapeHtml(i.user.id) : '—';
+        const noteVal = (i.note || i.notes || '').trim();
 
-      card.innerHTML = `
+        card.innerHTML = `
         <div class="flex items-start justify-between gap-3">
           <div class="flex-1">
             <label class="text-xs font-medium text-slate-500">Nome</label>
@@ -393,15 +614,23 @@ async function refreshInstances() {
           <button data-act="delete" data-iid="${i.id}" class="px-3 py-1.5 text-sm bg-rose-500 hover:bg-rose-600 text-white rounded-lg">Excluir</button>
         </div>
       `;
-      els.cards.appendChild(card);
-    });
+        els.cards.appendChild(card);
+      });
 
-    await refreshSelected();
+      hasLoadedInstances = true;
+      if (!skipSelected) {
+        await refreshSelected({ silent, withSkeleton: !silent && !hasLoadedSelected });
+      }
+    } catch (err) {
+      console.error('[dashboard] erro ao buscar instâncias', err);
+      showError('Falha ao carregar instâncias');
+    } finally {
+      setCardsLoading(false);
+      refreshInstancesInFlight = null;
+    }
+  })();
 
-  } catch (err) {
-    console.error('[dashboard] erro ao buscar instâncias', err);
-    showError('Falha ao carregar instâncias');
-  }
+  return refreshInstancesInFlight;
 }
 
 /* Carregar QR code com autenticação */
@@ -409,59 +638,70 @@ async function loadQRCode(iid) {
   try {
     const k = els.inpApiKey?.value?.trim();
     if (!k) {
-      els.qrImg.classList.add('hidden');
-      els.qrHint.textContent = 'Informe a API Key para ver o QR code.';
-      return;
+      toggleHidden(els.qrImg, true);
+      setQrState('needs-key', 'Informe a API Key para ver o QR code.');
+      return false;
     }
-    
+
     const headers = { 'x-api-key': k };
-    const response = await fetch('/instances/' + iid + '/qr.png?t=' + Date.now(), { 
-      headers, 
-      cache: 'no-store' 
+    const response = await fetch('/instances/' + iid + '/qr.png?t=' + Date.now(), {
+      headers,
+      cache: 'no-store'
     });
-    
+
     if (!response.ok) {
       if (response.status === 401) {
-        els.qrImg.classList.add('hidden');
-        els.qrHint.textContent = 'API Key inválida.';
-        return;
+        toggleHidden(els.qrImg, true);
+        setQrState('needs-key', 'API Key inválida.');
+        return false;
       }
       if (response.status === 404) {
-        els.qrImg.classList.add('hidden');
-        els.qrHint.textContent = 'QR code não disponível ainda.';
-        return;
+        toggleHidden(els.qrImg, true);
+        setQrState('error', 'QR code não disponível ainda.');
+        return false;
       }
       throw new Error('HTTP ' + response.status);
     }
-    
+
     const blob = await response.blob();
     const imageUrl = URL.createObjectURL(blob);
     els.qrImg.src = imageUrl;
-    els.qrImg.classList.remove('hidden');
-    
-    // Limpar URL anterior para evitar vazamento de memória
+    toggleHidden(els.qrImg, false);
+
     els.qrImg.onload = () => {
       if (els.qrImg.previousImageUrl) {
         URL.revokeObjectURL(els.qrImg.previousImageUrl);
       }
       els.qrImg.previousImageUrl = imageUrl;
     };
-    
+
+    return true;
   } catch (err) {
     console.error('[dashboard] erro ao carregar QR code', err);
-    els.qrImg.classList.add('hidden');
-    els.qrHint.textContent = 'Erro ao carregar QR code.';
+    toggleHidden(els.qrImg, true);
+    setQrState('error', 'Erro ao carregar QR code.');
+    return false;
   }
 }
 
-async function refreshSelected() {
+async function refreshSelected(options = {}) {
+  const { silent = false, withSkeleton } = options;
   const iid = els.selInstance.value;
+
   if (!iid) {
-    els.qrImg.classList.add('hidden');
-    els.qrHint.textContent = 'Nenhuma instância selecionada.';
+    toggleHidden(els.qrImg, true);
+    setQrState('idle', 'Nenhuma instância selecionada.');
     if (els.noteCard) els.noteCard.classList.add('hidden');
     resetChart();
+    hasLoadedSelected = false;
     return;
+  }
+
+  const shouldShowMetricsSkeleton = withSkeleton ?? (!silent && !hasLoadedSelected);
+  if (shouldShowMetricsSkeleton) setMetricsLoading(true);
+  if (!silent) {
+    toggleHidden(els.qrImg, true);
+    setQrState('loading', 'Sincronizando instância…');
   }
 
   try {
@@ -469,24 +709,29 @@ async function refreshSelected() {
     const connected = !!data.connected;
     setStatusBadge(connected, data.name);
 
-    if (connected) {
-      els.qrImg.classList.add('hidden');
-      els.qrHint.textContent = 'Instância conectada.';
-    } else {
-      // Carregar QR code via fetch com autenticação
-      await loadQRCode(iid);
-      els.qrHint.textContent = 'Aponte o WhatsApp para o QR code.';
-    }
-
     if (els.noteCard) {
       els.noteCard.classList.remove('hidden');
-      els.instanceNote.value = data.note || '';
-      const created = formatDateTime(data.metadata?.createdAt);
-      const updated = formatDateTime(data.metadata?.updatedAt);
-      els.noteMeta.textContent = `Criado: ${created || '—'} • Atualizado: ${updated || '—'}`;
+      const noteVal = data.note || '';
+      els.instanceNote.value = noteVal;
+      NOTE_STATE.pending = noteVal;
+      NOTE_STATE.lastSaved = noteVal.trim();
+      NOTE_STATE.createdAt = data.metadata?.createdAt || null;
+      NOTE_STATE.updatedAt = data.metadata?.updatedAt || null;
+      updateNoteMetaText();
+      setNoteStatus('synced');
     }
 
-    // Métricas e gráfico
+    if (connected) {
+      toggleHidden(els.qrImg, true);
+      setQrState('connected', 'Instância conectada.');
+    } else {
+      setQrState('loading', 'Sincronizando QR…');
+      const qrOk = await loadQRCode(iid);
+      if (qrOk) {
+        setQrState('disconnected', 'Aponte o WhatsApp para o QR code.');
+      }
+    }
+
     const metrics = await fetchJSON('/instances/' + iid + '/metrics', true);
     updateKpis(metrics);
 
@@ -502,14 +747,17 @@ async function refreshSelected() {
         chart.data.datasets[idx + 1].data = timeline.map(p => (key ? (p[key] ?? 0) : 0));
       });
       chart.update();
-      els.chartHint.textContent = `Exibindo ${timeline.length} pontos de dados.`;
+      if (els.chartHint) els.chartHint.textContent = `Exibindo ${timeline.length} pontos de dados.`;
     } else {
       resetChart();
     }
 
+    hasLoadedSelected = true;
   } catch (err) {
     console.error('[dashboard] erro ao buscar detalhes da instância', err);
     showError('Falha ao carregar detalhes da instância');
+  } finally {
+    setMetricsLoading(false);
   }
 }
 
@@ -524,15 +772,27 @@ async function handleSaveMetadata(iid) {
   const note = card.querySelector('[data-field="note"]')?.value?.trim();
   if (!name) { showError('O nome não pode estar vazio.'); return; }
 
+  const btn = card.querySelector('[data-act="save"][data-iid="' + iid + '"]');
+  setBusy(btn, true, 'Salvando…');
   try {
     const key = requireKey();
     localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
     const payload = await fetchJSON('/instances/' + iid, true, { method: 'PATCH', body: JSON.stringify({ name, note }) });
     setBadgeState('update', 'Dados salvos (' + payload.name + ')', 4000);
-    await refreshInstances();
+    if (iid === els.selInstance.value) {
+      NOTE_STATE.lastSaved = (note || '').trim();
+      NOTE_STATE.pending = note || '';
+      NOTE_STATE.updatedAt = payload?.metadata?.updatedAt || NOTE_STATE.updatedAt;
+      NOTE_STATE.createdAt = payload?.metadata?.createdAt || NOTE_STATE.createdAt;
+      updateNoteMetaText();
+      setNoteStatus('synced');
+    }
+    await refreshInstances({ silent: true, withSkeleton: false });
   } catch (err) {
     console.error('[dashboard] erro ao salvar metadados', err);
     showError('Falha ao salvar dados da instância');
+  } finally {
+    setBusy(btn, false);
   }
 }
 
@@ -553,8 +813,7 @@ async function performInstanceAction(action, iid, key, context = {}) {
 
   const button = context.button || null;
   const name = context.name || iid;
-
-  if (button) button.disabled = true;
+  if (button) setBusy(button, true, action === 'logout' ? 'Desconectando…' : 'Limpando…');
   try {
     const r = await fetch(url, { method: 'POST', headers: { 'x-api-key': key } });
     if (!r.ok) {
@@ -566,14 +825,14 @@ async function performInstanceAction(action, iid, key, context = {}) {
     const payload = await r.json().catch(() => ({}));
     const message = payload?.message || fallbackMessages[action](name);
     setBadgeState(badgeTypes[action], message, holdTimes[action]);
-    await refreshInstances();
+    await refreshInstances({ silent: true, withSkeleton: false });
     return true;
   } catch (err) {
     console.error('[dashboard] erro em ' + action, err);
     showError('Erro ao executar ' + action);
     return false;
   } finally {
-    if (button) button.disabled = false;
+    if (button) setBusy(button, false);
   }
 }
 
@@ -594,8 +853,40 @@ function closeDeleteModal() {
 els.modalDelete.addEventListener('click', (ev) => {
   if (ev.target === els.modalDelete) closeDeleteModal();
 });
+function openPairModal(code) {
+  if (!els.pairModal) return;
+  if (els.pairModalCode) els.pairModalCode.textContent = code || '—';
+  els.pairModal.classList.remove('hidden');
+  els.pairModal.classList.add('flex');
+}
+function closePairModal() {
+  if (!els.pairModal) return;
+  els.pairModal.classList.add('hidden');
+  els.pairModal.classList.remove('flex');
+}
+if (els.pairModal) {
+  els.pairModal.addEventListener('click', (ev) => {
+    if (ev.target === els.pairModal) closePairModal();
+  });
+}
+if (els.pairModalClose) els.pairModalClose.addEventListener('click', closePairModal);
+if (els.pairModalCopy) {
+  els.pairModalCopy.addEventListener('click', async () => {
+    try {
+      const code = els.pairModalCode?.textContent?.trim();
+      if (!code) return;
+      await navigator.clipboard.writeText(code);
+      setBadgeState('update', 'Código copiado para a área de transferência.', 3000);
+    } catch (err) {
+      console.error('[dashboard] erro ao copiar código', err);
+      showError('Não foi possível copiar o código.');
+    }
+  });
+}
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape' && !els.modalDelete.classList.contains('hidden')) closeDeleteModal();
+  if (ev.key !== 'Escape') return;
+  if (els.modalDelete && !els.modalDelete.classList.contains('hidden')) closeDeleteModal();
+  if (els.pairModal && !els.pairModal.classList.contains('hidden')) closePairModal();
 });
 
 /* Delegação de eventos click */
@@ -615,7 +906,7 @@ document.addEventListener('click', async (ev) => {
     let key;
     try { key = requireKey(); } catch { return; }
     localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
-    btn.disabled = true;
+    setBusy(btn, true, 'Excluindo…');
     try {
       const r = await fetch('/instances/' + iidTarget, { method: 'DELETE', headers: { 'x-api-key': key } });
       if (!r.ok) {
@@ -628,12 +919,12 @@ document.addEventListener('click', async (ev) => {
       const name = els.modalDelete.dataset.name || iidTarget;
       setBadgeState('delete', payload?.message || ('Instância removida (' + name + ')'), 7000);
       closeDeleteModal();
-      await refreshInstances();
+      await refreshInstances({ withSkeleton: true });
     } catch (err) {
       console.error('[dashboard] erro ao excluir instância', err);
       showError('Erro ao excluir instância');
     } finally {
-      btn.disabled = false;
+      setBusy(btn, false);
     }
     return;
   }
@@ -645,13 +936,13 @@ document.addEventListener('click', async (ev) => {
   // ações simples que não alteram servidor
   if (act === 'select') {
     els.selInstance.value = iid;
-    await refreshSelected();
+    await refreshSelected({ withSkeleton: true });
     return;
   }
   if (act === 'qr') {
     try { requireKey(); } catch { return; }
     if (iid) els.selInstance.value = iid;
-    await refreshSelected();
+    await refreshSelected({ withSkeleton: true });
     setBadgeState('info', 'QR atualizado', 3000);
     return;
   }
@@ -688,7 +979,7 @@ els.btnNew.onclick = async () => {
   try {
     const payload = await fetchJSON('/instances', true, { method:'POST', body: JSON.stringify({ name }) });
     setBadgeState('update', 'Instância criada (' + (payload?.name || payload?.id || name) + ')', 4000);
-    await refreshInstances();
+    await refreshInstances({ withSkeleton: true });
   } catch (err) {
     console.error('[dashboard] erro ao criar instância', err);
     showError('Falha ao criar instância');
@@ -697,7 +988,7 @@ els.btnNew.onclick = async () => {
 };
 
 /* Select change */
-els.selInstance.onchange = refreshSelected;
+els.selInstance.onchange = () => refreshSelected({ withSkeleton: true });
 
 /* Logout/Wipe (header) */
 els.btnLogout.onclick = async () => {
@@ -706,7 +997,7 @@ els.btnLogout.onclick = async () => {
     const iid = els.selInstance.value;
     if (!iid) return;
     const key = requireKey();
-    const ok = await performInstanceAction('logout', iid, key, { name: iid, button: null });
+    const ok = await performInstanceAction('logout', iid, key, { name: iid, button: els.btnLogout });
     if (ok) els.qrHint.textContent = 'Desconectando… aguarde novo QR.';
   } catch {}
 };
@@ -716,7 +1007,7 @@ els.btnWipe.onclick = async () => {
     const iid = els.selInstance.value;
     if (!iid) return;
     const key = requireKey();
-    const ok = await performInstanceAction('wipe', iid, key, { name: iid, button: null });
+    const ok = await performInstanceAction('wipe', iid, key, { name: iid, button: els.btnWipe });
     if (ok) els.qrHint.textContent = 'Limpando sessão… o serviço reiniciará para gerar novo QR.';
   } catch {}
 };
@@ -726,42 +1017,94 @@ els.btnPair.onclick = async () => {
   try {
     const iid = els.selInstance.value;
     if (!iid) { showError('Selecione uma instância.'); return; }
-    requireKey();
-    const phone = prompt('Número no formato E.164 (ex: 5544999999999):');
-    if (!phone) return;
-    const j = await fetchJSON('/instances/'+iid+'/pair', true, { method:'POST', body: JSON.stringify({ phoneNumber: phone }) });
-    const code = j?.pairingCode || '(sem código)';
-    els.qrHint.textContent = 'Código de pareamento: ' + code + ' (copiado)';
-    try { await navigator.clipboard.writeText(code); } catch {}
-    setBadgeState('update', 'Código de pareamento gerado.', 4000);
+    localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+    try { requireKey(); } catch { return; }
+    const phoneInput = prompt('Número no formato E.164 (ex: +5544999999999):');
+    if (!phoneInput) return;
+    const sanitized = phoneInput.replace(/[^\d+]/g, '');
+    const phoneNumber = sanitized.startsWith('+') ? sanitized : '+' + sanitized.replace(/^\++/, '');
+    if (!validateE164(phoneNumber)) {
+      showError('Telefone inválido. Use o formato E.164 (ex: +5511999999999).');
+      return;
+    }
+    setBusy(els.btnPair, true, 'Gerando…');
+    const payload = await fetchJSON('/instances/' + iid + '/pair', true, { method: 'POST', body: JSON.stringify({ phoneNumber }) });
+    const code = payload?.pairingCode || '(sem código)';
+    openPairModal(code);
+    try {
+      await navigator.clipboard.writeText(code);
+      setBadgeState('update', 'Código gerado e copiado para a área de transferência.', 4000);
+    } catch {
+      setBadgeState('update', 'Código de pareamento gerado.', 4000);
+    }
+    setQrState('disconnected', 'Código gerado. Use o pareamento no app.');
   } catch (e) {
+    console.error('[dashboard] erro ao gerar código', e);
+    showError('Não foi possível gerar o código de pareamento.');
     alert('Falha ao gerar código: ' + e.message);
+  } finally {
+    setBusy(els.btnPair, false);
   }
 };
 
 /* Envio rápido */
 els.btnSend.onclick = async () => {
+  localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+  const iid = els.selInstance.value;
+  if (!iid) { setSendOut('Selecione uma instância antes de enviar.', 'error'); showError('Selecione uma instância.'); return; }
+  let key;
+  try { key = requireKey(); } catch { setSendOut('Informe a API Key para enviar mensagens.', 'error'); return; }
+
+  const rawPhone = els.inpPhone.value.trim();
+  const sanitized = rawPhone.replace(/[^\d+]/g, '');
+  const phoneNumber = sanitized.startsWith('+') ? sanitized : '+' + sanitized.replace(/^\++/, '');
+  const message = els.inpMsg.value.trim();
+  updateMsgCounter();
+
+  if (!validateE164(phoneNumber)) {
+    setSendOut('Telefone inválido. Use o formato E.164 (ex: +5511999999999).', 'error');
+    return;
+  }
+  if (!message) {
+    setSendOut('Informe uma mensagem para enviar.', 'error');
+    return;
+  }
+  if (message.length > 4096) {
+    setSendOut('Mensagem excede 4096 caracteres.', 'error');
+    return;
+  }
+
+  const body = JSON.stringify({ to: phoneNumber, message, waitAckMs: 8000 });
+  setBusy(els.btnSend, true, 'Enviando…');
+  setSendOut('Enviando mensagem…', 'info');
+
   try {
-    localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
-    const iid = els.selInstance.value;
-    if (!iid) { showError('Selecione uma instância.'); return; }
-    const to = els.inpPhone.value.trim();
-    const message = els.inpMsg.value.trim();
-    if (!to || !message) { showError('Informe destino e mensagem.'); return; }
-    const body = JSON.stringify({ to, message, waitAckMs: 8000 });
-    const r = await fetch('/instances/'+iid+'/send-text', { method: 'POST', headers: { 'x-api-key': els.inpApiKey.value.trim(), 'Content-Type':'application/json' }, body });
-    const j = await r.json();
-    els.sendOut.textContent = 'Resposta: ' + JSON.stringify(j);
+    const response = await fetch('/instances/' + iid + '/send-text', {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'Content-Type': 'application/json' },
+      body,
+    });
+    if (!response.ok) {
+      const txt = await response.text().catch(() => '');
+      throw new Error('HTTP ' + response.status + (txt ? ' — ' + txt : ''));
+    }
+    const payload = await response.json().catch(() => ({}));
+    setSendOut('Sucesso: ' + JSON.stringify(payload), 'success');
     setBadgeState('update', 'Mensagem enviada — acompanhe os indicadores.', 3000);
-    await refreshSelected();
+    await refreshSelected({ silent: true });
   } catch (e) {
-    els.sendOut.textContent = 'Falha no envio: ' + e.message;
+    console.error('[dashboard] erro ao enviar mensagem', e);
+    setSendOut('Falha no envio: ' + e.message, 'error');
     showError('Não foi possível enviar a mensagem.');
+  } finally {
+    setBusy(els.btnSend, false);
   }
 };
 
 /* Boot do dashboard */
 initChart();
-setInterval(refreshInstances, 3000);
-refreshInstances();
+refreshInstances({ withSkeleton: true });
+setInterval(() => {
+  refreshInstances({ silent: true }).catch(err => console.debug('[dashboard] auto-refresh falhou', err));
+}, REFRESH_INTERVAL_MS);
 
