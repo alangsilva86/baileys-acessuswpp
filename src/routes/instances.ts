@@ -10,7 +10,13 @@ import {
   saveInstancesIndex,
   type Instance,
 } from '../instanceManager.js';
-import { allowSend, sendWithTimeout, waitForAck, normalizeToE164BR } from '../utils.js';
+import {
+  allowSend,
+  sendWithTimeout,
+  waitForAck,
+  normalizeToE164BR,
+  summarizeStatuses,
+} from '../utils.js';
 
 const router = Router();
 
@@ -514,6 +520,8 @@ router.post(
 
 function serializeInstance(inst: Instance) {
   const connected = Boolean(inst.sock && inst.sock.user);
+  const statusSummary = summarizeStatuses(inst);
+
   return {
     id: inst.id,
     name: inst.name,
@@ -528,7 +536,13 @@ function serializeInstance(inst: Instance) {
     counters: {
       sent: inst.metrics.sent,
       byType: { ...inst.metrics.sent_by_type },
-      statusCounts: { ...inst.metrics.status_counts },
+      statusCounts: { ...statusSummary.counts },
+      pending: statusSummary.pending,
+      serverAck: statusSummary.serverAck,
+      delivered: statusSummary.delivered,
+      read: statusSummary.read,
+      played: statusSummary.played,
+      failed: statusSummary.failed,
     },
     last: { ...inst.metrics.last },
     rate: {

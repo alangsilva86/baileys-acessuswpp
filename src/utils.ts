@@ -59,23 +59,64 @@ export function waitForAck(inst: Instance, messageId: string, timeoutMs = 10_000
   });
 }
 
-export function recordMetricsSnapshot(inst: Instance, force = false): void {
-  if (!inst.metrics.timeline) inst.metrics.timeline = [];
-  const now = Date.now();
-  const last = inst.metrics.timeline[inst.metrics.timeline.length - 1];
-  const statusCounts = inst.metrics.status_counts || {};
-  const pending = statusCounts['1'] || 0;
-  const serverAck = statusCounts['2'] || 0;
-  const delivered = statusCounts['3'] || 0;
-  const read = statusCounts['4'] || 0;
-  const played = statusCounts['5'] || 0;
-  const failed = Object.entries(statusCounts).reduce((acc, [code, value]) => {
+export interface StatusSummary {
+  counts: Record<string, number>;
+  pending: number;
+  serverAck: number;
+  delivered: number;
+  read: number;
+  played: number;
+  failed: number;
+}
+
+export function summarizeStatuses(inst: Instance): StatusSummary {
+  const counts: Record<string, number> = {};
+
+  for (const status of inst.statusMap.values()) {
+    const key = String(status);
+    counts[key] = (counts[key] || 0) + 1;
+  }
+
+  const normalizedCounts: Record<string, number> = {
+    '1': 0,
+    '2': 0,
+    '3': 0,
+    '4': 0,
+    '5': 0,
+    ...counts,
+  };
+
+  const pending = normalizedCounts['1'] || 0;
+  const serverAck = normalizedCounts['2'] || 0;
+  const delivered = normalizedCounts['3'] || 0;
+  const read = normalizedCounts['4'] || 0;
+  const played = normalizedCounts['5'] || 0;
+  const failed = Object.entries(normalizedCounts).reduce((acc, [code, value]) => {
     const numericCode = Number(code);
     if (Number.isFinite(numericCode) && numericCode >= 6) {
       return acc + (Number(value) || 0);
     }
     return acc;
   }, 0);
+
+  return {
+    counts: normalizedCounts,
+    pending,
+    serverAck,
+    delivered,
+    read,
+    played,
+    failed,
+  };
+}
+
+export function recordMetricsSnapshot(inst: Instance, force = false): void {
+  if (!inst.metrics.timeline) inst.metrics.timeline = [];
+  const now = Date.now();
+  const last = inst.metrics.timeline[inst.metrics.timeline.length - 1];
+  const summary = summarizeStatuses(inst);
+  inst.metrics.status_counts = { ...summary.counts };
+  const { pending, serverAck, delivered, read, played, failed } = summary;
 
   if (last && now - last.ts < METRICS_TIMELINE_MIN_INTERVAL_MS) {
     last.sent = inst.metrics.sent;

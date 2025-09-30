@@ -150,9 +150,21 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       const messageId = update.key?.id;
       const status = update.update?.status;
       if (messageId && status != null) {
+        const prevStatus = inst.statusMap.get(messageId);
+        const prevKey = prevStatus == null ? null : String(prevStatus);
+        const nextKey = String(status);
+
+        if (prevKey && prevKey !== nextKey) {
+          const prevCount = inst.metrics.status_counts[prevKey] || 0;
+          inst.metrics.status_counts[prevKey] = Math.max(prevCount - 1, 0);
+        }
+
+        if (prevKey !== nextKey) {
+          inst.metrics.status_counts[nextKey] =
+            (inst.metrics.status_counts[nextKey] || 0) + 1;
+        }
+
         inst.statusMap.set(messageId, status);
-        inst.metrics.status_counts[String(status)] =
-          (inst.metrics.status_counts[String(status)] || 0) + 1;
         inst.metrics.last.lastStatusId = messageId;
         inst.metrics.last.lastStatusCode = status;
 
