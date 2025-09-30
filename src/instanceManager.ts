@@ -71,6 +71,8 @@ export interface Instance {
   metadata: InstanceMetadata;
   metrics: InstanceMetrics;
   statusMap: Map<string, AckStatusCode>;
+  statusTimestamps: Map<string, number>;
+  statusCleanupTimer: NodeJS.Timeout | null;
   ackWaiters: Map<string, AckWaiter>;
   rateWindow: number[];
   ackSentAt: Map<string, number>;
@@ -141,6 +143,8 @@ async function loadInstances(): Promise<void> {
         metadata,
         metrics: createEmptyMetrics(),
         statusMap: new Map(),
+        statusTimestamps: new Map(),
+        statusCleanupTimer: null,
         ackWaiters: new Map(),
         rateWindow: [],
         ackSentAt: new Map(),
@@ -185,6 +189,8 @@ async function createInstance(id: string, name: string, meta?: Partial<InstanceM
     metadata: createMetadata(meta),
     metrics: createEmptyMetrics(),
     statusMap: new Map(),
+    statusTimestamps: new Map(),
+    statusCleanupTimer: null,
     ackWaiters: new Map(),
     rateWindow: [],
     ackSentAt: new Map(),

@@ -15,6 +15,57 @@ const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
+const DEFAULT_STATUS_TTL_MS = 10 * 60_000;
+const DEFAULT_STATUS_SWEEP_INTERVAL_MS = 60_000;
+const FINAL_STATUS_THRESHOLD = 3;
+const FINAL_STATUS_CODES = new Set([0]);
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return fallback;
+}
+
+const STATUS_TTL_MS = parsePositiveInt(process.env.STATUS_TTL_MS, DEFAULT_STATUS_TTL_MS);
+const STATUS_SWEEP_INTERVAL_MS = parsePositiveInt(
+  process.env.STATUS_SWEEP_INTERVAL_MS,
+  DEFAULT_STATUS_SWEEP_INTERVAL_MS,
+);
+
+function isFinalStatus(status: number): boolean {
+  return status >= FINAL_STATUS_THRESHOLD || FINAL_STATUS_CODES.has(status);
+}
+
+function removeMessageStatus(
+  inst: Instance,
+  messageId: string,
+  { recordSnapshot = true }: { recordSnapshot?: boolean } = {},
+): void {
+  if (!inst.statusMap.has(messageId)) return;
+  if (recordSnapshot) {
+    recordMetricsSnapshot(inst);
+  }
+  inst.statusMap.delete(messageId);
+  inst.statusTimestamps.delete(messageId);
+  inst.ackSentAt.delete(messageId);
+}
+
+function pruneStaleStatuses(inst: Instance): void {
+  if (!inst.statusMap.size) return;
+  const now = Date.now();
+  for (const [messageId, status] of inst.statusMap.entries()) {
+    const updatedAt = inst.statusTimestamps.get(messageId) ?? 0;
+    if (isFinalStatus(status) || now - updatedAt >= STATUS_TTL_MS) {
+      removeMessageStatus(inst, messageId);
+    }
+  }
+}
+
+function ensureStatusCleanupTimer(inst: Instance): void {
+  if (inst.statusCleanupTimer) return;
+  inst.statusCleanupTimer = setInterval(() => pruneStaleStatuses(inst), STATUS_SWEEP_INTERVAL_MS);
+}
+
 const API_KEYS = String(process.env.API_KEY || 'change-me')
   .split(',')
   .map((s) => s.trim())
@@ -151,10 +202,21 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       const status = update.update?.status;
       if (messageId && status != null) {
         inst.statusMap.set(messageId, status);
+        inst.statusTimestamps.set(messageId, Date.now());
+        ensureStatusCleanupTimer(inst);
+
         inst.metrics.status_counts[String(status)] =
           (inst.metrics.status_counts[String(status)] || 0) + 1;
         inst.metrics.last.lastStatusId = messageId;
         inst.metrics.last.lastStatusCode = status;
+
+        let snapshotRecorded = false;
+        const ensureSnapshot = () => {
+          if (!snapshotRecorded) {
+            recordMetricsSnapshot(inst);
+            snapshotRecorded = true;
+          }
+        };
 
         if (status >= 2 && inst.ackSentAt?.has(messageId)) {
           const sentAt = inst.ackSentAt.get(messageId);
@@ -170,13 +232,18 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
           }
         }
 
-        recordMetricsSnapshot(inst);
+        ensureSnapshot();
 
         const waiter = inst.ackWaiters.get(messageId);
         if (waiter) {
           clearTimeout(waiter.timer);
           inst.ackWaiters.delete(messageId);
           waiter.resolve(status);
+        }
+
+        if (isFinalStatus(status)) {
+          ensureSnapshot();
+          removeMessageStatus(inst, messageId, { recordSnapshot: false });
         }
       }
       logger.info({ iid, mid: messageId, status }, 'messages.status');
@@ -203,6 +270,15 @@ export async function stopWhatsAppInstance(
       // ignore
     }
     inst.reconnectTimer = null;
+  }
+
+  if (inst.statusCleanupTimer) {
+    try {
+      clearInterval(inst.statusCleanupTimer);
+    } catch {
+      // ignore
+    }
+    inst.statusCleanupTimer = null;
   }
 
   if (logout && inst.sock) {
