@@ -1,26 +1,28 @@
-const crypto = require('crypto');
+import crypto from 'node:crypto';
+import type { AnyMessageContent } from '@whiskeysockets/baileys';
+import type { Instance } from './instanceManager.js';
 
 const RATE_MAX_SENDS = Number(process.env.RATE_MAX_SENDS || 20);
 const RATE_WINDOW_MS = Number(process.env.RATE_WINDOW_MS || 15_000);
 const E164_BRAZIL = /^55\d{10,11}$/;
 const SEND_TIMEOUT_MS = 25_000;
-const METRICS_TIMELINE_MAX = 288; // ~24h (amostra a cada ~5min)
-const METRICS_TIMELINE_MIN_INTERVAL_MS = 5 * 60_000; // 5 min
+const METRICS_TIMELINE_MAX = 288;
+const METRICS_TIMELINE_MIN_INTERVAL_MS = 5 * 60_000;
 
-function normalizeToE164BR(val) {
-  const digits = String(val || '').replace(/\D+/g, '');
+export function normalizeToE164BR(val: unknown): string | null {
+  const digits = String(val ?? '').replace(/\D+/g, '');
   if (digits.startsWith('55') && E164_BRAZIL.test(digits)) return digits;
   if (/^\d{10,11}$/.test(digits)) return `55${digits}`;
   return null;
 }
 
-function buildSignature(payload, secret) {
-  const h = crypto.createHmac('sha256', String(secret));
-  h.update(payload);
-  return `sha256=${h.digest('hex')}`;
+export function buildSignature(payload: string, secret: string): string {
+  const hmac = crypto.createHmac('sha256', String(secret));
+  hmac.update(payload);
+  return `sha256=${hmac.digest('hex')}`;
 }
 
-function allowSend(inst) {
+export function allowSend(inst: Instance): boolean {
   const now = Date.now();
   while (inst.rateWindow.length && now - inst.rateWindow[0] > RATE_WINDOW_MS) {
     inst.rateWindow.shift();
@@ -30,16 +32,24 @@ function allowSend(inst) {
   return true;
 }
 
-async function sendWithTimeout(inst, jid, content) {
-  return await Promise.race([
+export async function sendWithTimeout(
+  inst: Instance,
+  jid: string,
+  content: AnyMessageContent,
+): Promise<unknown> {
+  if (!inst.sock) {
+    throw new Error('socket unavailable');
+  }
+
+  return Promise.race([
     inst.sock.sendMessage(jid, content),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('send timeout')), SEND_TIMEOUT_MS)
-    ),
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('send timeout')), SEND_TIMEOUT_MS);
+    }),
   ]);
 }
 
-function waitForAck(inst, messageId, timeoutMs = 10000) {
+export function waitForAck(inst: Instance, messageId: string, timeoutMs = 10_000): Promise<number | null> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       inst.ackWaiters.delete(messageId);
@@ -49,8 +59,7 @@ function waitForAck(inst, messageId, timeoutMs = 10000) {
   });
 }
 
-function recordMetricsSnapshot(inst, force = false) {
-  if (!inst) return;
+export function recordMetricsSnapshot(inst: Instance, force = false): void {
   if (!inst.metrics.timeline) inst.metrics.timeline = [];
   const now = Date.now();
   const last = inst.metrics.timeline[inst.metrics.timeline.length - 1];
@@ -95,18 +104,6 @@ function recordMetricsSnapshot(inst, force = false) {
   });
 
   if (inst.metrics.timeline.length > METRICS_TIMELINE_MAX) {
-    inst.metrics.timeline.splice(
-      0,
-      inst.metrics.timeline.length - METRICS_TIMELINE_MAX
-    );
+    inst.metrics.timeline.splice(0, inst.metrics.timeline.length - METRICS_TIMELINE_MAX);
   }
 }
-
-module.exports = {
-  normalizeToE164BR,
-  buildSignature,
-  allowSend,
-  sendWithTimeout,
-  waitForAck,
-  recordMetricsSnapshot,
-};
