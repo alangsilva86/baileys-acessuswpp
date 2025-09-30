@@ -1,9 +1,16 @@
-import type { BaileysEventMap, WAMessage, WAMessageUpdate, WASocket, proto } from '@whiskeysockets/baileys';
+import type {
+  BaileysEventMap,
+  WAMessage,
+  WAMessageUpdate,
+  WASocket,
+  proto,
+} from '@whiskeysockets/baileys';
 import { getAggregateVotesInPollMessage } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { mapLeadFromMessage } from '../services/lead-mapper';
 import { WebhookClient } from '../services/webhook';
 import { PollMessageStore } from './store';
+import type { MessageService } from './message.service';
 
 export interface SendPollOptions {
   selectableCount?: number;
@@ -13,6 +20,7 @@ export interface SendPollOptions {
 export interface PollServiceOptions {
   store?: PollMessageStore;
   feedbackTemplate?: string | null;
+  messageService?: MessageService;
 }
 
 interface PollChoiceEventPayload {
@@ -52,6 +60,8 @@ export class PollService {
 
   private readonly feedbackTemplate?: string | null;
 
+  private readonly messageService?: MessageService;
+
   constructor(
     private readonly sock: WASocket,
     private readonly webhook: WebhookClient,
@@ -60,6 +70,7 @@ export class PollService {
   ) {
     this.store = options.store ?? new PollMessageStore();
     this.feedbackTemplate = options.feedbackTemplate ?? process.env.POLL_FEEDBACK_TEMPLATE ?? null;
+    this.messageService = options.messageService;
   }
 
   async sendPoll(
@@ -145,7 +156,10 @@ export class PollService {
     }
   }
 
-  private async maybeSendFeedback(voterJid: string | null | undefined, payload: PollChoiceEventPayload) {
+  private async maybeSendFeedback(
+    voterJid: string | null | undefined,
+    payload: PollChoiceEventPayload
+  ) {
     if (!this.feedbackTemplate || !voterJid || !payload.selectedOptions.length) {
       return;
     }
@@ -159,7 +173,13 @@ export class PollService {
       .replace('{option}', payload.selectedOptions.join(', '));
 
     try {
-      await this.sock.sendMessage(voterJid, { text });
+      if (this.messageService) {
+        await this.messageService.sendText(voterJid, text, {
+          timeoutMs: Number(process.env.SEND_TIMEOUT_MS || 25_000),
+        });
+      } else {
+        await this.sock.sendMessage(voterJid, { text });
+      }
     } catch (err) {
       this.logger.warn(
         { err, voterJid, pollId: payload.pollId },

@@ -34,6 +34,9 @@ export class PollMessageStore {
     const timeout = setTimeout(() => {
       this.store.delete(id);
     }, ttl);
+    if (typeof timeout.unref === 'function') {
+      timeout.unref();
+    }
 
     this.store.set(id, { message, expiresAt, timeout });
   }

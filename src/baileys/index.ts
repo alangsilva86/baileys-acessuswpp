@@ -47,20 +47,22 @@ export async function bootBaileys(options: BootOptions = {}): Promise<WaContext>
     instanceId: options.instanceId,
   });
 
-  const pollService = new PollService(sock, webhook, logger);
   const messageService = new MessageService(sock, webhook, logger);
+  const pollService = new PollService(sock, webhook, logger, {
+    messageService,
+  });
 
   sock.ev.on('messages.upsert', async (event) => {
-    try {
-      await pollService.onMessageUpsert(event);
-    } catch (err) {
-      logger.warn({ err }, 'poll.service.messages.upsert.failed');
-    }
-
     try {
       await messageService.onMessagesUpsert(event);
     } catch (err) {
       logger.warn({ err }, 'message.service.messages.upsert.failed');
+    }
+
+    try {
+      await pollService.onMessageUpsert(event);
+    } catch (err) {
+      logger.warn({ err }, 'poll.service.messages.upsert.failed');
     }
   });
 
