@@ -3,13 +3,12 @@ import type Long from 'long';
 import pino from 'pino';
 import { mapLeadFromMessage } from '../services/leadMapper.js';
 import { WebhookClient } from '../services/webhook.js';
+import { getSendTimeoutMs } from '../utils.js';
 
 export interface SendTextOptions {
   timeoutMs?: number;
   messageOptions?: Parameters<WASocket['sendMessage']>[2];
 }
-
-const DEFAULT_SEND_TIMEOUT_MS = Number(process.env.SEND_TIMEOUT_MS ?? 25_000);
 
 function extractMessageType(message: WAMessage): string | null {
   const keys = Object.keys(message.message || {});
@@ -63,7 +62,7 @@ export class MessageService {
   ) {}
 
   async sendText(jid: string, text: string, options: SendTextOptions = {}): Promise<WAMessage> {
-    const timeoutMs = options.timeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
+    const timeoutMs = options.timeoutMs ?? getSendTimeoutMs();
     const payload = { text } as const;
 
     const sendPromise = this.sock.sendMessage(jid, payload, options.messageOptions);

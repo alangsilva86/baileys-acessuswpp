@@ -10,7 +10,13 @@ import {
   saveInstancesIndex,
   type Instance,
 } from '../instanceManager.js';
-import { allowSend, sendWithTimeout, waitForAck, normalizeToE164BR } from '../utils.js';
+import {
+  allowSend,
+  sendWithTimeout,
+  waitForAck,
+  normalizeToE164BR,
+  getSendTimeoutMs,
+} from '../utils.js';
 
 const router = Router();
 
@@ -414,7 +420,7 @@ router.post(
     }
 
     const content = message.trim();
-    const timeoutMs = Number(process.env.SEND_TIMEOUT_MS || 25_000);
+    const timeoutMs = getSendTimeoutMs();
     const sent = (inst.context?.messageService
       ? await inst.context.messageService.sendText(normalized, content, { timeoutMs })
       : await sendWithTimeout(inst, normalized, { text: content })) as any;
