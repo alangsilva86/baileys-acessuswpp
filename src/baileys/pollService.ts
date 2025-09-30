@@ -12,6 +12,7 @@ import { WebhookClient } from '../services/webhook.js';
 import { getSendTimeoutMs } from '../utils.js';
 import { PollMessageStore } from './store.js';
 import type { MessageService } from './messageService.js';
+import type { BrokerEventStore } from '../broker/eventStore.js';
 
 export interface SendPollOptions {
   selectableCount?: number;
@@ -22,6 +23,8 @@ export interface PollServiceOptions {
   store?: PollMessageStore;
   feedbackTemplate?: string | null;
   messageService?: MessageService;
+  eventStore?: BrokerEventStore;
+  instanceId?: string;
 }
 
 interface PollChoiceEventPayload {
@@ -63,6 +66,8 @@ export class PollService {
   private readonly store: PollMessageStore;
   private readonly feedbackTemplate?: string | null;
   private readonly messageService?: MessageService;
+  private readonly eventStore?: BrokerEventStore;
+  private readonly instanceId: string;
 
   constructor(
     private readonly sock: WASocket,
@@ -73,6 +78,8 @@ export class PollService {
     this.store = options.store ?? new PollMessageStore();
     this.feedbackTemplate = options.feedbackTemplate ?? process.env.POLL_FEEDBACK_TEMPLATE ?? null;
     this.messageService = options.messageService;
+    this.eventStore = options.eventStore;
+    this.instanceId = options.instanceId ?? 'default';
   }
 
   async sendPoll(
@@ -143,6 +150,15 @@ export class PollService {
         aggregate,
         lead,
       };
+
+      if (this.eventStore) {
+        this.eventStore.enqueue({
+          instanceId: this.instanceId,
+          direction: 'inbound',
+          type: 'POLL_CHOICE',
+          payload: { ...payload },
+        });
+      }
 
       await this.webhook.emit('POLL_CHOICE', payload);
       await this.maybeSendFeedback(voterJid, payload);

@@ -73,19 +73,36 @@ export function recordMetricsSnapshot(inst: Instance, force = false): void {
   if (!inst.metrics.timeline) inst.metrics.timeline = [];
   const now = Date.now();
   const last = inst.metrics.timeline[inst.metrics.timeline.length - 1];
-  const statusCounts = inst.metrics.status_counts || {};
-  const pending = statusCounts['1'] || 0;
-  const serverAck = statusCounts['2'] || 0;
-  const delivered = statusCounts['3'] || 0;
-  const read = statusCounts['4'] || 0;
-  const played = statusCounts['5'] || 0;
-  const failed = Object.entries(statusCounts).reduce((acc, [code, value]) => {
-    const numericCode = Number(code);
-    if (Number.isFinite(numericCode) && numericCode >= 6) {
-      return acc + (Number(value) || 0);
+
+  let pending = 0;
+  let serverAck = 0;
+  let delivered = 0;
+  let read = 0;
+  let played = 0;
+  let failed = 0;
+
+  for (const status of inst.statusMap.values()) {
+    switch (status) {
+      case 1:
+        pending += 1;
+        break;
+      case 2:
+        serverAck += 1;
+        break;
+      case 3:
+        delivered += 1;
+        break;
+      case 4:
+        read += 1;
+        break;
+      case 5:
+        played += 1;
+        break;
+      default:
+        if (status >= 6) failed += 1;
+        break;
     }
-    return acc;
-  }, 0);
+  }
 
   if (last && now - last.ts < METRICS_TIMELINE_MIN_INTERVAL_MS) {
     last.sent = inst.metrics.sent;

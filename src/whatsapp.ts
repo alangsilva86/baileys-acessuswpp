@@ -10,6 +10,7 @@ import type { Instance } from './instanceManager.js';
 import { MessageService } from './baileys/messageService.js';
 import { PollService } from './baileys/pollService.js';
 import { WebhookClient } from './services/webhook.js';
+import { brokerEventStore } from './broker/eventStore.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -19,6 +20,17 @@ const DEFAULT_STATUS_TTL_MS = 10 * 60_000;
 const DEFAULT_STATUS_SWEEP_INTERVAL_MS = 60_000;
 const FINAL_STATUS_THRESHOLD = 3;
 const FINAL_STATUS_CODES = new Set([0]);
+
+function decrementStatusCount(inst: Instance, status: number): void {
+  const key = String(status);
+  const current = inst.metrics.status_counts[key] || 0;
+  inst.metrics.status_counts[key] = current > 0 ? current - 1 : 0;
+}
+
+function incrementStatusCount(inst: Instance, status: number): void {
+  const key = String(status);
+  inst.metrics.status_counts[key] = (inst.metrics.status_counts[key] || 0) + 1;
+}
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
@@ -42,8 +54,12 @@ function removeMessageStatus(
   { recordSnapshot = true }: { recordSnapshot?: boolean } = {},
 ): void {
   if (!inst.statusMap.has(messageId)) return;
+  const previous = inst.statusMap.get(messageId);
   if (recordSnapshot) {
     recordMetricsSnapshot(inst);
+  }
+  if (previous != null) {
+    decrementStatusCount(inst, previous);
   }
   inst.statusMap.delete(messageId);
   inst.statusTimestamps.delete(messageId);
@@ -93,8 +109,15 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     logger,
     hmacSecret: process.env.WEBHOOK_HMAC_SECRET || API_KEYS[0] || null,
   });
-  const messageService = new MessageService(sock, webhook, logger);
-  const pollService = new PollService(sock, webhook, logger, { messageService });
+  const messageService = new MessageService(sock, webhook, logger, {
+    eventStore: brokerEventStore,
+    instanceId: inst.id,
+  });
+  const pollService = new PollService(sock, webhook, logger, {
+    messageService,
+    eventStore: brokerEventStore,
+    instanceId: inst.id,
+  });
   inst.context = { messageService, pollService, webhook };
   inst.stopping = false;
 
@@ -201,12 +224,14 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       const messageId = update.key?.id;
       const status = update.update?.status;
       if (messageId && status != null) {
+        const previousStatus = inst.statusMap.get(messageId);
+        if (previousStatus != null && previousStatus !== status) {
+          decrementStatusCount(inst, previousStatus);
+        }
         inst.statusMap.set(messageId, status);
         inst.statusTimestamps.set(messageId, Date.now());
         ensureStatusCleanupTimer(inst);
-
-        inst.metrics.status_counts[String(status)] =
-          (inst.metrics.status_counts[String(status)] || 0) + 1;
+        incrementStatusCount(inst, status);
         inst.metrics.last.lastStatusId = messageId;
         inst.metrics.last.lastStatusCode = status;
 

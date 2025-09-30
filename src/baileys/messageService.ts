@@ -4,6 +4,7 @@ import pino from 'pino';
 import { mapLeadFromMessage } from '../services/leadMapper.js';
 import { WebhookClient } from '../services/webhook.js';
 import { getSendTimeoutMs } from '../utils.js';
+import type { BrokerEventStore } from '../broker/eventStore.js';
 
 export interface SendTextOptions {
   timeoutMs?: number;
@@ -54,12 +55,24 @@ function toIsoDate(timestamp?: number | Long | bigint | null): string {
   return new Date(millis).toISOString();
 }
 
+export interface MessageServiceOptions {
+  eventStore?: BrokerEventStore;
+  instanceId: string;
+}
+
 export class MessageService {
+  private readonly eventStore?: BrokerEventStore;
+  private readonly instanceId: string;
+
   constructor(
     private readonly sock: WASocket,
     private readonly webhook: WebhookClient,
     private readonly logger: pino.Logger,
-  ) {}
+    options: MessageServiceOptions,
+  ) {
+    this.eventStore = options.eventStore;
+    this.instanceId = options.instanceId;
+  }
 
   async sendText(jid: string, text: string, options: SendTextOptions = {}): Promise<WAMessage> {
     const timeoutMs = options.timeoutMs ?? getSendTimeoutMs();
@@ -81,14 +94,25 @@ export class MessageService {
 
     const lead = mapLeadFromMessage(message);
 
-    await this.webhook.emit('MESSAGE_OUTBOUND', {
+    const eventPayload = {
       messageId: message.key?.id,
       chatId: message.key?.remoteJid,
       text,
       type: extractMessageType(message),
       lead,
       timestamp: toIsoDate(message.messageTimestamp),
-    });
+    } as const;
+
+    if (this.eventStore) {
+      this.eventStore.enqueue({
+        instanceId: this.instanceId,
+        direction: 'outbound',
+        type: 'MESSAGE_OUTBOUND',
+        payload: { ...eventPayload },
+      });
+    }
+
+    await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload);
 
     return message;
   }
@@ -106,14 +130,25 @@ export class MessageService {
     for (const message of messages) {
       try {
         const lead = mapLeadFromMessage(message);
-        await this.webhook.emit('MESSAGE_INBOUND', {
+        const eventPayload = {
           messageId: message.key?.id,
           chatId: message.key?.remoteJid,
           text: extractMessageText(message),
           type: extractMessageType(message),
           lead,
           timestamp: toIsoDate(message.messageTimestamp),
-        });
+        } as const;
+
+        if (this.eventStore) {
+          this.eventStore.enqueue({
+            instanceId: this.instanceId,
+            direction: 'inbound',
+            type: 'MESSAGE_INBOUND',
+            payload: { ...eventPayload },
+          });
+        }
+
+        await this.webhook.emit('MESSAGE_INBOUND', eventPayload);
       } catch (err) {
         this.logger.warn({ err }, 'message.inbound.emit.failed');
       }
