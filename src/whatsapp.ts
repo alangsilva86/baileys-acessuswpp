@@ -1,8 +1,8 @@
 import pino from 'pino';
 import {
   DisconnectReason,
-  default as makeWASocket,
   fetchLatestBaileysVersion,
+  makeWASocket,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import { recordMetricsSnapshot } from './utils.js';
