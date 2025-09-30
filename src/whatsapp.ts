@@ -1,4 +1,3 @@
-import axios from 'axios';
 import pino from 'pino';
 import {
   DisconnectReason,
@@ -6,18 +5,26 @@ import {
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
-import { recordMetricsSnapshot, buildSignature } from './utils.js';
+import { recordMetricsSnapshot } from './utils.js';
 import type { Instance } from './instanceManager.js';
+import { MessageService } from './baileys/messageService.js';
+import { PollService } from './baileys/pollService.js';
+import { WebhookClient } from './services/webhook.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
 const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
-const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
 const API_KEYS = String(process.env.API_KEY || 'change-me')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+
+export interface InstanceContext {
+  messageService: MessageService;
+  pollService: PollService;
+  webhook: WebhookClient;
+}
 
 export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   const { state, saveCreds } = await useMultiFileAuthState(inst.dir);
@@ -26,8 +33,19 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
 
   const sock = makeWASocket({ version, auth: state, logger });
   inst.sock = sock;
+  inst.context = null;
 
   sock.ev.on('creds.update', saveCreds);
+
+  const webhook = new WebhookClient({
+    instanceId: inst.id,
+    logger,
+    hmacSecret: process.env.WEBHOOK_HMAC_SECRET || API_KEYS[0] || null,
+  });
+  const messageService = new MessageService(sock, webhook, logger);
+  const pollService = new PollService(sock, webhook, logger, { messageService });
+  inst.context = { messageService, pollService, webhook };
+  inst.stopping = false;
 
   sock.ev.on('connection.update', (update: any) => {
     const { connection, lastDisconnect, qr, receivedPendingNotifications } = update;
@@ -103,27 +121,31 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       }
     }
 
-    if (WEBHOOK_URL && count) {
-      try {
-        const payload = { iid, ...evt };
-        const serialized = JSON.stringify(payload);
-        const signature = buildSignature(serialized, API_KEYS[0] || 'change-me');
-        await axios
-          .post(WEBHOOK_URL, serialized, {
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Signature-256': signature,
-            },
-          })
-          .catch(() => undefined);
-      } catch (err: any) {
-        logger.warn({ iid, err: err?.message }, 'webhook.relay.error');
-      }
+    try {
+      await messageService.onMessagesUpsert(evt);
+    } catch (err: any) {
+      logger.warn({ iid, err: err?.message }, 'message.service.messages.upsert.failed');
     }
+
+    try {
+      await pollService.onMessageUpsert(evt);
+    } catch (err: any) {
+      logger.warn({ iid, err: err?.message }, 'poll.service.messages.upsert.failed');
+    }
+
+    void webhook
+      .emit('WHATSAPP_MESSAGES_UPSERT', { iid, ...evt })
+      .catch((err: any) => logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.upsert.failed'));
   });
 
   sock.ev.on('messages.update', (updates: any[]) => {
     const iid = inst.id;
+    void webhook.emit('WHATSAPP_MESSAGES_UPDATE', { iid, updates }).catch((err: any) =>
+      logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.update.failed'),
+    );
+    pollService
+      .onMessageUpdate(updates as any)
+      .catch((err: any) => logger.warn({ iid, err: err?.message }, 'poll.service.messages.update.failed'));
     for (const update of updates) {
       const messageId = update.key?.id;
       const status = update.update?.status;
@@ -172,6 +194,7 @@ export async function stopWhatsAppInstance(
   if (!inst) return;
 
   inst.stopping = true;
+  inst.context = null;
 
   if (inst.reconnectTimer) {
     try {
