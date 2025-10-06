@@ -1,9 +1,13 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
-import express, { type NextFunction, type Request, type Response } from 'express';
+import express, {
+  type NextFunction,
+  type Request as ExpressRequest,
+  type Response,
+} from 'express';
 import pino from 'pino';
 
-interface RequestWithRawBody extends Request {
+interface RequestWithRawBody extends ExpressRequest {
   rawBody?: Buffer;
 }
 
@@ -47,7 +51,7 @@ app.use(
   }),
 );
 
-app.use((req: Request, _res: Response, next: NextFunction) => {
+app.use((req: ExpressRequest, _res: Response, next: NextFunction) => {
   (req as RequestWithRawBody).rawBody ??= Buffer.from('');
   next();
 });
