@@ -1,26 +1,27 @@
-FROM node:20-bookworm-slim
-
+# Stage 1 - build the TypeScript sources
+FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 
-# Definir variáveis de ambiente
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+# Stage 2 - runtime image
+FROM node:20-bookworm-slim AS runner
 ENV NODE_ENV=production
 ENV PORT=10000
 ENV HOST=0.0.0.0
+WORKDIR /app
 
-# Copiar arquivos de dependências
 COPY package*.json ./
+RUN npm ci --omit=dev
 
-# Instalar dependências (usar npm install em vez de npm ci para evitar problemas de sincronização)
-RUN npm install --only=production
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/public ./public
 
-# Copiar código fonte
-COPY . .
-
-# Criar diretório de sessões
 RUN mkdir -p /app/sessions
 
-# Expor porta
 EXPOSE 10000
-
-# Comando para iniciar a aplicação
-CMD ["npm", "start"]
+CMD ["node", "dist/src/server.js"]
