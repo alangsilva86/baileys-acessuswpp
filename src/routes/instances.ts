@@ -421,9 +421,11 @@ router.post(
 
     const content = message.trim();
     const timeoutMs = getSendTimeoutMs();
+    const targetJid = entry?.jid ?? `${normalized}@s.whatsapp.net`;
+
     const sent = (inst.context?.messageService
-      ? await inst.context.messageService.sendText(normalized, content, { timeoutMs })
-      : await sendWithTimeout(inst, normalized, { text: content })) as any;
+      ? await inst.context.messageService.sendText(targetJid, content, { timeoutMs })
+      : await sendWithTimeout(inst, targetJid, { text: content })) as any;
     inst.metrics.sent += 1;
     inst.metrics.sent_by_type.text += 1;
     inst.metrics.last.sentId = sent.key.id ?? null;
@@ -499,7 +501,9 @@ router.post(
       ? Math.max(1, Math.min(Math.floor(selectableRaw), sanitized.length))
       : 1;
 
-    const sent = (await pollService.sendPoll(normalized, question.trim(), sanitized, {
+    const targetJid = entry?.jid ?? `${normalized}@s.whatsapp.net`;
+
+    const sent = (await pollService.sendPoll(targetJid, question.trim(), sanitized, {
       selectableCount: selectable,
     })) as any;
     inst.metrics.sent += 1;
