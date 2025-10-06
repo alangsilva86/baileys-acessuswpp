@@ -58,6 +58,126 @@ npm start
 - `POLL_STORE_TTL_MS`: Tempo de retenção das mensagens de enquete (padrão: 6h)
 - `POLL_FEEDBACK_TEMPLATE`: Template opcional para resposta automática após voto em enquete
 
+### Webhooks
+
+Defina `WEBHOOK_URL` (e opcionalmente `WEBHOOK_API_KEY`/`WEBHOOK_HMAC_SECRET`) para receber eventos push. Ao ativar, o serviço envia um `POST` para o endpoint configurado sempre que um voto de enquete é processado.
+
+#### Implementando o endpoint receptor
+
+Você pode testar rapidamente com o servidor de exemplo incluso no projeto. Basta executar:
+
+```bash
+npm run example:poll-webhook
+```
+
+O script lê `WEBHOOK_API_KEY` e `WEBHOOK_HMAC_SECRET` do ambiente, expõe `POST /webhooks/baileys` e registra cada voto recebido em log usando Pino. O código completo está em `src/examples/pollWebhookServer.ts`:
+
+```ts
+import 'dotenv/config';
+import crypto from 'node:crypto';
+import express, { type Request } from 'express';
+import pino from 'pino';
+
+const app = express();
+const PORT = Number(process.env.WEBHOOK_PORT ?? process.env.PORT ?? 3001);
+const EXPECTED_API_KEY = process.env.WEBHOOK_API_KEY;
+const HMAC_SECRET = process.env.WEBHOOK_HMAC_SECRET;
+const logger = pino({ level: process.env.LOG_LEVEL ?? 'info', base: { service: 'poll-webhook-example' } });
+
+interface RequestWithRawBody extends Request {
+  rawBody?: Buffer;
+}
+
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as RequestWithRawBody).rawBody = Buffer.from(buf);
+    },
+  }),
+);
+
+function timingSafeEqual(a: string, b: string): boolean {
+  const A = Buffer.from(a);
+  const B = Buffer.from(b);
+  if (A.length !== B.length) return false;
+  return crypto.timingSafeEqual(A, B);
+}
+
+function buildSignature(rawBody: Buffer, secret: string): string {
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(rawBody);
+  return `sha256=${hmac.digest('hex')}`;
+}
+
+function isValidSignature(req: RequestWithRawBody): boolean {
+  if (!HMAC_SECRET) return true;
+  const rawBody = req.rawBody;
+  const received = req.header('x-signature-256');
+  if (!rawBody || !received) return false;
+  const expected = buildSignature(rawBody, HMAC_SECRET);
+  return timingSafeEqual(received, expected);
+}
+
+app.post('/webhooks/baileys', (req: RequestWithRawBody, res) => {
+  if (EXPECTED_API_KEY && req.header('x-api-key') !== EXPECTED_API_KEY) {
+    return res.status(401).json({ error: 'invalid_api_key' });
+  }
+
+  if (!isValidSignature(req)) {
+    return res.status(401).json({ error: 'invalid_signature' });
+  }
+
+  const { event, payload, timestamp } = req.body ?? {};
+  if (event === 'POLL_CHOICE') {
+    logger.info({ event, timestamp, payload }, 'webhook.poll_choice');
+  }
+
+  return res.sendStatus(204);
+});
+
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+app.listen(PORT, () => {
+  logger.info({ port: PORT }, 'webhook.server.listening');
+});
+```
+
+Depois de publicar esse endpoint, configure `WEBHOOK_URL` apontando para ele (ex.: `https://sua-api.com/webhooks/baileys`).
+
+#### Payload do evento `POLL_CHOICE`
+
+O evento tem o tipo `POLL_CHOICE` e carrega o payload:
+
+```json
+{
+  "event": "POLL_CHOICE",
+  "timestamp": "2024-01-01T12:00:00.000Z",
+  "instanceId": "leadengine",
+  "payload": {
+    "pollId": "ABCD",
+    "question": "Qual a melhor data?",
+    "chatId": "123@g.us",
+    "voterJid": "555199999999@whatsapp.net",
+    "selectedOptions": ["Sexta"],
+    "aggregate": [
+      {
+        "name": "Sexta",
+        "voters": ["555199999999@whatsapp.net"],
+        "count": 1
+      }
+    ],
+    "lead": {
+      "name": "Fulano",
+      "phone": "+55 51 99999-9999"
+    }
+  }
+}
+```
+
+Basta expor um endpoint HTTPS que valide a chave/assinatura (se configuradas) e processe o corpo recebido. O campo `selectedOptions` contém as alternativas escolhidas pelo contato e `aggregate` apresenta o consolidado de votos por opção.
+
 ## Uso
 
 ### Interface Web
