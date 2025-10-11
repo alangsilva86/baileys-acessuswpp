@@ -376,9 +376,6 @@ function buildInteractivePayloadFromMessage(message: WAMessage): InteractivePayl
     if (listResponse.singleSelectReply?.selectedRowId) {
       interactive.rowId = listResponse.singleSelectReply.selectedRowId;
     }
-    if (listResponse.singleSelectReply?.selectedRowTitle) {
-      interactive.rowTitle = listResponse.singleSelectReply.selectedRowTitle;
-    }
     return interactive;
   }
 
@@ -397,8 +394,10 @@ function buildInteractivePayloadFromMessage(message: WAMessage): InteractivePayl
     }
     if (interactiveResponse.name) {
       interactive.name = interactiveResponse.name;
-    if (interactiveResponse.id) {
-      interactive.id = interactiveResponse.id;
+    }
+    const responseId = (interactiveResponse as { id?: string | null }).id;
+    if (typeof responseId === 'string' && responseId.trim()) {
+      interactive.id = responseId;
     }
     return interactive;
   }
@@ -416,7 +415,6 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
       mediaType: 'image',
       mimetype: image.mimetype ?? null,
       fileName: getOptionalString(image, 'fileName'),
-      fileName: image.fileName ?? null,
       size: toSafeNumber(image.fileLength),
       caption: image.caption ?? null,
     };
@@ -431,7 +429,6 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
       mediaType: 'video',
       mimetype: video.mimetype ?? null,
       fileName: getOptionalString(video, 'fileName'),
-      fileName: video.fileName ?? null,
       size: toSafeNumber(video.fileLength),
       caption: video.caption ?? null,
     };
@@ -457,7 +454,6 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
       mediaType: 'audio',
       mimetype: audio.mimetype ?? null,
       fileName: getOptionalString(audio, 'fileName'),
-      fileName: audio.fileName ?? null,
       size: toSafeNumber(audio.fileLength),
       caption: null,
     };
@@ -472,7 +468,6 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
       mediaType: 'sticker',
       mimetype: sticker.mimetype ?? null,
       fileName: getOptionalString(sticker, 'fileName'),
-      fileName: null,
       size: toSafeNumber(sticker.fileLength),
       caption: null,
     };
@@ -488,7 +483,6 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
       caption: getOptionalString(location, 'caption')
         ?? getOptionalString(location, 'name')
         ?? getOptionalString(location, 'address'),
-      caption: location.name ?? location.address ?? null,
     };
     if (location.degreesLatitude != null) media.latitude = location.degreesLatitude;
     if (location.degreesLongitude != null) media.longitude = location.degreesLongitude;
