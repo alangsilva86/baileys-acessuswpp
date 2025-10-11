@@ -6,14 +6,15 @@ import type {
 } from '@whiskeysockets/baileys';
 import type Long from 'long';
 import pino from 'pino';
-import { mapLeadFromMessage } from '../services/leadMapper.js';
-import type { LeadInfo } from '../services/leadMapper.js';
+import { buildContactPayload, mapLeadFromMessage } from '../services/leadMapper.js';
+import type { ContactPayload } from '../services/leadMapper.js';
 import { WebhookClient } from '../services/webhook.js';
 import { getSendTimeoutMs } from '../utils.js';
 import {
   extractMessageText,
   extractMessageType,
   filterClientMessages,
+  getNormalizedMessageContent,
 } from './messageUtils.js';
 import type {
   BrokerEventDirection,
@@ -85,33 +86,41 @@ export interface BuiltMediaContent {
   source: 'base64' | 'url';
 }
 
-interface ContactPayload {
-  owner: LeadInfo['owner'];
-  remoteJid: string | null;
-  participant: string | null;
-  phone: string | null;
-  displayName: string | null;
-  isGroup: boolean;
+interface InteractivePayload {
+  type: string;
+  [key: string]: unknown;
 }
 
-type StructuredMessagePayload = {
+interface MediaMetadataPayload {
+  mediaType: string | null;
+  mimetype: string | null;
+  fileName: string | null;
+  size: number | null;
+  caption: string | null;
+  [key: string]: unknown;
+}
+
+interface StructuredMessagePayload {
   id: string | null;
-  messageId: string | null;
   chatId: string | null;
   type: string | null;
-  conversation: string | null;
-} & Record<string, unknown>;
+  text: string | null;
+  interactive?: InteractivePayload | null;
+  media?: MediaMetadataPayload | null;
+}
 
-type EventMetadata = {
+type StructuredMessageOverrides = Partial<Omit<StructuredMessagePayload, 'id' | 'chatId'>>;
+
+interface EventMetadata {
   timestamp: string;
   broker: {
     direction: BrokerEventDirection;
     type: string;
   };
-} & Record<string, unknown>;
+  source: string;
+}
 
 interface StructuredMessageEventPayload extends BrokerEventPayload {
-  instanceId: string;
   contact: ContactPayload;
   message: StructuredMessagePayload;
   metadata: EventMetadata;
@@ -268,15 +277,218 @@ function toIsoDate(timestamp?: number | Long | bigint | null): string {
   return new Date(millis).toISOString();
 }
 
-function buildContactPayload(lead: LeadInfo): ContactPayload {
-  return {
-    owner: lead.owner,
-    remoteJid: lead.remoteJid,
-    participant: lead.participant ?? null,
-    phone: lead.phone ?? null,
-    displayName: lead.displayName ?? null,
-    isGroup: lead.isGroup,
-  };
+function toSafeNumber(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (typeof value === 'bigint') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (typeof value === 'object' && value !== null && typeof (value as Long).toNumber === 'function') {
+    const parsed = (value as Long).toNumber();
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function normalizeMessageType(rawType: string | null): string | null {
+  if (!rawType) return null;
+  switch (rawType) {
+    case 'conversation':
+    case 'extendedTextMessage':
+      return 'text';
+    case 'buttonsMessage':
+      return 'buttons';
+    case 'listMessage':
+      return 'list';
+    case 'templateButtonReplyMessage':
+    case 'buttonsResponseMessage':
+      return 'buttons_response';
+    case 'listResponseMessage':
+      return 'list_response';
+    case 'interactiveResponseMessage':
+      return 'interactive';
+    case 'imageMessage':
+    case 'videoMessage':
+    case 'audioMessage':
+    case 'documentMessage':
+    case 'documentWithCaptionMessage':
+    case 'stickerMessage':
+      return 'media';
+    case 'locationMessage':
+    case 'liveLocationMessage':
+      return 'location';
+    case 'contactMessage':
+    case 'contactsArrayMessage':
+      return 'contact';
+    case 'pollCreationMessage':
+    case 'pollCreationMessageV2':
+    case 'pollCreationMessageV3':
+      return 'poll';
+    default:
+      return rawType;
+  }
+}
+
+function getOptionalString(source: unknown, key: string): string | null {
+  if (!source || typeof source !== 'object') return null;
+  const value = (source as Record<string, unknown>)[key];
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function buildInteractivePayloadFromMessage(message: WAMessage): InteractivePayload | null {
+  const content = getNormalizedMessageContent(message);
+  if (!content) return null;
+
+  const buttonsResponse = content.buttonsResponseMessage;
+  if (buttonsResponse) {
+    return {
+      type: 'buttons_response',
+      id: buttonsResponse.selectedButtonId ?? null,
+      title: buttonsResponse.selectedDisplayText ?? null,
+    };
+  }
+
+  const templateReply = content.templateButtonReplyMessage;
+  if (templateReply) {
+    return {
+      type: 'buttons_response',
+      id: templateReply.selectedId ?? null,
+      title: templateReply.selectedDisplayText ?? null,
+    };
+  }
+
+  const listResponse = content.listResponseMessage;
+  if (listResponse) {
+    const interactive: InteractivePayload = {
+      type: 'list_response',
+      id: listResponse.singleSelectReply?.selectedRowId ?? null,
+    };
+    const title = listResponse.title ?? listResponse.singleSelectReply?.selectedRowId ?? null;
+    if (title) interactive.title = title;
+    if (listResponse.description) interactive.description = listResponse.description;
+    if (listResponse.singleSelectReply?.selectedRowId) {
+      interactive.rowId = listResponse.singleSelectReply.selectedRowId;
+    }
+    return interactive;
+  }
+
+  const interactiveResponse = content.interactiveResponseMessage?.nativeFlowResponseMessage;
+  if (interactiveResponse) {
+    const interactive: InteractivePayload = {
+      type: 'interactive_response',
+    };
+    const params = interactiveResponse.paramsJson;
+    if (typeof params === 'string') {
+      try {
+        interactive.params = JSON.parse(params);
+      } catch (_err) {
+        interactive.params = params;
+      }
+    }
+    if (interactiveResponse.name) {
+      interactive.name = interactiveResponse.name;
+    }
+    return interactive;
+  }
+
+  return null;
+}
+
+function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload | null {
+  const content = getNormalizedMessageContent(message);
+  if (!content) return null;
+
+  const image = content.imageMessage;
+  if (image) {
+    const media: MediaMetadataPayload = {
+      mediaType: 'image',
+      mimetype: image.mimetype ?? null,
+      fileName: getOptionalString(image, 'fileName'),
+      size: toSafeNumber(image.fileLength),
+      caption: image.caption ?? null,
+    };
+    if (image.width) media.width = image.width;
+    if (image.height) media.height = image.height;
+    return media;
+  }
+
+  const video = content.videoMessage;
+  if (video) {
+    const media: MediaMetadataPayload = {
+      mediaType: 'video',
+      mimetype: video.mimetype ?? null,
+      fileName: getOptionalString(video, 'fileName'),
+      size: toSafeNumber(video.fileLength),
+      caption: video.caption ?? null,
+    };
+    if (video.seconds != null) media.seconds = video.seconds;
+    if (video.gifPlayback != null) media.gifPlayback = video.gifPlayback;
+    return media;
+  }
+
+  const document = content.documentMessage;
+  if (document) {
+    return {
+      mediaType: 'document',
+      mimetype: document.mimetype ?? null,
+      fileName: document.fileName ?? null,
+      size: toSafeNumber(document.fileLength),
+      caption: document.caption ?? null,
+    };
+  }
+
+  const audio = content.audioMessage;
+  if (audio) {
+    const media: MediaMetadataPayload = {
+      mediaType: 'audio',
+      mimetype: audio.mimetype ?? null,
+      fileName: getOptionalString(audio, 'fileName'),
+      size: toSafeNumber(audio.fileLength),
+      caption: null,
+    };
+    if (audio.seconds != null) media.seconds = audio.seconds;
+    if (audio.ptt != null) media.ptt = audio.ptt;
+    return media;
+  }
+
+  const sticker = content.stickerMessage;
+  if (sticker) {
+    return {
+      mediaType: 'sticker',
+      mimetype: sticker.mimetype ?? null,
+      fileName: getOptionalString(sticker, 'fileName'),
+      size: toSafeNumber(sticker.fileLength),
+      caption: null,
+    };
+  }
+
+  const location = content.liveLocationMessage ?? content.locationMessage;
+  if (location) {
+    const media: MediaMetadataPayload = {
+      mediaType: 'location',
+      mimetype: null,
+      fileName: null,
+      size: null,
+      caption: getOptionalString(location, 'caption')
+        ?? getOptionalString(location, 'name')
+        ?? getOptionalString(location, 'address'),
+    };
+    if (location.degreesLatitude != null) media.latitude = location.degreesLatitude;
+    if (location.degreesLongitude != null) media.longitude = location.degreesLongitude;
+    if ('accuracyInMeters' in location && location.accuracyInMeters != null) {
+      media.accuracy = location.accuracyInMeters;
+    }
+    return media;
+  }
+
+  return null;
 }
 
 export interface MessageServiceOptions {
@@ -300,7 +512,7 @@ export class MessageService {
 
   async sendText(jid: string, text: string, options: SendTextOptions = {}): Promise<WAMessage> {
     const message = await this.sendMessageWithTimeout(jid, { text }, options);
-    await this.emitOutboundMessage(message, { text });
+    await this.emitOutboundMessage(message, { text, type: 'text' });
     return message;
   }
 
@@ -325,7 +537,7 @@ export class MessageService {
 
     const message = await this.sendMessageWithTimeout(jid, content, options);
 
-    const interactive: Record<string, unknown> = {
+    const interactive: InteractivePayload = {
       type: 'buttons',
       buttons: payload.buttons.map((button) => ({ ...button })),
     };
@@ -333,7 +545,7 @@ export class MessageService {
       interactive.footer = payload.footer;
     }
 
-    await this.emitOutboundMessage(message, { text: payload.text, interactive });
+    await this.emitOutboundMessage(message, { text: payload.text, interactive, type: 'buttons' });
     return message;
   }
 
@@ -365,7 +577,7 @@ export class MessageService {
 
     const message = await this.sendMessageWithTimeout(jid, content, options);
 
-    const interactive: Record<string, unknown> = {
+    const interactive: InteractivePayload = {
       type: 'list',
       buttonText: payload.buttonText,
       sections: payload.sections.map((section) => ({
@@ -385,7 +597,7 @@ export class MessageService {
       interactive.footer = payload.footer;
     }
 
-    await this.emitOutboundMessage(message, { text: payload.text, interactive });
+    await this.emitOutboundMessage(message, { text: payload.text, interactive, type: 'list' });
     return message;
   }
 
@@ -414,33 +626,17 @@ export class MessageService {
 
     const caption = sanitizeString(options.caption);
 
-    const eventPayload = this.createStructuredPayload(
-      message,
-      'outbound',
-      'MESSAGE_OUTBOUND',
-      {
-        conversation: caption || null,
-        media: {
-          type,
-          caption: caption || null,
-          mimetype: built.mimetype,
-          fileName: built.fileName,
-          source: built.source,
-          size: built.size,
-        },
+    await this.emitOutboundMessage(message, {
+      text: caption || null,
+      type: 'media',
+      media: {
+        mediaType: type,
+        caption: caption || null,
+        mimetype: built.mimetype,
+        fileName: built.fileName,
+        size: built.size,
       },
-    );
-
-    if (this.eventStore) {
-      this.eventStore.enqueue({
-        instanceId: this.instanceId,
-        direction: 'outbound',
-        type: 'MESSAGE_OUTBOUND',
-        payload: eventPayload,
-      });
-    }
-
-    await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload);
+    });
 
     return message;
   }
@@ -456,11 +652,7 @@ export class MessageService {
     const filtered = filterClientMessages(messages);
     for (const message of filtered) {
       try {
-        const eventPayload = this.createStructuredPayload(
-          message,
-          'inbound',
-          'MESSAGE_INBOUND',
-        );
+        const eventPayload = this.createStructuredPayload(message, 'inbound');
 
         if (this.eventStore) {
           this.eventStore.enqueue({
@@ -503,24 +695,28 @@ export class MessageService {
 
   private async emitOutboundMessage(
     message: WAMessage,
-    extras: Record<string, unknown> = {},
+    extras: StructuredMessageOverrides = {},
   ): Promise<void> {
-    const overrides: Record<string, unknown> = {};
+    const overrides: StructuredMessageOverrides = {};
 
     if ('text' in extras) {
-      overrides.conversation = typeof extras.text === 'string' ? extras.text : null;
+      const text = extras.text;
+      overrides.text = typeof text === 'string' ? text : text == null ? null : String(text);
     }
 
     if ('interactive' in extras) {
-      overrides.interactive = extras.interactive;
+      overrides.interactive = extras.interactive ?? null;
     }
 
-    const eventPayload = this.createStructuredPayload(
-      message,
-      'outbound',
-      'MESSAGE_OUTBOUND',
-      overrides,
-    );
+    if ('media' in extras) {
+      overrides.media = extras.media ?? null;
+    }
+
+    if ('type' in extras) {
+      overrides.type = extras.type ?? null;
+    }
+
+    const eventPayload = this.createStructuredPayload(message, 'outbound', overrides);
 
     if (this.eventStore) {
       this.eventStore.enqueue({
@@ -537,42 +733,71 @@ export class MessageService {
   private createStructuredPayload(
     message: WAMessage,
     direction: BrokerEventDirection,
-    eventType: string,
-    messageOverrides: Record<string, unknown> = {},
+    messageOverrides: StructuredMessageOverrides = {},
   ): StructuredMessageEventPayload {
     const lead = mapLeadFromMessage(message);
     const contact = buildContactPayload(lead);
     const messageId = message.key?.id ?? null;
     const chatId = message.key?.remoteJid ?? null;
-    const conversationFromMessage = extractMessageText(message);
+    const extractedText = extractMessageText(message);
 
-    const baseMessage: StructuredMessagePayload = {
+    const text =
+      Object.prototype.hasOwnProperty.call(messageOverrides, 'text')
+        ? messageOverrides.text ?? null
+        : extractedText ?? null;
+
+    const interactive =
+      Object.prototype.hasOwnProperty.call(messageOverrides, 'interactive')
+        ? messageOverrides.interactive ?? null
+        : buildInteractivePayloadFromMessage(message);
+
+    const media =
+      Object.prototype.hasOwnProperty.call(messageOverrides, 'media')
+        ? messageOverrides.media ?? null
+        : buildMediaPayloadFromMessage(message);
+
+    let type: string | null;
+    if (Object.prototype.hasOwnProperty.call(messageOverrides, 'type')) {
+      type = messageOverrides.type ?? null;
+    } else {
+      type = normalizeMessageType(extractMessageType(message));
+    }
+
+    if (!type) {
+      if (media) {
+        type = media.mediaType ?? 'media';
+      } else if (interactive) {
+        type = typeof interactive.type === 'string' ? interactive.type : 'interactive';
+      } else if (text) {
+        type = 'text';
+      }
+    }
+
+    const structuredMessage: StructuredMessagePayload = {
       id: messageId,
-      messageId,
       chatId,
-      type: extractMessageType(message),
-      conversation: conversationFromMessage,
+      type,
+      text,
     };
 
-    const structuredMessage = {
-      ...baseMessage,
-      ...messageOverrides,
-    } as StructuredMessagePayload;
+    if (interactive) {
+      structuredMessage.interactive = interactive;
+    }
 
-    if (structuredMessage.conversation == null) {
-      structuredMessage.conversation = conversationFromMessage;
+    if (media) {
+      structuredMessage.media = media;
     }
 
     const metadata: EventMetadata = {
       timestamp: toIsoDate(message.messageTimestamp),
       broker: {
         direction,
-        type: eventType,
+        type: 'baileys',
       },
+      source: 'baileys-acessus',
     };
 
     return {
-      instanceId: this.instanceId,
       contact,
       message: structuredMessage,
       metadata,

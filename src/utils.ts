@@ -19,7 +19,7 @@ export function normalizeToE164BR(val: unknown): string | null {
 export function buildSignature(payload: string, secret: string): string {
   const hmac = crypto.createHmac('sha256', String(secret));
   hmac.update(payload);
-  return `sha256=${hmac.digest('hex')}`;
+  return hmac.digest('hex');
 }
 
 export function allowSend(inst: Instance): boolean {

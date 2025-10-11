@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type pino from 'pino';
-import type { WAMessage } from '@whiskeysockets/baileys';
+import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
+
 import { MessageService } from '../src/baileys/messageService.js';
 import { BrokerEventStore } from '../src/broker/eventStore.js';
+import type { WebhookClient } from '../src/services/webhook.js';
 
 class FakeWebhook {
   public readonly events: Array<{ event: string; payload: unknown }> = [];
@@ -85,51 +87,17 @@ test('MessageService.onMessagesUpsert forwards only client messages with content
 
   const payloads = webhook.events.map((entry) => entry.payload as any);
   assert.deepStrictEqual(
-    payloads.map((payload: any) => payload.messageId),
+    payloads.map((payload: any) => payload.message.id),
     ['keep-text', 'keep-media'],
   );
 
   const stored = eventStore.list({ limit: 10 });
   assert.equal(stored.length, 2);
   assert.deepStrictEqual(
-    stored.map((event) => event.payload.messageId),
+    stored.map((event) => (event.payload as any).message.id),
     ['keep-text', 'keep-media'],
   );
 });
-
-test('MessageService.onInbound also filters messages defensively', async () => {
-  const { service, webhook, eventStore } = createService({ eventStore: new BrokerEventStore() });
-
-  const validListReply = createMessage('keep-list', {
-    message: {
-      listResponseMessage: {
-        title: 'Option 1',
-      },
-    } as any,
-  });
-
-  await service.onInbound([validListReply, ...invalidMessages]);
-
-  assert.equal(webhook.events.length, 1);
-  assert.deepStrictEqual(
-    webhook.events.map((entry) => entry.event),
-    ['MESSAGE_INBOUND'],
-  );
-
-  const payload = webhook.events[0].payload as any;
-  assert.equal(payload.messageId, 'keep-list');
-
-  const stored = eventStore.list({ limit: 10 });
-  assert.equal(stored.length, 1);
-  assert.equal(stored[0].payload.messageId, 'keep-list');
-import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
-import type pino from 'pino';
-
-import { MessageService } from '../src/baileys/messageService.js';
-import { BrokerEventStore } from '../src/broker/eventStore.js';
-import type { WebhookClient } from '../src/services/webhook.js';
-
-const noopLogger = { warn: () => {} } as unknown as pino.Logger;
 
 function buildInboundMessage(): WAMessage {
   return {
@@ -159,7 +127,7 @@ test('MessageService emits structured inbound payload', async () => {
   const service = new MessageService(
     {} as unknown as WASocket,
     webhook,
-    noopLogger,
+    { warn: () => {} } as unknown as pino.Logger,
     { eventStore, instanceId: 'test-instance' },
   );
 
@@ -170,22 +138,20 @@ test('MessageService emits structured inbound payload', async () => {
   assert.equal(webhookEvents[0].event, 'MESSAGE_INBOUND');
 
   const payload = webhookEvents[0].payload;
-  assert.equal(payload.instanceId, 'test-instance');
   assert.deepStrictEqual(payload.contact, {
-    owner: 'customer',
+    owner: 'user',
     remoteJid: '5511987654321@s.whatsapp.net',
     participant: null,
-    phone: '5511987654321',
+    phone: '+5511987654321',
     displayName: 'Maria da Silva',
     isGroup: false,
   });
 
   assert.deepStrictEqual(payload.message, {
     id: 'ABC123',
-    messageId: 'ABC123',
     chatId: '5511987654321@s.whatsapp.net',
-    type: 'conversation',
-    conversation: 'Olá! Tudo bem?',
+    type: 'text',
+    text: 'Olá! Tudo bem?',
   });
 
   const expectedTimestamp = new Date(1700000000 * 1000).toISOString();
@@ -193,8 +159,9 @@ test('MessageService emits structured inbound payload', async () => {
     timestamp: expectedTimestamp,
     broker: {
       direction: 'inbound',
-      type: 'MESSAGE_INBOUND',
+      type: 'baileys',
     },
+    source: 'baileys-acessus',
   });
 
   const [event] = eventStore.list();
