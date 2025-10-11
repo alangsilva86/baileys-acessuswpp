@@ -56,7 +56,30 @@ export class WebhookClient {
       }
       await this.http.post(this.url, serialized, { headers });
     } catch (err) {
-      this.logger.warn({ err, event, url: this.url }, 'webhook.emit.failed');
+      const sanitizedError = this.sanitizeError(err);
+      this.logger.warn({ error: sanitizedError, event, url: this.url }, 'webhook.emit.failed');
     }
+  }
+
+  private sanitizeError(error: unknown): Record<string, unknown> {
+    if (axios.isAxiosError(error)) {
+      const { message, response, config } = error;
+      const sanitized: Record<string, unknown> = {
+        message,
+      };
+
+      if (response?.status !== undefined) sanitized.status = response.status;
+      if (response?.statusText !== undefined) sanitized.statusText = response.statusText;
+      const requestUrl = config?.url ?? this.url ?? undefined;
+      if (requestUrl !== undefined) sanitized.url = requestUrl;
+
+      return sanitized;
+    }
+
+    if (error instanceof Error) {
+      return { message: error.message };
+    }
+
+    return { message: 'Unknown error' };
   }
 }
