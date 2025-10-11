@@ -10,6 +10,11 @@ import { mapLeadFromMessage } from '../services/leadMapper.js';
 import { WebhookClient } from '../services/webhook.js';
 import { getSendTimeoutMs } from '../utils.js';
 import type { BrokerEventStore } from '../broker/eventStore.js';
+import {
+  extractMessageText,
+  extractMessageType,
+  filterClientMessages,
+} from './messageUtils.js';
 
 export interface SendTextOptions {
   timeoutMs?: number;
@@ -196,22 +201,6 @@ export function buildMediaMessageContent(
     size,
     source: base64 ? 'base64' : 'url',
   };
-}
-
-function extractMessageType(message: WAMessage): string | null {
-  const keys = Object.keys(message.message || {});
-  return keys.length ? keys[0] : null;
-}
-
-function extractMessageText(message: WAMessage): string | null {
-  const content = message.message;
-  if (!content) return null;
-  if ('conversation' in content && content.conversation) return content.conversation;
-  if (content.extendedTextMessage?.text) return content.extendedTextMessage.text;
-  if (content.pollCreationMessage?.name) return content.pollCreationMessage.name;
-  if (content.pollCreationMessageV2?.name) return content.pollCreationMessageV2.name;
-  if (content.pollCreationMessageV3?.name) return content.pollCreationMessageV3.name;
-  return null;
 }
 
 function toIsoDate(timestamp?: number | Long | bigint | null): string {
@@ -407,16 +396,15 @@ export class MessageService {
   }
 
   async onMessagesUpsert(event: BaileysEventMap['messages.upsert']): Promise<void> {
-    if (!event.messages?.length) return;
-
-    const inbound = event.messages.filter((message) => !message.key?.fromMe);
+    const inbound = filterClientMessages(event.messages);
     if (inbound.length) {
       await this.onInbound(inbound);
     }
   }
 
   async onInbound(messages: WAMessage[]): Promise<void> {
-    for (const message of messages) {
+    const filtered = filterClientMessages(messages);
+    for (const message of filtered) {
       try {
         const lead = mapLeadFromMessage(message);
         const eventPayload = {
