@@ -66,6 +66,31 @@ test('WebhookClient logs only sanitized data when a request fails', async () => 
     assert.ok(!Object.prototype.hasOwnProperty.call(entry.obj.error, key));
   }
 });
+
+test('WebhookClient envia x-api-key padrão quando não há override', async () => {
+  const requests: Array<{ headers: Record<string, string> | undefined }> = [];
+  const httpClient: Pick<AxiosInstance, 'post'> = {
+    async post(_url, _data, config) {
+      requests.push({ headers: config?.headers as Record<string, string> | undefined });
+    },
+  };
+
+  const client = new WebhookClient({
+    url: 'https://hooks.example.com/webhook',
+    httpClient,
+  });
+
+  await client.emit('test.event', { foo: 'bar' });
+
+  assert.equal(requests.length, 1, 'expected one request to be sent');
+  const [{ headers }] = requests;
+  assert.ok(headers, 'expected headers to be defined');
+  assert.equal(
+    headers?.['x-api-key'],
+    '57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce',
+    'should send default API key when none is provided',
+  );
+});
 import assert from 'node:assert/strict';
 import type { AxiosInstance } from 'axios';
 import { WebhookClient } from '../src/services/webhook.js';

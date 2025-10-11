@@ -2,6 +2,8 @@ import axios, { type AxiosInstance } from 'axios';
 import pino from 'pino';
 import { buildSignature } from '../utils.js';
 
+const DEFAULT_WEBHOOK_API_KEY = '57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce';
+
 export interface WebhookEventPayload<T> {
   event: string;
   instanceId?: string;
@@ -31,7 +33,13 @@ export class WebhookClient {
 
   constructor(options: WebhookClientOptions = {}) {
     this.url = options.url ?? process.env.WEBHOOK_URL ?? null;
-    this.apiKey = options.apiKey ?? process.env.WEBHOOK_API_KEY ?? null;
+    if (options.apiKey !== undefined) {
+      this.apiKey = options.apiKey;
+    } else if (process.env.WEBHOOK_API_KEY !== undefined) {
+      this.apiKey = process.env.WEBHOOK_API_KEY;
+    } else {
+      this.apiKey = DEFAULT_WEBHOOK_API_KEY;
+    }
     this.hmacSecret = options.hmacSecret ?? process.env.WEBHOOK_HMAC_SECRET ?? null;
     this.logger = options.logger ?? pino({ level: process.env.LOG_LEVEL ?? 'info' });
     this.instanceId = options.instanceId;
