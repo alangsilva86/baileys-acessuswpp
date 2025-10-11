@@ -5,14 +5,8 @@ import helmet from 'helmet';
 import cors from 'cors';
 import crypto from 'node:crypto';
 import pino from 'pino';
-import {
-  BROKER_MODE,
-  getAllInstances,
-  loadInstances,
-  startAllInstances,
-} from './instanceManager.js';
+import { getAllInstances, loadInstances, startAllInstances } from './instanceManager.js';
 import instanceRoutes from './routes/instances.js';
-import brokerRoutes from './routes/broker.js';
 import { brokerEventStore } from './broker/eventStore.js';
 
 const PORT = Number(process.env.PORT || 3000);
@@ -26,39 +20,31 @@ interface RequestWithId extends Request {
 }
 
 const PUBLIC_DIR = path.resolve(process.cwd(), 'public');
-const BROKER_FLAG = BROKER_MODE || process.env.BROKER_MODE === 'true';
-
 const app = express();
 app.disable('x-powered-by');
 
 const defaultCsp = helmet.contentSecurityPolicy.getDefaultDirectives();
-if (BROKER_FLAG) {
-  app.use(helmet({ contentSecurityPolicy: false }));
-} else {
-  app.use(
-    helmet({
-      contentSecurityPolicy: {
-        directives: {
-          ...defaultCsp,
-          'script-src': [
-            ...(defaultCsp['script-src'] ?? []),
-            'https://cdn.tailwindcss.com',
-            'https://cdn.jsdelivr.net',
-          ],
-          'img-src': [
-            ...(defaultCsp['img-src'] ?? []),
-            'blob:',
-          ],
-        },
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...defaultCsp,
+        'script-src': [
+          ...(defaultCsp['script-src'] ?? []),
+          'https://cdn.tailwindcss.com',
+          'https://cdn.jsdelivr.net',
+        ],
+        'img-src': [
+          ...(defaultCsp['img-src'] ?? []),
+          'blob:',
+        ],
       },
-    }),
-  );
-}
+    },
+  }),
+);
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
-if (!BROKER_FLAG) {
-  app.use(express.static(PUBLIC_DIR));
-}
+app.use(express.static(PUBLIC_DIR));
 
 app.use((req, res, next) => {
   const request = req as RequestWithId;
@@ -80,11 +66,7 @@ app.use((req, res, next) => {
   next();
 });
 
-if (BROKER_FLAG) {
-  app.use('/broker', brokerRoutes);
-} else {
-  app.use('/instances', instanceRoutes);
-}
+app.use('/instances', instanceRoutes);
 
 app.get('/health', (_req, res) => {
   const instances = getAllInstances().map((inst) => ({
@@ -95,11 +77,9 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', uptime: process.uptime(), instances, queue });
 });
 
-if (!BROKER_FLAG) {
-  app.get('/', (_req, res) => {
-    res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
-  });
-}
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+});
 
 app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
   const request = req as RequestWithId;
@@ -109,9 +89,7 @@ app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
 
 async function main(): Promise<void> {
   await loadInstances();
-  if (!BROKER_FLAG) {
-    await startAllInstances();
-  }
+  await startAllInstances();
   app.listen(PORT, () => {
     logger.info({ port: PORT }, 'server.listening');
   });
