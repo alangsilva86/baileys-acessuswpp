@@ -16,6 +16,34 @@ export interface SendTextOptions {
   messageOptions?: Parameters<WASocket['sendMessage']>[2];
 }
 
+export interface TemplateButtonOption {
+  id: string;
+  title: string;
+}
+
+export interface SendButtonsPayload {
+  text: string;
+  footer?: string;
+  buttons: TemplateButtonOption[];
+}
+
+export interface ListOptionPayload {
+  id: string;
+  title: string;
+  description?: string;
+}
+
+export interface ListSectionPayload {
+  title?: string;
+  options: ListOptionPayload[];
+}
+
+export interface SendListPayload {
+  text: string;
+  buttonText: string;
+  title?: string;
+  footer?: string;
+  sections: ListSectionPayload[];
 export const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
 
 export type MediaMessageType = 'image' | 'video' | 'audio' | 'document';
@@ -232,45 +260,93 @@ export class MessageService {
   }
 
   async sendText(jid: string, text: string, options: SendTextOptions = {}): Promise<WAMessage> {
-    const timeoutMs = options.timeoutMs ?? getSendTimeoutMs();
-    const payload = { text } as const;
+    const message = await this.sendMessageWithTimeout(jid, { text }, options);
+    await this.emitOutboundMessage(message, { text });
+    return message;
+  }
 
-    const sendPromise = this.sock.sendMessage(jid, payload, options.messageOptions);
+  async sendButtons(
+    jid: string,
+    payload: SendButtonsPayload,
+    options: SendTextOptions = {},
+  ): Promise<WAMessage> {
+    const templateButtons = payload.buttons.map((button, index) => ({
+      index: index + 1,
+      quickReplyButton: {
+        id: button.id,
+        displayText: button.title,
+      },
+    }));
 
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    const message = await (timeoutMs
-      ? (Promise.race([
-          sendPromise,
-          new Promise<WAMessage>((_, reject) => {
-            timeoutHandle = setTimeout(() => reject(new Error('send timeout')), timeoutMs);
-          }),
-        ]) as Promise<WAMessage>)
-      : sendPromise);
-
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-
-    const lead = mapLeadFromMessage(message);
-
-    const eventPayload = {
-      messageId: message.key?.id,
-      chatId: message.key?.remoteJid,
-      text,
-      type: extractMessageType(message),
-      lead,
-      timestamp: toIsoDate(message.messageTimestamp),
+    const content = {
+      text: payload.text,
+      footer: payload.footer,
+      templateButtons,
     } as const;
 
-    if (this.eventStore) {
-      this.eventStore.enqueue({
-        instanceId: this.instanceId,
-        direction: 'outbound',
-        type: 'MESSAGE_OUTBOUND',
-        payload: { ...eventPayload },
-      });
+    const message = await this.sendMessageWithTimeout(jid, content, options);
+
+    const interactive: Record<string, unknown> = {
+      type: 'buttons',
+      buttons: payload.buttons.map((button) => ({ ...button })),
+    };
+    if (payload.footer) {
+      interactive.footer = payload.footer;
     }
 
-    await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload);
+    await this.emitOutboundMessage(message, { text: payload.text, interactive });
+    return message;
+  }
 
+  async sendList(
+    jid: string,
+    payload: SendListPayload,
+    options: SendTextOptions = {},
+  ): Promise<WAMessage> {
+    const sections = payload.sections.map((section) => ({
+      title: section.title,
+      rows: section.options.map((option) => ({
+        rowId: option.id,
+        title: option.title,
+        description: option.description,
+      })),
+    }));
+
+    const content = {
+      text: payload.text,
+      footer: payload.footer,
+      list: {
+        title: payload.title,
+        buttonText: payload.buttonText,
+        description: payload.text,
+        footer: payload.footer,
+        sections,
+      },
+    } as const;
+
+    const message = await this.sendMessageWithTimeout(jid, content, options);
+
+    const interactive: Record<string, unknown> = {
+      type: 'list',
+      buttonText: payload.buttonText,
+      sections: payload.sections.map((section) => ({
+        ...(section.title ? { title: section.title } : {}),
+        options: section.options.map((option) => ({
+          id: option.id,
+          title: option.title,
+          ...(option.description ? { description: option.description } : {}),
+        })),
+      })),
+    };
+
+    if (payload.title) {
+      interactive.title = payload.title;
+    }
+    if (payload.footer) {
+      interactive.footer = payload.footer;
+    }
+
+    await this.emitOutboundMessage(message, { text: payload.text, interactive });
     return message;
   }
 
@@ -364,5 +440,61 @@ export class MessageService {
         this.logger.warn({ err }, 'message.inbound.emit.failed');
       }
     }
+  }
+
+  private async sendMessageWithTimeout(
+    jid: string,
+    content: Parameters<WASocket['sendMessage']>[1],
+    options: SendTextOptions,
+  ): Promise<WAMessage> {
+    const timeoutMs = options.timeoutMs ?? getSendTimeoutMs();
+    const sendPromise = this.sock.sendMessage(jid, content, options.messageOptions);
+
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const message = await (timeoutMs
+      ? (Promise.race([
+          sendPromise,
+          new Promise<WAMessage>((_, reject) => {
+            timeoutHandle = setTimeout(() => reject(new Error('send timeout')), timeoutMs);
+          }),
+        ]) as Promise<WAMessage>)
+      : sendPromise);
+
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+
+    return message;
+  }
+
+  private async emitOutboundMessage(
+    message: WAMessage,
+    extras: Record<string, unknown> = {},
+  ): Promise<void> {
+    const lead = mapLeadFromMessage(message);
+    const eventPayload: Record<string, unknown> = {
+      messageId: message.key?.id,
+      chatId: message.key?.remoteJid,
+      type: extractMessageType(message),
+      timestamp: toIsoDate(message.messageTimestamp),
+      lead,
+      ...extras,
+    };
+
+    if (!('text' in eventPayload)) {
+      const extracted = extractMessageText(message);
+      if (extracted) {
+        eventPayload.text = extracted;
+      }
+    }
+
+    if (this.eventStore) {
+      this.eventStore.enqueue({
+        instanceId: this.instanceId,
+        direction: 'outbound',
+        type: 'MESSAGE_OUTBOUND',
+        payload: { ...eventPayload },
+      });
+    }
+
+    await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload);
   }
 }
