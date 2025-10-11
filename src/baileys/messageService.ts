@@ -334,6 +334,14 @@ function normalizeMessageType(rawType: string | null): string | null {
   }
 }
 
+function getOptionalString(source: unknown, key: string): string | null {
+  if (!source || typeof source !== 'object') return null;
+  const value = (source as Record<string, unknown>)[key];
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 function buildInteractivePayloadFromMessage(message: WAMessage): InteractivePayload | null {
   const content = getNormalizedMessageContent(message);
   if (!content) return null;
@@ -387,6 +395,8 @@ function buildInteractivePayloadFromMessage(message: WAMessage): InteractivePayl
         interactive.params = params;
       }
     }
+    if (interactiveResponse.name) {
+      interactive.name = interactiveResponse.name;
     if (interactiveResponse.id) {
       interactive.id = interactiveResponse.id;
     }
@@ -405,6 +415,7 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
     const media: MediaMetadataPayload = {
       mediaType: 'image',
       mimetype: image.mimetype ?? null,
+      fileName: getOptionalString(image, 'fileName'),
       fileName: image.fileName ?? null,
       size: toSafeNumber(image.fileLength),
       caption: image.caption ?? null,
@@ -419,6 +430,7 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
     const media: MediaMetadataPayload = {
       mediaType: 'video',
       mimetype: video.mimetype ?? null,
+      fileName: getOptionalString(video, 'fileName'),
       fileName: video.fileName ?? null,
       size: toSafeNumber(video.fileLength),
       caption: video.caption ?? null,
@@ -444,6 +456,7 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
     const media: MediaMetadataPayload = {
       mediaType: 'audio',
       mimetype: audio.mimetype ?? null,
+      fileName: getOptionalString(audio, 'fileName'),
       fileName: audio.fileName ?? null,
       size: toSafeNumber(audio.fileLength),
       caption: null,
@@ -458,6 +471,7 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
     return {
       mediaType: 'sticker',
       mimetype: sticker.mimetype ?? null,
+      fileName: getOptionalString(sticker, 'fileName'),
       fileName: null,
       size: toSafeNumber(sticker.fileLength),
       caption: null,
@@ -471,6 +485,9 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
       mimetype: null,
       fileName: null,
       size: null,
+      caption: getOptionalString(location, 'caption')
+        ?? getOptionalString(location, 'name')
+        ?? getOptionalString(location, 'address'),
       caption: location.name ?? location.address ?? null,
     };
     if (location.degreesLatitude != null) media.latitude = location.degreesLatitude;
@@ -530,7 +547,7 @@ export class MessageService {
 
     const message = await this.sendMessageWithTimeout(jid, content, options);
 
-    const interactive: Record<string, unknown> = {
+    const interactive: InteractivePayload = {
       type: 'buttons',
       buttons: payload.buttons.map((button) => ({ ...button })),
     };
@@ -570,7 +587,7 @@ export class MessageService {
 
     const message = await this.sendMessageWithTimeout(jid, content, options);
 
-    const interactive: Record<string, unknown> = {
+    const interactive: InteractivePayload = {
       type: 'list',
       buttonText: payload.buttonText,
       sections: payload.sections.map((section) => ({
