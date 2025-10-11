@@ -45,12 +45,10 @@ npm start
 - `PORT`: Porta do servidor (padrão: 3000)
 - `API_KEY`: Chave de API para autenticação (obrigatório)
 - `SESSION_DIR`: Diretório para armazenar sessões (padrão: ./sessions)
-- `BROKER_MODE`: Quando definido como `true`, inicializa o servidor no modo broker minimalista (desabilita o dashboard e rotas legadas)
-- `LEADENGINE_INSTANCE_ID`: Identificador padrão da sessão usada no modo broker (padrão: `leadengine`)
 - `LOG_LEVEL`: Nível de log (padrão: info)
 - `SERVICE_NAME`: Nome do serviço para logs (padrão: baileys-api)
 - `WEBHOOK_URL`: URL para receber webhooks de eventos
-- `WEBHOOK_API_KEY`: Chave opcional para autenticar o webhook
+- `WEBHOOK_API_KEY`: Chave para autenticar o webhook (padrão: `57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce`)
 - Logs de falha do webhook registram apenas status, mensagem e URL para evitar exposição de segredos
 - `WEBHOOK_HMAC_SECRET`: Segredo opcional para assinar os eventos via HMAC
 - `RATE_MAX_SENDS`: Máximo de mensagens por janela de tempo (padrão: 20)
@@ -61,7 +59,7 @@ npm start
 
 ### Webhooks
 
-Defina `WEBHOOK_URL` (e opcionalmente `WEBHOOK_API_KEY`/`WEBHOOK_HMAC_SECRET`) para receber eventos push. Ao ativar, o serviço envia um `POST` para o endpoint configurado sempre que um voto de enquete é processado.
+Defina `WEBHOOK_URL` (e opcionalmente substitua `WEBHOOK_API_KEY`/adicione `WEBHOOK_HMAC_SECRET`) para receber eventos push. Ao ativar, o serviço envia um `POST` para o endpoint configurado sempre que um voto de enquete é processado. Caso nenhuma chave seja fornecida, o cliente usa por padrão `57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce` no header `x-api-key`.
 
 #### Implementando o endpoint receptor
 
@@ -205,6 +203,40 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 - `DELETE /instances/:id` - Deletar instância
 - `GET /instances/:id/events` - Listar eventos pendentes da instância (`limit`, `after`, `direction`, `type`)
 - `POST /instances/:id/events/ack` - Confirmar consumo de eventos informando os IDs recebidos
+
+#### Estrutura dos eventos `MESSAGE_INBOUND` e `MESSAGE_OUTBOUND`
+
+Os eventos disparados pelo webhook e disponíveis no `eventStore` compartilham a mesma estrutura. O payload contém informações da instância, contato e mensagem, além de metadados de rastreabilidade:
+
+```json
+{
+  "instanceId": "acme-support",
+  "contact": {
+    "owner": "customer",
+    "remoteJid": "5511987654321@s.whatsapp.net",
+    "participant": null,
+    "phone": "5511987654321",
+    "displayName": "Maria da Silva",
+    "isGroup": false
+  },
+  "message": {
+    "id": "ABC123",
+    "messageId": "ABC123",
+    "chatId": "5511987654321@s.whatsapp.net",
+    "type": "conversation",
+    "conversation": "Olá! Tudo bem?"
+  },
+  "metadata": {
+    "timestamp": "2023-11-14T22:13:20.000Z",
+    "broker": {
+      "direction": "inbound",
+      "type": "MESSAGE_INBOUND"
+    }
+  }
+}
+```
+
+Para mensagens com mídia, o bloco `message` inclui o objeto `media` com detalhes como `type`, `caption`, `mimetype`, `fileName`, `source` e `size`. O campo `message.messageId` permanece como alias de `message.id` para compatibilidade.
 
 #### Autenticação
 
@@ -440,16 +472,15 @@ Se algum participante não puder ser removido, o endpoint retorna `status: "part
 
 - `GET /instances/:id/metrics` - Obter métricas detalhadas
 
-#### Consumo de eventos sem broker
+#### Consumo de eventos via HTTP
 
-Mesmo fora do modo broker é possível consumir os eventos estruturados gerados pela instância atual. Use `GET /instances/:id/events`
-para ler a fila HTTP compartilhada, filtrando por `direction` (`inbound`, `outbound` ou `system`) e/ou `type` conforme necessário.
-O endpoint retorna também o `nextCursor` (ID do último evento listado) para paginação incremental.
+Consuma os eventos estruturados gerados pela instância atual usando `GET /instances/:id/events`. O endpoint permite filtrar por
+`direction` (`inbound`, `outbound` ou `system`) e/ou `type` conforme necessário e retorna também o `nextCursor` (ID do último
+evento listado) para paginação incremental.
 
 Os eventos permanecem na fila até serem confirmados. Após processá-los, envie `POST /instances/:id/events/ack` com o array `ids`
 retornado na listagem. Eventos reconhecidos deixam de ser entregues em chamadas futuras; IDs desconhecidos são retornados em
-`missing`, como no fluxo do modo broker. Enquanto o ACK não for enviado, os eventos continuam disponíveis e podem ser reenviados
-em caso de falhas.
+`missing`. Enquanto o ACK não for enviado, os eventos continuam disponíveis e podem ser reenviados em caso de falhas.
 ##### `POST /instances/:id/send-media`
 
 Envia arquivos de mídia para um contato ou grupo. Os parâmetros aceitos são:
@@ -485,26 +516,8 @@ POST /instances/meu-bot/send-media
 
 O endpoint retorna o `id` da mensagem enviada, o status informado pelo WhatsApp, além de metadados da mídia (`type`, `mimetype`, `fileName`, `size` e `source`).
 
-### Modo Broker Minimalista
-
-O modo broker é pensado para integrações server-to-server com o LeadEngine, mantendo o backend enxuto e orientado a filas HTTP. Para habilitar:
-
-```bash
-BROKER_MODE=true npm start
-```
-
-Quando ativo, as rotas legadas `/instances` e o dashboard são desabilitados. Os endpoints disponíveis ficam sob o prefixo `/broker`:
-
-- `POST /broker/session/connect` — inicializa (ou reutiliza) a sessão declarada em `LEADENGINE_INSTANCE_ID` e retorna o status atual (incluindo QR se disponível).
-- `POST /broker/session/logout` — encerra a sessão atual; envie `{ "wipe": true }` para remover o diretório em disco.
-- `GET /broker/session/status` — consulta o estado e métricas básicas da sessão.
-- `POST /broker/messages` — envia mensagens de texto; suporta `waitAckMs` para aguardar ACK e `timeoutMs` para sobrescrever o timeout padrão.
-- `GET /broker/events` — lista eventos pendentes na fila HTTP (mensagens inbound/outbound e votos de enquete) com suporte a filtros (`instanceId`, `type`, `direction`).
-- `POST /broker/events/ack` — confirma o consumo de eventos informando uma lista de IDs.
-
-O endpoint `/health` passa a incluir a chave `queue` com estatísticas da fila (`pending`, `total`, `lastEventAt`, `lastAckAt`).
-
 ## Estrutura do Projeto
+
 
 ```
 ├── src/
@@ -512,12 +525,11 @@ O endpoint `/health` passa a incluir a chave `queue` com estatísticas da fila (
 │   ├── whatsapp.ts           # Integração com Baileys e serviços auxiliares
 │   ├── utils.ts              # Funções utilitárias
 │   ├── server.ts             # Servidor HTTP (Express)
-│   ├── broker/               # Componentes do modo broker (event store)
+│   ├── broker/               # Fila de eventos HTTP compartilhada
 │   ├── baileys/              # Serviços de mensagens e enquetes
 │   ├── services/             # Camada de integração externa (webhook, lead mapper)
 │   └── routes/
-│       ├── broker.ts         # Rotas minimalistas para o LeadEngine
-│       └── instances.ts      # Rotas da API
+│       └── instances.ts      # Rotas da API HTTP
 ├── public/
 │   ├── index.html          # Interface web
 │   └── dashboard.js        # JavaScript do dashboard
