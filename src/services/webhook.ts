@@ -9,21 +9,24 @@ export interface WebhookEventPayload<T> {
   payload: T;
 }
 
+type Logger = Pick<pino.Logger, 'warn'>;
+type HttpClient = Pick<AxiosInstance, 'post'>;
+
 export interface WebhookClientOptions {
   url?: string | null;
   apiKey?: string | null;
   hmacSecret?: string | null;
-  logger?: pino.Logger;
+  logger?: Logger;
   instanceId?: string;
-  httpClient?: AxiosInstance;
+  httpClient?: HttpClient;
 }
 
 export class WebhookClient {
   private readonly url?: string | null;
   private readonly apiKey?: string | null;
   private readonly hmacSecret?: string | null;
-  private readonly logger: pino.Logger;
-  private readonly http: AxiosInstance;
+  private readonly logger: Logger;
+  private readonly http: HttpClient;
   private readonly instanceId?: string;
 
   constructor(options: WebhookClientOptions = {}) {
