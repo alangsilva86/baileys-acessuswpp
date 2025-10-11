@@ -212,9 +212,96 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 #### Mensagens
 
 - `POST /instances/:id/send-text` - Enviar mensagem de texto
+- `POST /instances/:id/send-buttons` - Enviar botões de resposta rápida
+- `POST /instances/:id/send-list` - Enviar lista interativa com seções/opções
 - `POST /instances/:id/send-poll` - Enviar enquete para um contato ou grupo
 - `POST /instances/:id/exists` - Verificar se número existe no WhatsApp
 - `GET /instances/:id/status` - Verificar status de mensagem
+
+##### Enviar botões interativos (`POST /instances/:id/send-buttons`)
+
+Envie até **3 botões de resposta rápida** para um contato usando `templateButtons` do Baileys. O corpo deve conter:
+
+```json
+{
+  "to": "5511999999999",
+  "text": "Escolha uma opção:",
+  "options": [
+    { "id": "opt-1", "title": "Primeira opção" },
+    { "id": "opt-2", "title": "Segunda opção" }
+  ],
+  "footer": "Texto opcional",
+  "waitAckMs": 1000
+}
+```
+
+- `to` deve estar no formato E.164 (ex.: `55DDDNUMERO`).
+- `text` é obrigatório e será exibido como corpo da mensagem.
+- `options` é obrigatório, aceita de 1 a 3 itens com campos `id` (único) e `title`.
+- `footer` é opcional e aparece abaixo dos botões.
+- `waitAckMs`, quando informado, aguarda o ACK do WhatsApp pelo tempo indicado (em ms) antes de responder.
+
+Resposta típica:
+
+```json
+{
+  "id": "BAE5...",
+  "messageId": "BAE5...",
+  "status": 1,
+  "ack": 2
+}
+```
+
+O campo `ack` será `null` se `waitAckMs` não for enviado ou se o status não chegar a tempo. O mesmo formato de resposta é adotado pelos endpoints `send-text` e `send-list`.
+
+##### Enviar listas interativas (`POST /instances/:id/send-list`)
+
+Monte menus com seções usando mensagens do tipo `list` do Baileys. Exemplo de requisição:
+
+```json
+{
+  "to": "5511999999999",
+  "text": "Selecione um item do cardápio:",
+  "buttonText": "Ver opções",
+  "title": "Cardápio do dia",
+  "footer": "Valores sujeitos a alteração",
+  "sections": [
+    {
+      "title": "Bebidas quentes",
+      "options": [
+        { "id": "espresso", "title": "Espresso" },
+        { "id": "latte", "title": "Latte", "description": "Com leite vaporizado" }
+      ]
+    },
+    {
+      "title": "Sobremesas",
+      "options": [
+        { "id": "cheesecake", "title": "Cheesecake" }
+      ]
+    }
+  ],
+  "waitAckMs": 1500
+}
+```
+
+- `buttonText` define o rótulo do botão que abre a lista.
+- Cada seção pode ter um `title` opcional e precisa de pelo menos uma opção.
+- Cada opção exige `id` (único dentro da mensagem) e `title`; `description` é opcional e aparece como legenda.
+- `text`, `footer` e `title` são exibidos como corpo, rodapé e cabeçalho da mensagem, respectivamente.
+- `waitAckMs` funciona da mesma forma que em `send-text`/`send-buttons`.
+
+Resposta:
+
+```json
+{
+  "id": "BAE6...",
+  "messageId": "BAE6...",
+  "status": 1,
+  "ack": null
+}
+```
+
+O campo `messageId` é sempre retornado como alias de `id`, facilitando integrações que esperam essa nomenclatura.
 
 #### Grupos
 

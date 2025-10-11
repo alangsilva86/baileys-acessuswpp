@@ -1,4 +1,5 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
+import type { WASocket } from '@whiskeysockets/baileys';
 import crypto from 'node:crypto';
 import { mkdir, rename, rm } from 'fs/promises';
 import QRCode from 'qrcode';
@@ -19,6 +20,8 @@ import {
 } from '../utils.js';
 
 const router = Router();
+
+type SocketMessageContent = Parameters<WASocket['sendMessage']>[1];
 
 type AsyncHandler = (req: Request, res: Response, next: NextFunction) => Promise<void>;
 const asyncHandler = (fn: AsyncHandler) =>
@@ -426,19 +429,314 @@ router.post(
     const sent = (inst.context?.messageService
       ? await inst.context.messageService.sendText(targetJid, content, { timeoutMs })
       : await sendWithTimeout(inst, targetJid, { text: content })) as any;
+    const messageId = sent?.key?.id ?? null;
+
     inst.metrics.sent += 1;
     inst.metrics.sent_by_type.text += 1;
-    inst.metrics.last.sentId = sent.key.id ?? null;
-    if (sent.key.id) {
-      inst.ackSentAt.set(sent.key.id, Date.now());
+    inst.metrics.last.sentId = messageId;
+    if (messageId) {
+      inst.ackSentAt.set(messageId, Date.now());
     }
 
     let ackStatus: number | null = null;
-    if (waitAckMs) {
-      ackStatus = await waitForAck(inst, sent.key.id, waitAckMs);
+    if (waitAckMs && messageId) {
+      ackStatus = await waitForAck(inst, messageId, waitAckMs);
     }
 
-    res.json({ id: sent.key.id, status: sent.status, ack: ackStatus });
+    res.json({ id: messageId, messageId, status: sent.status, ack: ackStatus });
+  }),
+);
+
+router.post(
+  '/:iid/send-buttons',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!inst || !inst.sock) {
+      res.status(503).json({ error: 'socket indisponível' });
+      return;
+    }
+    if (!allowSend(inst)) {
+      res.status(429).json({ error: 'rate limit exceeded' });
+      return;
+    }
+
+    const { to, text, options, footer, waitAckMs } = (req.body || {}) as {
+      to?: string;
+      text?: string;
+      options?: unknown;
+      footer?: string;
+      waitAckMs?: number;
+    };
+
+    if (!to) {
+      res.status(400).json({ error: 'parâmetro to é obrigatório' });
+      return;
+    }
+
+    const normalized = normalizeToE164BR(to);
+    if (!normalized) {
+      res.status(400).json({ error: 'to inválido. Use E.164: 55DDDNUMERO' });
+      return;
+    }
+
+    const messageText = typeof text === 'string' ? text.trim() : '';
+    if (!messageText) {
+      res.status(400).json({ error: 'text inválido' });
+      return;
+    }
+
+    const rawOptions = Array.isArray(options) ? options : [];
+    const sanitizedButtons: { id: string; title: string }[] = [];
+    const seenIds = new Set<string>();
+
+    for (const option of rawOptions) {
+      if (!option || typeof option !== 'object') continue;
+      const idRaw = (option as any).id ?? (option as any).buttonId;
+      const titleRaw =
+        (option as any).title ??
+        (option as any).text ??
+        (option as any).label ??
+        (option as any)?.buttonText?.displayText;
+      const id = typeof idRaw === 'string' ? idRaw.trim() : '';
+      const title = typeof titleRaw === 'string' ? titleRaw.trim() : '';
+      if (!id || !title || seenIds.has(id)) continue;
+      seenIds.add(id);
+      sanitizedButtons.push({ id, title });
+      if (sanitizedButtons.length >= 3) break;
+    }
+
+    if (!sanitizedButtons.length) {
+      res.status(400).json({ error: 'options inválidas (mínimo 1 botão com id e title)' });
+      return;
+    }
+
+    const footerText = typeof footer === 'string' ? footer.trim() : '';
+    const sanitizedFooter = footerText ? footerText : undefined;
+
+    const check = await inst.sock.onWhatsApp(normalized);
+    const entry = Array.isArray(check) ? check[0] : null;
+    if (!entry || !entry.exists) {
+      res.status(404).json({ error: 'whatsapp_not_found' });
+      return;
+    }
+
+    const targetJid = entry?.jid ?? `${normalized}@s.whatsapp.net`;
+    const timeoutMs = getSendTimeoutMs();
+
+    let sent: any;
+    if (inst.context?.messageService) {
+      sent = await inst.context.messageService.sendButtons(
+        targetJid,
+        { text: messageText, footer: sanitizedFooter, buttons: sanitizedButtons },
+        { timeoutMs },
+      );
+    } else {
+      const templateButtons = sanitizedButtons.map((button, index) => ({
+        index: index + 1,
+        quickReplyButton: { id: button.id, displayText: button.title },
+      }));
+      const content = {
+        text: messageText,
+        footer: sanitizedFooter,
+        templateButtons,
+      } as unknown as SocketMessageContent;
+      sent = (await sendWithTimeout(inst, targetJid, content)) as any;
+    }
+
+    const messageId = sent?.key?.id ?? null;
+
+    inst.metrics.sent += 1;
+    inst.metrics.sent_by_type.buttons += 1;
+    inst.metrics.last.sentId = messageId;
+    if (messageId) {
+      inst.ackSentAt.set(messageId, Date.now());
+    }
+
+    let ackStatus: number | null = null;
+    if (waitAckMs && messageId) {
+      ackStatus = await waitForAck(inst, messageId, waitAckMs);
+    }
+
+    res.json({ id: messageId, messageId, status: sent?.status ?? null, ack: ackStatus });
+  }),
+);
+
+router.post(
+  '/:iid/send-list',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!inst || !inst.sock) {
+      res.status(503).json({ error: 'socket indisponível' });
+      return;
+    }
+    if (!allowSend(inst)) {
+      res.status(429).json({ error: 'rate limit exceeded' });
+      return;
+    }
+
+    const { to, text, buttonText, sections, footer, title, waitAckMs } = (req.body || {}) as {
+      to?: string;
+      text?: string;
+      buttonText?: string;
+      sections?: unknown;
+      footer?: string;
+      title?: string;
+      waitAckMs?: number;
+    };
+
+    if (!to) {
+      res.status(400).json({ error: 'parâmetro to é obrigatório' });
+      return;
+    }
+
+    const normalized = normalizeToE164BR(to);
+    if (!normalized) {
+      res.status(400).json({ error: 'to inválido. Use E.164: 55DDDNUMERO' });
+      return;
+    }
+
+    const messageText = typeof text === 'string' ? text.trim() : '';
+    if (!messageText) {
+      res.status(400).json({ error: 'text inválido' });
+      return;
+    }
+
+    const buttonLabel = typeof buttonText === 'string' ? buttonText.trim() : '';
+    if (!buttonLabel) {
+      res.status(400).json({ error: 'buttonText inválido' });
+      return;
+    }
+
+    const rawSections = Array.isArray(sections) ? sections : [];
+    const sanitizedSections: { title?: string; options: { id: string; title: string; description?: string }[] }[] = [];
+    const seenIds = new Set<string>();
+
+    for (const section of rawSections) {
+      if (!section || typeof section !== 'object') continue;
+
+      const sectionTitleRaw =
+        (section as any).title ??
+        (section as any).header ??
+        (section as any)?.titleText ??
+        (section as any)?.sectionTitle;
+      const sectionTitle = typeof sectionTitleRaw === 'string' ? sectionTitleRaw.trim() : '';
+
+      const rowsRaw = Array.isArray((section as any).options)
+        ? (section as any).options
+        : Array.isArray((section as any).rows)
+        ? (section as any).rows
+        : [];
+
+      const sectionOptions: { id: string; title: string; description?: string }[] = [];
+
+      for (const row of rowsRaw) {
+        if (!row || typeof row !== 'object') continue;
+
+        const idRaw = (row as any).id ?? (row as any).rowId;
+        const titleRaw =
+          (row as any).title ?? (row as any).text ?? (row as any).name ?? (row as any)?.displayText;
+        const descriptionRaw =
+          (row as any).description ?? (row as any).subtitle ?? (row as any)?.body ?? '';
+
+        const id = typeof idRaw === 'string' ? idRaw.trim() : '';
+        const titleValue = typeof titleRaw === 'string' ? titleRaw.trim() : '';
+        const description = typeof descriptionRaw === 'string' ? descriptionRaw.trim() : '';
+
+        if (!id || !titleValue || seenIds.has(id)) continue;
+        seenIds.add(id);
+
+        const option: { id: string; title: string; description?: string } = { id, title: titleValue };
+        if (description) {
+          option.description = description;
+        }
+
+        sectionOptions.push(option);
+      }
+
+      if (sectionOptions.length) {
+        const normalizedSection: { title?: string; options: { id: string; title: string; description?: string }[] } = {
+          options: sectionOptions,
+        };
+        if (sectionTitle) {
+          normalizedSection.title = sectionTitle;
+        }
+        sanitizedSections.push(normalizedSection);
+      }
+    }
+
+    if (!sanitizedSections.length) {
+      res.status(400).json({ error: 'sections inválidas (mínimo 1 opção com id e title)' });
+      return;
+    }
+
+    const footerText = typeof footer === 'string' ? footer.trim() : '';
+    const sanitizedFooter = footerText ? footerText : undefined;
+    const titleText = typeof title === 'string' ? title.trim() : '';
+    const sanitizedTitle = titleText ? titleText : undefined;
+
+    const check = await inst.sock.onWhatsApp(normalized);
+    const entry = Array.isArray(check) ? check[0] : null;
+    if (!entry || !entry.exists) {
+      res.status(404).json({ error: 'whatsapp_not_found' });
+      return;
+    }
+
+    const targetJid = entry?.jid ?? `${normalized}@s.whatsapp.net`;
+    const timeoutMs = getSendTimeoutMs();
+
+    let sent: any;
+    if (inst.context?.messageService) {
+      sent = await inst.context.messageService.sendList(
+        targetJid,
+        {
+          text: messageText,
+          buttonText: buttonLabel,
+          title: sanitizedTitle,
+          footer: sanitizedFooter,
+          sections: sanitizedSections,
+        },
+        { timeoutMs },
+      );
+    } else {
+      const sectionsPayload = sanitizedSections.map((section) => ({
+        title: section.title,
+        rows: section.options.map((option) => ({
+          rowId: option.id,
+          title: option.title,
+          description: option.description,
+        })),
+      }));
+
+      const content = {
+        text: messageText,
+        footer: sanitizedFooter,
+        list: {
+          title: sanitizedTitle,
+          buttonText: buttonLabel,
+          description: messageText,
+          footer: sanitizedFooter,
+          sections: sectionsPayload,
+        },
+      } as unknown as SocketMessageContent;
+
+      sent = (await sendWithTimeout(inst, targetJid, content)) as any;
+    }
+
+    const messageId = sent?.key?.id ?? null;
+
+    inst.metrics.sent += 1;
+    inst.metrics.sent_by_type.lists += 1;
+    inst.metrics.last.sentId = messageId;
+    if (messageId) {
+      inst.ackSentAt.set(messageId, Date.now());
+    }
+
+    let ackStatus: number | null = null;
+    if (waitAckMs && messageId) {
+      ackStatus = await waitForAck(inst, messageId, waitAckMs);
+    }
+
+    res.json({ id: messageId, messageId, status: sent?.status ?? null, ack: ackStatus });
   }),
 );
 

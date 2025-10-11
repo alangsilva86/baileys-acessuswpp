@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { AnyMessageContent } from '@whiskeysockets/baileys';
+import type { WASocket } from '@whiskeysockets/baileys';
 import type { Instance } from './instanceManager.js';
 
 const RATE_MAX_SENDS = Number(process.env.RATE_MAX_SENDS || 20);
@@ -40,10 +40,12 @@ export function getSendTimeoutMs(): number {
   return DEFAULT_SEND_TIMEOUT_MS;
 }
 
+type MessageContent = Parameters<WASocket['sendMessage']>[1];
+
 export async function sendWithTimeout(
   inst: Instance,
   jid: string,
-  content: AnyMessageContent,
+  content: MessageContent,
 ): Promise<unknown> {
   if (!inst.sock) {
     throw new Error('socket unavailable');
