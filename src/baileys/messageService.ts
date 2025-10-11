@@ -7,9 +7,10 @@ import type {
 import type Long from 'long';
 import pino from 'pino';
 import { mapLeadFromMessage } from '../services/leadMapper.js';
+import type { LeadInfo } from '../services/leadMapper.js';
 import { WebhookClient } from '../services/webhook.js';
 import { getSendTimeoutMs } from '../utils.js';
-import type { BrokerEventStore } from '../broker/eventStore.js';
+import type { BrokerEventDirection, BrokerEventStore } from '../broker/eventStore.js';
 
 export interface SendTextOptions {
   timeoutMs?: number;
@@ -73,6 +74,38 @@ export interface BuiltMediaContent {
   fileName: string | null;
   size: number | null;
   source: 'base64' | 'url';
+}
+
+interface ContactPayload {
+  owner: LeadInfo['owner'];
+  remoteJid: string | null;
+  participant: string | null;
+  phone: string | null;
+  displayName: string | null;
+  isGroup: boolean;
+}
+
+type StructuredMessagePayload = {
+  id: string | null;
+  messageId: string | null;
+  chatId: string | null;
+  type: string | null;
+  conversation: string | null;
+} & Record<string, unknown>;
+
+type EventMetadata = {
+  timestamp: string;
+  broker: {
+    direction: BrokerEventDirection;
+    type: string;
+  };
+} & Record<string, unknown>;
+
+interface StructuredMessageEventPayload {
+  instanceId: string;
+  contact: ContactPayload;
+  message: StructuredMessagePayload;
+  metadata: EventMetadata;
 }
 
 const DEFAULT_DOCUMENT_MIMETYPE = 'application/octet-stream';
@@ -242,6 +275,17 @@ function toIsoDate(timestamp?: number | Long | bigint | null): string {
   return new Date(millis).toISOString();
 }
 
+function buildContactPayload(lead: LeadInfo): ContactPayload {
+  return {
+    owner: lead.owner,
+    remoteJid: lead.remoteJid,
+    participant: lead.participant ?? null,
+    phone: lead.phone ?? null,
+    displayName: lead.displayName ?? null,
+    isGroup: lead.isGroup,
+  };
+}
+
 export interface MessageServiceOptions {
   eventStore?: BrokerEventStore;
   instanceId: string;
@@ -375,29 +419,31 @@ export class MessageService {
 
     if (timeoutHandle) clearTimeout(timeoutHandle);
 
-    const lead = mapLeadFromMessage(message);
     const caption = sanitizeString(options.caption);
 
-    const eventPayload = {
-      messageId: message.key?.id,
-      chatId: message.key?.remoteJid,
-      type: extractMessageType(message),
-      mediaType: type,
-      caption: caption || null,
-      mimetype: built.mimetype,
-      fileName: built.fileName,
-      source: built.source,
-      size: built.size,
-      lead,
-      timestamp: toIsoDate(message.messageTimestamp),
-    } as const;
+    const eventPayload = this.createStructuredPayload(
+      message,
+      'outbound',
+      'MESSAGE_OUTBOUND',
+      {
+        conversation: caption || null,
+        media: {
+          type,
+          caption: caption || null,
+          mimetype: built.mimetype,
+          fileName: built.fileName,
+          source: built.source,
+          size: built.size,
+        },
+      },
+    );
 
     if (this.eventStore) {
       this.eventStore.enqueue({
         instanceId: this.instanceId,
         direction: 'outbound',
         type: 'MESSAGE_OUTBOUND',
-        payload: { ...eventPayload },
+        payload: eventPayload,
       });
     }
 
@@ -418,22 +464,18 @@ export class MessageService {
   async onInbound(messages: WAMessage[]): Promise<void> {
     for (const message of messages) {
       try {
-        const lead = mapLeadFromMessage(message);
-        const eventPayload = {
-          messageId: message.key?.id,
-          chatId: message.key?.remoteJid,
-          text: extractMessageText(message),
-          type: extractMessageType(message),
-          lead,
-          timestamp: toIsoDate(message.messageTimestamp),
-        } as const;
+        const eventPayload = this.createStructuredPayload(
+          message,
+          'inbound',
+          'MESSAGE_INBOUND',
+        );
 
         if (this.eventStore) {
           this.eventStore.enqueue({
             instanceId: this.instanceId,
             direction: 'inbound',
             type: 'MESSAGE_INBOUND',
-            payload: { ...eventPayload },
+            payload: eventPayload,
           });
         }
 
@@ -471,32 +513,77 @@ export class MessageService {
     message: WAMessage,
     extras: Record<string, unknown> = {},
   ): Promise<void> {
-    const lead = mapLeadFromMessage(message);
-    const eventPayload: Record<string, unknown> = {
-      messageId: message.key?.id,
-      chatId: message.key?.remoteJid,
-      type: extractMessageType(message),
-      timestamp: toIsoDate(message.messageTimestamp),
-      lead,
-      ...extras,
-    };
+    const overrides: Record<string, unknown> = {};
 
-    if (!('text' in eventPayload)) {
-      const extracted = extractMessageText(message);
-      if (extracted) {
-        eventPayload.text = extracted;
-      }
+    if ('text' in extras) {
+      overrides.conversation = typeof extras.text === 'string' ? extras.text : null;
     }
+
+    if ('interactive' in extras) {
+      overrides.interactive = extras.interactive;
+    }
+
+    const eventPayload = this.createStructuredPayload(
+      message,
+      'outbound',
+      'MESSAGE_OUTBOUND',
+      overrides,
+    );
 
     if (this.eventStore) {
       this.eventStore.enqueue({
         instanceId: this.instanceId,
         direction: 'outbound',
         type: 'MESSAGE_OUTBOUND',
-        payload: { ...eventPayload },
+        payload: eventPayload,
       });
     }
 
     await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload);
+  }
+
+  private createStructuredPayload(
+    message: WAMessage,
+    direction: BrokerEventDirection,
+    eventType: string,
+    messageOverrides: Record<string, unknown> = {},
+  ): StructuredMessageEventPayload {
+    const lead = mapLeadFromMessage(message);
+    const contact = buildContactPayload(lead);
+    const messageId = message.key?.id ?? null;
+    const chatId = message.key?.remoteJid ?? null;
+    const conversationFromMessage = extractMessageText(message);
+
+    const baseMessage: StructuredMessagePayload = {
+      id: messageId,
+      messageId,
+      chatId,
+      type: extractMessageType(message),
+      conversation: conversationFromMessage,
+    };
+
+    const structuredMessage = {
+      ...baseMessage,
+      ...messageOverrides,
+    } as StructuredMessagePayload;
+
+    if (structuredMessage.conversation == null) {
+      structuredMessage.conversation = conversationFromMessage;
+    }
+
+    const metadata: EventMetadata = {
+      timestamp: toIsoDate(message.messageTimestamp),
+      broker: {
+        direction,
+        type: eventType,
+      },
+    };
+
+    return {
+      instanceId: this.instanceId,
+      contact,
+      message: structuredMessage,
+      metadata,
+    };
   }
 }

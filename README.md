@@ -204,6 +204,40 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 - `GET /instances/:id/events` - Listar eventos pendentes da instância (`limit`, `after`, `direction`, `type`)
 - `POST /instances/:id/events/ack` - Confirmar consumo de eventos informando os IDs recebidos
 
+#### Estrutura dos eventos `MESSAGE_INBOUND` e `MESSAGE_OUTBOUND`
+
+Os eventos disparados pelo webhook e disponíveis no `eventStore` compartilham a mesma estrutura. O payload contém informações da instância, contato e mensagem, além de metadados de rastreabilidade:
+
+```json
+{
+  "instanceId": "acme-support",
+  "contact": {
+    "owner": "customer",
+    "remoteJid": "5511987654321@s.whatsapp.net",
+    "participant": null,
+    "phone": "5511987654321",
+    "displayName": "Maria da Silva",
+    "isGroup": false
+  },
+  "message": {
+    "id": "ABC123",
+    "messageId": "ABC123",
+    "chatId": "5511987654321@s.whatsapp.net",
+    "type": "conversation",
+    "conversation": "Olá! Tudo bem?"
+  },
+  "metadata": {
+    "timestamp": "2023-11-14T22:13:20.000Z",
+    "broker": {
+      "direction": "inbound",
+      "type": "MESSAGE_INBOUND"
+    }
+  }
+}
+```
+
+Para mensagens com mídia, o bloco `message` inclui o objeto `media` com detalhes como `type`, `caption`, `mimetype`, `fileName`, `source` e `size`. O campo `message.messageId` permanece como alias de `message.id` para compatibilidade.
+
 #### Autenticação
 
 - `GET /instances/:id/qr.png` - Obter QR code como imagem
