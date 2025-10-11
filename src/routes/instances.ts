@@ -1,4 +1,5 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
+import type { WAMessage } from '@whiskeysockets/baileys';
 import crypto from 'node:crypto';
 import { mkdir, rename, rm } from 'fs/promises';
 import QRCode from 'qrcode';
@@ -18,6 +19,13 @@ import {
   normalizeToE164BR,
   getSendTimeoutMs,
 } from '../utils.js';
+import {
+  buildMediaMessageContent,
+  type BuiltMediaContent,
+  type MediaMessageType,
+  type MediaPayload,
+  MAX_MEDIA_BYTES,
+} from '../baileys/messageService.js';
 
 const router = Router();
 
@@ -483,6 +491,136 @@ router.post(
     }
 
     res.json({ id: sent.key.id, status: sent.status, ack: ackStatus });
+  }),
+);
+
+const MEDIA_TYPE_COUNTER: Record<MediaMessageType, keyof Instance['metrics']['sent_by_type']> = {
+  image: 'image',
+  video: 'video',
+  audio: 'audio',
+  document: 'document',
+};
+
+router.post(
+  '/:iid/send-media',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!inst || !inst.sock) {
+      res.status(503).json({ error: 'socket indisponível' });
+      return;
+    }
+    if (!allowSend(inst)) {
+      res.status(429).json({ error: 'rate limit exceeded' });
+      return;
+    }
+
+    const body = (req.body || {}) as {
+      type?: string;
+      to?: string;
+      media?: Record<string, unknown>;
+      caption?: string;
+      waitAckMs?: number;
+    };
+
+    const typeRaw = typeof body.type === 'string' ? body.type.trim().toLowerCase() : '';
+    const allowedTypes: MediaMessageType[] = ['image', 'video', 'audio', 'document'];
+    if (!allowedTypes.includes(typeRaw as MediaMessageType)) {
+      res.status(400).json({ error: 'type_invalid', allowed: allowedTypes });
+      return;
+    }
+
+    if (!body.media || typeof body.media !== 'object') {
+      res.status(400).json({ error: 'media_invalid' });
+      return;
+    }
+
+    const toRaw = typeof body.to === 'string' ? body.to : '';
+    if (!toRaw.trim()) {
+      res.status(400).json({ error: 'to_required' });
+      return;
+    }
+
+    const normalized = normalizeToE164BR(toRaw);
+    if (!normalized) {
+      res.status(400).json({ error: 'to inválido. Use E.164: 55DDDNUMERO' });
+      return;
+    }
+
+    const mediaBody = body.media as Record<string, unknown>;
+    const mediaPayload: MediaPayload = {
+      url: typeof mediaBody.url === 'string' ? mediaBody.url : undefined,
+      base64: typeof mediaBody.base64 === 'string' ? mediaBody.base64 : undefined,
+      mimetype: typeof mediaBody.mimetype === 'string' ? mediaBody.mimetype : undefined,
+      fileName: typeof mediaBody.fileName === 'string' ? mediaBody.fileName : undefined,
+      ptt: typeof mediaBody.ptt === 'boolean' ? mediaBody.ptt : undefined,
+      gifPlayback: typeof mediaBody.gifPlayback === 'boolean' ? mediaBody.gifPlayback : undefined,
+    };
+
+    let built: BuiltMediaContent;
+    try {
+      built = buildMediaMessageContent(typeRaw as MediaMessageType, mediaPayload, {
+        caption: typeof body.caption === 'string' ? body.caption : undefined,
+      });
+    } catch (err) {
+      const code = (err as Error & { code?: string }).code ?? 'media_invalid';
+      const detail = (err as Error).message;
+      const response: Record<string, unknown> = { error: code, detail };
+      if (code === 'media_too_large') {
+        response.maxBytes = MAX_MEDIA_BYTES;
+      }
+      res.status(400).json(response);
+      return;
+    }
+
+    const check = await inst.sock.onWhatsApp(normalized);
+    const entry = Array.isArray(check) ? check[0] : null;
+    if (!entry || !entry.exists) {
+      res.status(404).json({ error: 'whatsapp_not_found' });
+      return;
+    }
+
+    const caption = typeof body.caption === 'string' ? body.caption : undefined;
+    const timeoutMs = getSendTimeoutMs();
+    const targetJid = entry?.jid ?? `${normalized}@s.whatsapp.net`;
+    const mediaType = typeRaw as MediaMessageType;
+
+    let sent: WAMessage;
+    try {
+      sent = inst.context?.messageService
+        ? await inst.context.messageService.sendMedia(targetJid, mediaType, mediaPayload, {
+            caption,
+            timeoutMs,
+          })
+        : ((await sendWithTimeout(inst, targetJid, built.content)) as WAMessage);
+    } catch (err) {
+      res.status(500).json({ error: 'send_failed', detail: (err as Error).message });
+      return;
+    }
+
+    inst.metrics.sent += 1;
+    const counterKey = MEDIA_TYPE_COUNTER[mediaType];
+    inst.metrics.sent_by_type[counterKey] += 1;
+    inst.metrics.last.sentId = sent.key?.id ?? null;
+    if (sent.key?.id) {
+      inst.ackSentAt.set(sent.key.id, Date.now());
+    }
+
+    let ackStatus: number | null = null;
+    const waitAckMs = Number(body.waitAckMs);
+    if (Number.isFinite(waitAckMs) && waitAckMs > 0 && sent.key?.id) {
+      ackStatus = await waitForAck(inst, sent.key.id, waitAckMs);
+    }
+
+    res.status(201).json({
+      id: sent.key?.id ?? null,
+      status: sent.status ?? null,
+      ack: ackStatus,
+      type: mediaType,
+      mimetype: built.mimetype,
+      fileName: built.fileName,
+      source: built.source,
+      size: built.size,
+    });
   }),
 );
 

@@ -42,6 +42,9 @@ export interface InstanceMetrics {
   sent_by_type: {
     text: number;
     image: number;
+    video: number;
+    audio: number;
+    document: number;
     group: number;
     buttons: number;
     lists: number;
@@ -87,7 +90,7 @@ function createEmptyMetrics(): InstanceMetrics {
   return {
     startedAt: Date.now(),
     sent: 0,
-    sent_by_type: { text: 0, image: 0, group: 0, buttons: 0, lists: 0 },
+    sent_by_type: { text: 0, image: 0, video: 0, audio: 0, document: 0, group: 0, buttons: 0, lists: 0 },
     status_counts: { '1': 0, '2': 0, '3': 0, '4': 0, '5': 0 },
     last: { sentId: null, lastStatusId: null, lastStatusCode: null },
     ack: { totalMs: 0, count: 0, avgMs: 0, lastMs: null },
