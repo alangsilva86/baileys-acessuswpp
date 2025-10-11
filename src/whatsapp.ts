@@ -171,15 +171,18 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       for (const message of filteredMessages) {
         const from = message.key?.remoteJid;
 
-        const button =
-          message.message?.templateButtonReplyMessage || message.message?.buttonsResponseMessage;
-        if (button) {
+        const templateReply = message.message?.templateButtonReplyMessage;
+        const buttonsReply = message.message?.buttonsResponseMessage;
+        if (templateReply || buttonsReply) {
+          const selectedId = templateReply?.selectedId ?? buttonsReply?.selectedButtonId ?? null;
+          const selectedText =
+            templateReply?.selectedDisplayText ?? buttonsReply?.selectedDisplayText ?? null;
           logger.info(
             {
               iid,
               from,
-              selectedId: button?.selectedId || button?.selectedButtonId,
-              selectedText: button?.selectedDisplayText,
+              selectedId,
+              selectedText,
             },
             'button.reply',
           );

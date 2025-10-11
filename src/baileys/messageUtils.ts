@@ -104,7 +104,10 @@ function extractTextFromContent(content: MessageContent): string | null {
 }
 
 function hasUsefulContent(content: MessageContent): boolean {
-  if (content.protocolMessage || content.historySyncNotification) return false;
+  if (content.protocolMessage) return false;
+
+  const historySync = (content as { historySyncNotification?: unknown }).historySyncNotification;
+  if (historySync) return false;
   if (extractTextFromContent(content)) return true;
   if (hasMediaContent(content)) return true;
   if (hasInteractiveContent(content)) return true;
@@ -121,7 +124,7 @@ export function extractMessageType(message: WAMessage): string | null {
 
   const ignoredKeys = new Set(['messageContextInfo']);
 
-  for (const [key, value] of Object.entries(content)) {
+  for (const [key, value] of Object.entries(content as Record<string, unknown>)) {
     if (ignoredKeys.has(key)) continue;
     if (value == null) continue;
     if (typeof value === 'object' && Object.keys(value as Record<string, unknown>).length === 0) {
@@ -142,7 +145,7 @@ export function extractMessageText(message: WAMessage): string | null {
 export function hasClientMessageContent(message: WAMessage): boolean {
   if (!message || message.key?.fromMe) return false;
 
-  const stubType = (message as Record<string, unknown>).messageStubType;
+  const stubType = (message as unknown as Record<string, unknown>).messageStubType;
   if (stubType !== undefined && stubType !== null) return false;
 
   const content = getNormalizedMessageContent(message);
