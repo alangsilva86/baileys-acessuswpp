@@ -44,6 +44,8 @@ export interface SendListPayload {
   title?: string;
   footer?: string;
   sections: ListSectionPayload[];
+}
+
 export const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
 
 export type MediaMessageType = 'image' | 'video' | 'audio' | 'document';
