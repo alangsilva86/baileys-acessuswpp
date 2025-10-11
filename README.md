@@ -202,6 +202,8 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 - `GET /instances/:id` - Obter detalhes de uma instância
 - `PATCH /instances/:id` - Atualizar instância
 - `DELETE /instances/:id` - Deletar instância
+- `GET /instances/:id/events` - Listar eventos pendentes da instância (`limit`, `after`, `direction`, `type`)
+- `POST /instances/:id/events/ack` - Confirmar consumo de eventos informando os IDs recebidos
 
 #### Autenticação
 
@@ -212,6 +214,7 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 #### Mensagens
 
 - `POST /instances/:id/send-text` - Enviar mensagem de texto
+- `POST /instances/:id/send-media` - Enviar mídia (imagem, vídeo, áudio ou documento)
 - `POST /instances/:id/send-poll` - Enviar enquete para um contato ou grupo
 - `POST /instances/:id/exists` - Verificar se número existe no WhatsApp
 - `GET /instances/:id/status` - Verificar status de mensagem
@@ -348,6 +351,51 @@ Se algum participante não puder ser removido, o endpoint retorna `status: "part
 #### Métricas
 
 - `GET /instances/:id/metrics` - Obter métricas detalhadas
+
+#### Consumo de eventos sem broker
+
+Mesmo fora do modo broker é possível consumir os eventos estruturados gerados pela instância atual. Use `GET /instances/:id/events`
+para ler a fila HTTP compartilhada, filtrando por `direction` (`inbound`, `outbound` ou `system`) e/ou `type` conforme necessário.
+O endpoint retorna também o `nextCursor` (ID do último evento listado) para paginação incremental.
+
+Os eventos permanecem na fila até serem confirmados. Após processá-los, envie `POST /instances/:id/events/ack` com o array `ids`
+retornado na listagem. Eventos reconhecidos deixam de ser entregues em chamadas futuras; IDs desconhecidos são retornados em
+`missing`, como no fluxo do modo broker. Enquanto o ACK não for enviado, os eventos continuam disponíveis e podem ser reenviados
+em caso de falhas.
+##### `POST /instances/:id/send-media`
+
+Envia arquivos de mídia para um contato ou grupo. Os parâmetros aceitos são:
+
+- `type` (string, obrigatório): define o tipo da mídia. Valores aceitos: `image`, `video`, `audio`, `document`.
+- `to` (string, obrigatório): número de destino no formato E.164 brasileiro (`55DDDNUMERO`).
+- `media` (objeto, obrigatório): descreve o arquivo a ser enviado.
+  - `base64`: conteúdo em base64. Aceita tanto a string crua quanto em formato Data URI (`data:image/jpeg;base64,...`).
+  - `url`: alternativa para fazer o download do arquivo via HTTP/HTTPS.
+  - `mimetype`: MIME type do arquivo (ex.: `image/jpeg`, `video/mp4`, `audio/mpeg`, `application/pdf`).
+  - `fileName`: nome do arquivo (obrigatório para documentos; opcional nos demais tipos).
+- `caption` (string, opcional): legenda a ser anexada à mídia.
+- `waitAckMs` (number, opcional): tempo em milissegundos para aguardar o ACK da mensagem.
+
+> **Limites:** uploads em base64 são limitados a 16 MB por mensagem. Para URLs, apenas protocolos `http` ou `https` são aceitos. Recomenda-se utilizar os MIME types suportados oficialmente pelo WhatsApp (`image/jpeg`, `image/png`, `video/mp4`, `audio/mpeg`, `application/pdf`, entre outros).
+
+Exemplo de requisição:
+
+```json
+POST /instances/meu-bot/send-media
+{
+  "type": "image",
+  "to": "5511999999999",
+  "caption": "Confira o novo catálogo",
+  "media": {
+    "base64": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...",
+    "fileName": "catalogo.jpg",
+    "mimetype": "image/jpeg"
+  },
+  "waitAckMs": 5000
+}
+```
+
+O endpoint retorna o `id` da mensagem enviada, o status informado pelo WhatsApp, além de metadados da mídia (`type`, `mimetype`, `fileName`, `size` e `source`).
 
 ### Modo Broker Minimalista
 

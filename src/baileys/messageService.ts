@@ -1,4 +1,9 @@
-import type { BaileysEventMap, WAMessage, WASocket } from '@whiskeysockets/baileys';
+import type {
+  AnyMessageContent,
+  BaileysEventMap,
+  WAMessage,
+  WASocket,
+} from '@whiskeysockets/baileys';
 import type Long from 'long';
 import pino from 'pino';
 import { mapLeadFromMessage } from '../services/leadMapper.js';
@@ -9,6 +14,158 @@ import type { BrokerEventStore } from '../broker/eventStore.js';
 export interface SendTextOptions {
   timeoutMs?: number;
   messageOptions?: Parameters<WASocket['sendMessage']>[2];
+}
+
+export const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
+
+export type MediaMessageType = 'image' | 'video' | 'audio' | 'document';
+
+export interface MediaPayload {
+  url?: string | null;
+  base64?: string | null;
+  mimetype?: string | null;
+  fileName?: string | null;
+  ptt?: boolean | null;
+  gifPlayback?: boolean | null;
+}
+
+export interface SendMediaOptions extends SendTextOptions {
+  caption?: string | null;
+  mimetype?: string | null;
+  fileName?: string | null;
+  ptt?: boolean | null;
+  gifPlayback?: boolean | null;
+}
+
+export interface BuiltMediaContent {
+  content: AnyMessageContent;
+  mimetype: string | null;
+  fileName: string | null;
+  size: number | null;
+  source: 'base64' | 'url';
+}
+
+const DEFAULT_DOCUMENT_MIMETYPE = 'application/octet-stream';
+
+function createError(code: string, message?: string): Error {
+  const err = new Error(message ?? code);
+  (err as Error & { code?: string }).code = code;
+  return err;
+}
+
+function sanitizeString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function extractBase64(value: string): { buffer: Buffer; mimetype: string | null } {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^data:(?<mime>[^;]+);base64,(?<data>.+)$/);
+  const base64Data = match?.groups?.data ?? trimmed;
+  const mime = match?.groups?.mime ?? null;
+
+  try {
+    const buffer = Buffer.from(base64Data, 'base64');
+    if (!buffer.length) {
+      throw createError('media_base64_invalid', 'base64 payload is empty');
+    }
+    return { buffer, mimetype: mime };
+  } catch (err) {
+    throw createError('media_base64_invalid', (err as Error).message);
+  }
+}
+
+export function buildMediaMessageContent(
+  type: MediaMessageType,
+  media: MediaPayload,
+  options: SendMediaOptions = {},
+): BuiltMediaContent {
+  const url = sanitizeString(media.url);
+  const base64 = sanitizeString(media.base64);
+
+  if (!url && !base64) {
+    throw createError('media_source_missing', 'media.url ou media.base64 são obrigatórios');
+  }
+
+  let source: Buffer | { url: string };
+  let size: number | null = null;
+  let detectedMime: string | null = null;
+
+  if (base64) {
+    const { buffer, mimetype } = extractBase64(base64);
+    if (buffer.length > MAX_MEDIA_BYTES) {
+      throw createError('media_too_large', 'arquivo excede o tamanho máximo permitido');
+    }
+    source = buffer;
+    size = buffer.length;
+    detectedMime = mimetype;
+  } else {
+    try {
+      const parsed = new URL(url);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        throw createError('media_url_invalid', 'apenas URLs http(s) são aceitas');
+      }
+    } catch (err) {
+      if ((err as Error & { code?: string }).code === 'media_url_invalid') {
+        throw err;
+      }
+      throw createError('media_url_invalid', (err as Error).message);
+    }
+    source = { url };
+  }
+
+  const rawMime =
+    sanitizeString(options.mimetype) || sanitizeString(media.mimetype) || (detectedMime ?? '');
+  let finalMime: string | null = rawMime || null;
+  const fileName = sanitizeString(options.fileName) || sanitizeString(media.fileName) || null;
+  const caption = sanitizeString(options.caption);
+  const ptt = Boolean(options.ptt ?? media.ptt ?? false);
+  const gifPlayback = Boolean(options.gifPlayback ?? media.gifPlayback ?? false);
+
+  let content: AnyMessageContent;
+
+  switch (type) {
+    case 'image': {
+      const image: AnyMessageContent = { image: source };
+      if (caption) (image as any).caption = caption;
+      if (finalMime) (image as any).mimetype = finalMime;
+      content = image;
+      break;
+    }
+    case 'video': {
+      const video: AnyMessageContent = { video: source };
+      if (caption) (video as any).caption = caption;
+      if (finalMime) (video as any).mimetype = finalMime;
+      if (gifPlayback) (video as any).gifPlayback = true;
+      content = video;
+      break;
+    }
+    case 'audio': {
+      const audio: AnyMessageContent = { audio: source };
+      if (finalMime) (audio as any).mimetype = finalMime;
+      if (ptt) (audio as any).ptt = true;
+      content = audio;
+      break;
+    }
+    case 'document': {
+      const documentMime = finalMime || DEFAULT_DOCUMENT_MIMETYPE;
+      const document: AnyMessageContent = { document: source, mimetype: documentMime } as AnyMessageContent;
+      if (caption) (document as any).caption = caption;
+      if (fileName) (document as any).fileName = fileName;
+      content = document;
+      finalMime = documentMime;
+      break;
+    }
+    default:
+      throw createError('media_type_unsupported', `tipo de mídia não suportado: ${type}`);
+  }
+
+  return {
+    content,
+    mimetype: finalMime,
+    fileName,
+    size,
+    source: base64 ? 'base64' : 'url',
+  };
 }
 
 function extractMessageType(message: WAMessage): string | null {
@@ -99,6 +256,60 @@ export class MessageService {
       chatId: message.key?.remoteJid,
       text,
       type: extractMessageType(message),
+      lead,
+      timestamp: toIsoDate(message.messageTimestamp),
+    } as const;
+
+    if (this.eventStore) {
+      this.eventStore.enqueue({
+        instanceId: this.instanceId,
+        direction: 'outbound',
+        type: 'MESSAGE_OUTBOUND',
+        payload: { ...eventPayload },
+      });
+    }
+
+    await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload);
+
+    return message;
+  }
+
+  async sendMedia(
+    jid: string,
+    type: MediaMessageType,
+    media: MediaPayload,
+    options: SendMediaOptions = {},
+  ): Promise<WAMessage> {
+    const timeoutMs = options.timeoutMs ?? getSendTimeoutMs();
+    const built = buildMediaMessageContent(type, media, options);
+
+    const sendPromise = this.sock.sendMessage(jid, built.content, options.messageOptions);
+
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const message = await (timeoutMs
+      ? (Promise.race([
+          sendPromise,
+          new Promise<WAMessage>((_, reject) => {
+            timeoutHandle = setTimeout(() => reject(new Error('send timeout')), timeoutMs);
+          }),
+        ]) as Promise<WAMessage>)
+      : sendPromise);
+
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+
+    const lead = mapLeadFromMessage(message);
+    const caption = sanitizeString(options.caption);
+
+    const eventPayload = {
+      messageId: message.key?.id,
+      chatId: message.key?.remoteJid,
+      type: extractMessageType(message),
+      mediaType: type,
+      caption: caption || null,
+      mimetype: built.mimetype,
+      fileName: built.fileName,
+      source: built.source,
+      size: built.size,
       lead,
       timestamp: toIsoDate(message.messageTimestamp),
     } as const;
