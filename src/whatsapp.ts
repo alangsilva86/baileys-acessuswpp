@@ -216,13 +216,13 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     }
 
     void webhook
-      .emit('WHATSAPP_MESSAGES_UPSERT', { iid, ...normalizedEvent })
+      .emit('WHATSAPP_MESSAGES_UPSERT', { iid, raw: normalizedEvent })
       .catch((err: any) => logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.upsert.failed'));
   });
 
   sock.ev.on('messages.update', (updates: any[]) => {
     const iid = inst.id;
-    void webhook.emit('WHATSAPP_MESSAGES_UPDATE', { iid, updates }).catch((err: any) =>
+    void webhook.emit('WHATSAPP_MESSAGES_UPDATE', { iid, raw: { updates } }).catch((err: any) =>
       logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.update.failed'),
     );
     pollService
