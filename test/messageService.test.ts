@@ -169,3 +169,101 @@ test('MessageService emits structured inbound payload', async () => {
   assert.equal(event?.direction, 'inbound');
   assert.deepStrictEqual(event?.payload, payload);
 });
+
+test('MessageService maps participant phone for group messages when valid', async () => {
+  const eventStore = new BrokerEventStore();
+  const webhookEvents: Array<{ event: string; payload: any }> = [];
+
+  const webhook = {
+    async emit(event: string, payload: unknown) {
+      webhookEvents.push({ event, payload });
+    },
+  } as unknown as WebhookClient;
+
+  const service = new MessageService(
+    {} as unknown as WASocket,
+    webhook,
+    { warn: () => {} } as unknown as pino.Logger,
+    { eventStore, instanceId: 'test-instance' },
+  );
+
+  const groupMessage = {
+    key: {
+      id: 'GROUP-1',
+      remoteJid: '5511987654321-123456@g.us',
+      participant: '5511987654321@s.whatsapp.net',
+      fromMe: false,
+    },
+    messageTimestamp: 1700000000,
+    pushName: 'Maria da Silva',
+    message: {
+      conversation: 'Mensagem em grupo',
+    },
+  } as unknown as WAMessage;
+
+  await service.onInbound([groupMessage]);
+
+  assert.equal(webhookEvents.length, 1);
+  const payload = webhookEvents[0].payload;
+  assert.equal(payload.contact.isGroup, true);
+  assert.equal(payload.contact.phone, '+5511987654321');
+  assert.equal(payload.contact.participant, '5511987654321@s.whatsapp.net');
+});
+
+test('MessageService omits phone for group and broadcast messages without E.164 sender', async () => {
+  const eventStore = new BrokerEventStore();
+  const webhookEvents: Array<{ event: string; payload: any }> = [];
+
+  const webhook = {
+    async emit(event: string, payload: unknown) {
+      webhookEvents.push({ event, payload });
+    },
+  } as unknown as WebhookClient;
+
+  const service = new MessageService(
+    {} as unknown as WASocket,
+    webhook,
+    { warn: () => {} } as unknown as pino.Logger,
+    { eventStore, instanceId: 'test-instance' },
+  );
+
+  const groupWithoutPhone = {
+    key: {
+      id: 'GROUP-2',
+      remoteJid: '5511987654321-123456@g.us',
+      participant: 'status@broadcast',
+      fromMe: false,
+    },
+    messageTimestamp: 1700000000,
+    pushName: 'Customer',
+    message: {
+      conversation: 'Mensagem sem telefone',
+    },
+  } as unknown as WAMessage;
+
+  const broadcastMessage = {
+    key: {
+      id: 'BROADCAST-1',
+      remoteJid: 'status@broadcast',
+      participant: 'status@broadcast',
+      fromMe: false,
+    },
+    messageTimestamp: 1700000000,
+    pushName: 'Customer',
+    message: {
+      conversation: 'Mensagem broadcast',
+    },
+  } as unknown as WAMessage;
+
+  await service.onInbound([groupWithoutPhone, broadcastMessage]);
+
+  assert.equal(webhookEvents.length, 2);
+
+  const [groupPayload, broadcastPayload] = webhookEvents.map(({ payload }) => payload);
+
+  assert.equal(groupPayload.contact.isGroup, true);
+  assert.equal(groupPayload.contact.phone, null);
+
+  assert.equal(broadcastPayload.contact.isGroup, false);
+  assert.equal(broadcastPayload.contact.phone, null);
+});
