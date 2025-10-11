@@ -11,6 +11,7 @@ import {
   saveInstancesIndex,
   type Instance,
 } from '../instanceManager.js';
+import { brokerEventStore } from '../broker/eventStore.js';
 import {
   allowSend,
   sendWithTimeout,
@@ -326,6 +327,49 @@ router.get(
     res.json(list);
   }),
 );
+
+router.get('/:iid/events', (req, res) => {
+  const inst = getInstance(req.params.iid);
+  if (!inst) {
+    res.status(404).json({ error: 'instance_not_found' });
+    return;
+  }
+
+  const direction =
+    req.query.direction === 'inbound' || req.query.direction === 'outbound' || req.query.direction === 'system'
+      ? req.query.direction
+      : undefined;
+
+  const events = brokerEventStore.list({
+    instanceId: inst.id,
+    limit: req.query.limit ? Number(req.query.limit) : undefined,
+    after: typeof req.query.after === 'string' ? req.query.after : undefined,
+    type: typeof req.query.type === 'string' ? req.query.type : undefined,
+    direction,
+  });
+
+  res.json({ events, nextCursor: events.length ? events[events.length - 1].id : null });
+});
+
+router.post('/:iid/events/ack', (req, res) => {
+  const inst = getInstance(req.params.iid);
+  if (!inst) {
+    res.status(404).json({ error: 'instance_not_found' });
+    return;
+  }
+
+  const ids = Array.isArray((req.body as any)?.ids)
+    ? ((req.body as any).ids as unknown[]).map((id) => String(id)).filter(Boolean)
+    : [];
+
+  if (!ids.length) {
+    res.status(400).json({ error: 'ids_required' });
+    return;
+  }
+
+  const result = brokerEventStore.ack(ids);
+  res.json(result);
+});
 
 router.get('/:iid/metrics', (req, res) => {
   const inst = getInstance(req.params.iid);

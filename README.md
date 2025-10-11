@@ -202,6 +202,8 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 - `GET /instances/:id` - Obter detalhes de uma instância
 - `PATCH /instances/:id` - Atualizar instância
 - `DELETE /instances/:id` - Deletar instância
+- `GET /instances/:id/events` - Listar eventos pendentes da instância (`limit`, `after`, `direction`, `type`)
+- `POST /instances/:id/events/ack` - Confirmar consumo de eventos informando os IDs recebidos
 
 #### Autenticação
 
@@ -225,6 +227,16 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 
 - `GET /instances/:id/metrics` - Obter métricas detalhadas
 
+#### Consumo de eventos sem broker
+
+Mesmo fora do modo broker é possível consumir os eventos estruturados gerados pela instância atual. Use `GET /instances/:id/events`
+para ler a fila HTTP compartilhada, filtrando por `direction` (`inbound`, `outbound` ou `system`) e/ou `type` conforme necessário.
+O endpoint retorna também o `nextCursor` (ID do último evento listado) para paginação incremental.
+
+Os eventos permanecem na fila até serem confirmados. Após processá-los, envie `POST /instances/:id/events/ack` com o array `ids`
+retornado na listagem. Eventos reconhecidos deixam de ser entregues em chamadas futuras; IDs desconhecidos são retornados em
+`missing`, como no fluxo do modo broker. Enquanto o ACK não for enviado, os eventos continuam disponíveis e podem ser reenviados
+em caso de falhas.
 ##### `POST /instances/:id/send-media`
 
 Envia arquivos de mídia para um contato ou grupo. Os parâmetros aceitos são:
