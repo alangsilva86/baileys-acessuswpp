@@ -10,13 +10,16 @@ import { mapLeadFromMessage } from '../services/leadMapper.js';
 import type { LeadInfo } from '../services/leadMapper.js';
 import { WebhookClient } from '../services/webhook.js';
 import { getSendTimeoutMs } from '../utils.js';
-import type { BrokerEventStore } from '../broker/eventStore.js';
 import {
   extractMessageText,
   extractMessageType,
   filterClientMessages,
 } from './messageUtils.js';
-import type { BrokerEventDirection, BrokerEventStore } from '../broker/eventStore.js';
+import type {
+  BrokerEventDirection,
+  BrokerEventPayload,
+  BrokerEventStore,
+} from '../broker/eventStore.js';
 
 export interface SendTextOptions {
   timeoutMs?: number;
@@ -107,7 +110,7 @@ type EventMetadata = {
   };
 } & Record<string, unknown>;
 
-interface StructuredMessageEventPayload {
+interface StructuredMessageEventPayload extends BrokerEventPayload {
   instanceId: string;
   contact: ContactPayload;
   message: StructuredMessagePayload;
