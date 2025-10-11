@@ -51,6 +51,7 @@ npm start
 - `SERVICE_NAME`: Nome do serviço para logs (padrão: baileys-api)
 - `WEBHOOK_URL`: URL para receber webhooks de eventos
 - `WEBHOOK_API_KEY`: Chave opcional para autenticar o webhook
+- Logs de falha do webhook registram apenas status, mensagem e URL para evitar exposição de segredos
 - `WEBHOOK_HMAC_SECRET`: Segredo opcional para assinar os eventos via HMAC
 - `RATE_MAX_SENDS`: Máximo de mensagens por janela de tempo (padrão: 20)
 - `RATE_WINDOW_MS`: Janela de tempo para rate limiting em ms (padrão: 15000)

@@ -12,7 +12,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "example:poll-webhook": "tsx src/examples/pollWebhookServer.ts",
-    "test": "echo 'No tests specified'"
+    "test": "tsx test/webhookClient.test.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "6.7.18",
