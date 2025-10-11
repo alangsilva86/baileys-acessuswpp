@@ -219,6 +219,131 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 #### Grupos
 
 - `GET /instances/:id/groups` - Listar grupos da instância
+- `POST /instances/:id/groups` - Criar novo grupo a partir da instância conectada
+- `POST /instances/:id/groups/:gid/members` - Adicionar participantes em um grupo existente
+- `DELETE /instances/:id/groups/:gid/members` - Remover participantes de um grupo existente
+
+##### Criar grupo (`POST /instances/:id/groups`)
+
+**Requisitos**
+
+- A instância deve estar conectada no WhatsApp.
+- Informe `subject` (nome do grupo) e `participants` (array com números brasileiros no formato `55DDDNUMERO`).
+- A instância será adicionada automaticamente como administradora.
+
+**Exemplo de payload**
+
+```json
+{
+  "subject": "Equipe Comercial",
+  "participants": ["5511999999999", "5551988887777"]
+}
+```
+
+**Resposta**
+
+```json
+{
+  "id": "120363025043304321@g.us",
+  "subject": "Equipe Comercial",
+  "creation": 1714589667,
+  "owner": "5511987654321@whatsapp.net",
+  "size": 3,
+  "participants": [
+    {
+      "jid": "5511987654321@whatsapp.net",
+      "phone": "5511987654321",
+      "isAdmin": true,
+      "isSuperAdmin": true
+    }
+  ]
+}
+```
+
+##### Adicionar participantes (`POST /instances/:id/groups/:gid/members`)
+
+**Requisitos**
+
+- A instância deve ser administradora do grupo informado.
+- `gid` pode ser informado com ou sem o sufixo `@g.us` (ex.: `120363025043304321` ou `120363025043304321@g.us`).
+- O corpo deve conter `participants` com números brasileiros válidos (`55DDDNUMERO`).
+
+**Exemplo de payload**
+
+```json
+{
+  "participants": ["5511999999999", "5551988887777"]
+}
+```
+
+**Resposta**
+
+```json
+{
+  "status": "partial",
+  "message": "Alguns participantes não puderam ser adicionados.",
+  "results": [
+    {
+      "jid": "5511999999999@whatsapp.net",
+      "phone": "5511999999999",
+      "status": 200,
+      "rawStatus": "200",
+      "success": true,
+      "message": "ok",
+      "systemMessageId": "A1B2C3"
+    },
+    {
+      "jid": "5551988887777@whatsapp.net",
+      "phone": "5551988887777",
+      "status": 403,
+      "rawStatus": "403",
+      "success": false,
+      "message": "instância não é administradora ou não possui permissão para esta ação",
+      "systemMessageId": null
+    }
+  ]
+}
+```
+
+Quando todos os participantes são adicionados, a resposta traz `status: "success"` com HTTP 200. Se nenhum for adicionado, a resposta retorna HTTP 400 com `status: "error"`.
+
+##### Remover participantes (`DELETE /instances/:id/groups/:gid/members`)
+
+**Requisitos**
+
+- A instância deve ser administradora do grupo informado.
+- Informe `gid` com ou sem o sufixo `@g.us`.
+- O corpo deve conter `participants` com números brasileiros válidos (`55DDDNUMERO`).
+
+**Exemplo de payload**
+
+```json
+{
+  "participants": ["5511999999999"]
+}
+```
+
+**Resposta**
+
+```json
+{
+  "status": "success",
+  "message": "Participantes removidos do grupo com sucesso.",
+  "results": [
+    {
+      "jid": "5511999999999@whatsapp.net",
+      "phone": "5511999999999",
+      "status": 200,
+      "rawStatus": "200",
+      "success": true,
+      "message": "ok",
+      "systemMessageId": "XYZ123"
+    }
+  ]
+}
+```
+
+Se algum participante não puder ser removido, o endpoint retorna `status: "partial"` (HTTP 207) com detalhes linha a linha.
 
 #### Métricas
 

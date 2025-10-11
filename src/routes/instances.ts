@@ -52,6 +52,144 @@ function auth(req: Request, res: Response, next: NextFunction): void {
 
 router.use(auth);
 
+const GROUP_ACTION_STATUS_MESSAGES: Record<string, string> = {
+  '200': 'ok',
+  '401': 'ação não autorizada para o participante',
+  '403': 'instância não é administradora ou não possui permissão para esta ação',
+  '404': 'participante não encontrado ou não faz parte do grupo',
+  '408': 'ação expirou ou participante não pôde ser atualizado',
+  '409': 'participante já está no grupo',
+  '410': 'participante já não faz parte do grupo',
+  '429': 'limite do WhatsApp atingido; tente novamente mais tarde',
+  '500': 'erro interno do WhatsApp ao processar a ação',
+};
+
+interface ParsedParticipant {
+  jid: string;
+  phone: string;
+}
+
+interface ParticipantActionItem {
+  jid: string;
+  phone: string;
+  status: number | null;
+  rawStatus: string | null;
+  success: boolean;
+  message: string;
+  systemMessageId: string | null;
+}
+
+interface ParticipantActionSummary {
+  items: ParticipantActionItem[];
+  successCount: number;
+  total: number;
+  systemMessageId: string | null;
+}
+
+function ensureGroupJid(raw: string): string | null {
+  const value = String(raw ?? '').trim();
+  if (!value) return null;
+  if (/^[0-9A-Za-z-]+@g\.us$/i.test(value)) return value;
+  if (/^[0-9A-Za-z-]+$/i.test(value)) {
+    return `${value}@g.us`;
+  }
+  return null;
+}
+
+function describeGroupParticipantStatus(code: string): string {
+  return GROUP_ACTION_STATUS_MESSAGES[code] || 'erro desconhecido ao atualizar participante';
+}
+
+function mapBaileysError(
+  err: any,
+  fallbackError = 'baileys_error',
+): { status: number; error: string; detail: string } {
+  const statusCodeRaw = err?.output?.statusCode ?? err?.statusCode ?? err?.status;
+  const statusCode = Number.isFinite(Number(statusCodeRaw)) ? Number(statusCodeRaw) : undefined;
+  const detail =
+    err?.data?.details || err?.output?.payload?.details || err?.output?.payload?.message || err?.message || 'erro desconhecido';
+
+  if (statusCode === 403) {
+    return {
+      status: 403,
+      error: 'forbidden',
+      detail: 'Instância não possui permissão para executar esta ação no grupo.',
+    };
+  }
+  if (statusCode === 404) {
+    return {
+      status: 404,
+      error: 'group_not_found',
+      detail: 'Grupo não encontrado ou instância não participa dele.',
+    };
+  }
+  if (statusCode === 429) {
+    return {
+      status: 429,
+      error: 'rate_limited',
+      detail: 'Limite de operações imposto pelo WhatsApp atingido. Tente novamente mais tarde.',
+    };
+  }
+
+  return {
+    status: statusCode && statusCode >= 400 && statusCode < 600 ? statusCode : 502,
+    error: fallbackError,
+    detail,
+  };
+}
+
+function collectParticipantJids(input: unknown): { participants: ParsedParticipant[]; invalid: string[] } {
+  const participants: ParsedParticipant[] = [];
+  const invalid: string[] = [];
+  const seen = new Set<string>();
+
+  const list = Array.isArray(input) ? input : [];
+  for (const raw of list) {
+    const normalized = normalizeToE164BR(raw);
+    if (!normalized) {
+      invalid.push(String(raw ?? ''));
+      continue;
+    }
+    const jid = `${normalized}@s.whatsapp.net`;
+    if (seen.has(jid)) continue;
+    seen.add(jid);
+    participants.push({ jid, phone: normalized });
+  }
+
+  return { participants, invalid };
+}
+
+function summarizeParticipantResults(rawResults: any[]): ParticipantActionSummary {
+  const items: ParticipantActionItem[] = rawResults.map((entry) => {
+    const rawStatus = entry?.status ? String(entry.status) : null;
+    const statusNumber = rawStatus && Number.isFinite(Number(rawStatus)) ? Number(rawStatus) : null;
+    const jid = String(entry?.jid ?? '');
+    const phone = jid.endsWith('@s.whatsapp.net') ? jid.replace('@s.whatsapp.net', '') : jid;
+    const success = rawStatus === '200';
+    const systemMessageId = typeof entry?.content?.attrs?.id === 'string' ? entry.content.attrs.id : null;
+
+    return {
+      jid,
+      phone,
+      status: statusNumber,
+      rawStatus,
+      success,
+      message: rawStatus ? describeGroupParticipantStatus(rawStatus) : 'status não informado',
+      systemMessageId,
+    };
+  });
+
+  const successCount = items.filter((item) => item.success).length;
+  const systemMessageId = items.find((item) => item.success && item.systemMessageId)?.systemMessageId ?? null;
+
+  return {
+    items,
+    successCount,
+    total: items.length,
+    systemMessageId,
+  };
+}
+
 router.post(
   '/',
   asyncHandler(async (req, res) => {
@@ -316,6 +454,191 @@ router.get(
     const all = await inst.sock.groupFetchAllParticipating();
     const list = Object.values(all).map((group) => ({ id: group.id, subject: group.subject }));
     res.json(list);
+  }),
+);
+
+router.post(
+  '/:iid/groups',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!inst || !inst.sock) {
+      res.status(503).json({ error: 'socket indisponível' });
+      return;
+    }
+
+    const subjectRaw = (req.body as any)?.subject;
+    const subject = typeof subjectRaw === 'string' ? subjectRaw.trim() : '';
+    if (!subject) {
+      res.status(400).json({ error: 'subject_obrigatorio' });
+      return;
+    }
+
+    const { participants, invalid } = collectParticipantJids((req.body as any)?.participants);
+    if (invalid.length) {
+      res.status(400).json({ error: 'participants_invalid', detail: invalid });
+      return;
+    }
+    if (!participants.length) {
+      res.status(400).json({ error: 'participants_required', detail: 'Informe ao menos um participante válido (55DDDNUMERO).' });
+      return;
+    }
+
+    try {
+      const metadata = await inst.sock.groupCreate(
+        subject,
+        participants.map((item) => item.jid),
+      );
+
+      inst.metrics.sent += 1;
+      inst.metrics.sent_by_type.group += 1;
+
+      res.status(201).json({
+        id: metadata.id,
+        subject: metadata.subject,
+        creation: metadata.creation ?? null,
+        owner: metadata.owner ?? null,
+        announce: metadata.announce ?? null,
+        restrict: metadata.restrict ?? null,
+        size: metadata.size ?? metadata.participants?.length ?? null,
+        participants: (metadata.participants || []).map((participant) => ({
+          jid: participant.id,
+          phone: participant.id?.endsWith('@s.whatsapp.net')
+            ? participant.id.replace('@s.whatsapp.net', '')
+            : participant.id,
+          isAdmin: Boolean(participant.admin),
+          isSuperAdmin: Boolean(participant.isSuperAdmin),
+        })),
+      });
+    } catch (err: any) {
+      const mapped = mapBaileysError(err, 'group_create_failed');
+      res.status(mapped.status).json({ error: mapped.error, detail: mapped.detail });
+    }
+  }),
+);
+
+router.post(
+  '/:iid/groups/:gid/members',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!inst || !inst.sock) {
+      res.status(503).json({ error: 'socket indisponível' });
+      return;
+    }
+
+    const groupJid = ensureGroupJid(req.params.gid);
+    if (!groupJid) {
+      res.status(400).json({ error: 'group_id_invalido' });
+      return;
+    }
+
+    const { participants, invalid } = collectParticipantJids((req.body as any)?.participants);
+    if (invalid.length) {
+      res.status(400).json({ error: 'participants_invalid', detail: invalid });
+      return;
+    }
+    if (!participants.length) {
+      res.status(400).json({ error: 'participants_required', detail: 'Informe ao menos um participante válido (55DDDNUMERO).' });
+      return;
+    }
+
+    try {
+      const results = await inst.sock.groupParticipantsUpdate(
+        groupJid,
+        participants.map((item) => item.jid),
+        'add',
+      );
+      const summary = summarizeParticipantResults(results);
+
+      if (summary.successCount > 0) {
+        inst.metrics.sent += 1;
+        inst.metrics.sent_by_type.group += 1;
+        if (summary.systemMessageId) {
+          inst.metrics.last.sentId = summary.systemMessageId;
+        }
+      }
+
+      const statusType =
+        summary.successCount === summary.total
+          ? 'success'
+          : summary.successCount === 0
+          ? 'error'
+          : 'partial';
+      const statusCode = statusType === 'success' ? 200 : statusType === 'partial' ? 207 : 400;
+      const message =
+        statusType === 'success'
+          ? 'Todos os participantes foram adicionados ao grupo.'
+          : statusType === 'partial'
+          ? 'Alguns participantes não puderam ser adicionados.'
+          : 'Nenhum participante pôde ser adicionado.';
+
+      res.status(statusCode).json({ status: statusType, message, results: summary.items });
+    } catch (err: any) {
+      const mapped = mapBaileysError(err, 'group_participants_update_failed');
+      res.status(mapped.status).json({ error: mapped.error, detail: mapped.detail });
+    }
+  }),
+);
+
+router.delete(
+  '/:iid/groups/:gid/members',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!inst || !inst.sock) {
+      res.status(503).json({ error: 'socket indisponível' });
+      return;
+    }
+
+    const groupJid = ensureGroupJid(req.params.gid);
+    if (!groupJid) {
+      res.status(400).json({ error: 'group_id_invalido' });
+      return;
+    }
+
+    const { participants, invalid } = collectParticipantJids((req.body as any)?.participants);
+    if (invalid.length) {
+      res.status(400).json({ error: 'participants_invalid', detail: invalid });
+      return;
+    }
+    if (!participants.length) {
+      res.status(400).json({ error: 'participants_required', detail: 'Informe ao menos um participante válido (55DDDNUMERO).' });
+      return;
+    }
+
+    try {
+      const results = await inst.sock.groupParticipantsUpdate(
+        groupJid,
+        participants.map((item) => item.jid),
+        'remove',
+      );
+      const summary = summarizeParticipantResults(results);
+
+      if (summary.successCount > 0) {
+        inst.metrics.sent += 1;
+        inst.metrics.sent_by_type.group += 1;
+        if (summary.systemMessageId) {
+          inst.metrics.last.sentId = summary.systemMessageId;
+        }
+      }
+
+      const statusType =
+        summary.successCount === summary.total
+          ? 'success'
+          : summary.successCount === 0
+          ? 'error'
+          : 'partial';
+      const statusCode = statusType === 'success' ? 200 : statusType === 'partial' ? 207 : 400;
+      const message =
+        statusType === 'success'
+          ? 'Participantes removidos do grupo com sucesso.'
+          : statusType === 'partial'
+          ? 'Alguns participantes não puderam ser removidos.'
+          : 'Nenhum participante pôde ser removido.';
+
+      res.status(statusCode).json({ status: statusType, message, results: summary.items });
+    } catch (err: any) {
+      const mapped = mapBaileysError(err, 'group_participants_update_failed');
+      res.status(mapped.status).json({ error: mapped.error, detail: mapped.detail });
+    }
   }),
 );
 
