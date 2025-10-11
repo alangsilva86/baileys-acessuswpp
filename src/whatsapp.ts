@@ -11,6 +11,7 @@ import { MessageService } from './baileys/messageService.js';
 import { PollService } from './baileys/pollService.js';
 import { WebhookClient } from './services/webhook.js';
 import { brokerEventStore } from './broker/eventStore.js';
+import { filterClientMessages } from './baileys/messageUtils.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -158,12 +159,16 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   });
 
   sock.ev.on('messages.upsert', async (evt: any) => {
-    const count = evt.messages?.length || 0;
+    const rawMessages = evt.messages || [];
+    const filteredMessages = filterClientMessages(rawMessages);
+    const normalizedEvent = { ...evt, messages: filteredMessages };
+    const rawCount = rawMessages.length;
+    const count = filteredMessages.length;
     const iid = inst.id;
-    logger.info({ iid, type: evt.type, count }, 'messages.upsert');
+    logger.info({ iid, type: evt.type, count, rawCount }, 'messages.upsert');
 
     if (count) {
-      for (const message of evt.messages) {
+      for (const message of filteredMessages) {
         const from = message.key?.remoteJid;
 
         const button =
@@ -196,19 +201,19 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     }
 
     try {
-      await messageService.onMessagesUpsert(evt);
+      await messageService.onMessagesUpsert(normalizedEvent);
     } catch (err: any) {
       logger.warn({ iid, err: err?.message }, 'message.service.messages.upsert.failed');
     }
 
     try {
-      await pollService.onMessageUpsert(evt);
+      await pollService.onMessageUpsert(normalizedEvent);
     } catch (err: any) {
       logger.warn({ iid, err: err?.message }, 'poll.service.messages.upsert.failed');
     }
 
     void webhook
-      .emit('WHATSAPP_MESSAGES_UPSERT', { iid, ...evt })
+      .emit('WHATSAPP_MESSAGES_UPSERT', { iid, ...normalizedEvent })
       .catch((err: any) => logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.upsert.failed'));
   });
 
