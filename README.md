@@ -59,83 +59,201 @@ npm start
 
 ### Webhooks
 
-Defina `WEBHOOK_URL` (e opcionalmente substitua `WEBHOOK_API_KEY`/adicione `WEBHOOK_HMAC_SECRET`) para receber eventos push. Ao ativar, o serviço envia um `POST` para o endpoint configurado sempre que um voto de enquete é processado. Caso nenhuma chave seja fornecida, o cliente usa por padrão `57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce` no header `x-api-key`.
+Defina `WEBHOOK_URL` (e opcionalmente substitua `WEBHOOK_API_KEY` / `WEBHOOK_HMAC_SECRET`) para receber eventos estruturados sempre que mensagens ou enquetes forem processadas.
 
-#### Implementando o endpoint receptor
+#### Envelope e cabeçalhos
 
-Você pode testar rapidamente com o servidor de exemplo incluso no projeto. Basta executar:
+Cada chamada é um `POST` com `Content-Type: application/json` e os seguintes headers:
 
-```bash
-npm run example:poll-webhook
+- `x-api-key`: obrigatório. Usa `WEBHOOK_API_KEY` (ou o valor padrão `57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce`).
+- `x-signature`: opcional. HMAC-SHA256 de `JSON.stringify(body)` usando `WEBHOOK_HMAC_SECRET` (ou, se ausente, o próprio `WEBHOOK_API_KEY`).
+
+O envelope padrão enviado é:
+
+```json
+{
+  "event": "MESSAGE_INBOUND",
+  "instanceId": "alan",
+  "timestamp": 1760219145,
+  "payload": { /* dados do evento */ }
+}
 ```
 
-O script lê `WEBHOOK_API_KEY` e `WEBHOOK_HMAC_SECRET` do ambiente, expõe `POST /webhooks/baileys` e registra cada voto recebido em log usando Pino. O código completo está em `src/examples/pollWebhookServer.ts`:
+- `instanceId` sempre utiliza o identificador público cadastrado no LeadEngine.
+- `timestamp` é um Unix epoch em segundos.
+
+#### Estrutura comum do contato e metadados
+
+Todo payload de mensagem inclui o bloco `contact`:
+
+```json
+"contact": {
+  "owner": "device | user | server",
+  "remoteJid": "554499999999@s.whatsapp.net",
+  "participant": "554499999999@s.whatsapp.net",
+  "phone": "+554499999999",
+  "displayName": "Nome visível",
+  "isGroup": false
+}
+```
+
+- `owner` indica a origem lógica (`device` para mensagens enviadas pela instância, `user` para contatos/grupos externos, `server` quando não é possível inferir).
+- `phone` segue o formato E.164 (com `+`). Quando não for possível extrair o número, o campo virá como `null`.
+- `isGroup` fica `true` quando `remoteJid` termina com `@g.us`.
+
+Os blocos `metadata` trazem a procedência do evento:
+
+```json
+"metadata": {
+  "timestamp": "2023-11-14T22:13:20.000Z",
+  "broker": { "type": "baileys", "direction": "inbound" },
+  "source": "baileys-acessus"
+}
+```
+
+#### Exemplos de eventos
+
+Mensagem recebida (`MESSAGE_INBOUND`):
+
+```json
+{
+  "event": "MESSAGE_INBOUND",
+  "instanceId": "alan",
+  "timestamp": 1760219145,
+  "payload": {
+    "contact": {
+      "owner": "user",
+      "remoteJid": "554499999999@s.whatsapp.net",
+      "participant": null,
+      "phone": "+554499999999",
+      "displayName": "João",
+      "isGroup": false
+    },
+    "message": {
+      "id": "wamid-1001",
+      "chatId": "554499999999@s.whatsapp.net",
+      "type": "text",
+      "text": "Olá, preciso de ajuda"
+    },
+    "metadata": {
+      "timestamp": "2024-10-11T22:45:45.000Z",
+      "broker": { "type": "baileys", "direction": "inbound" },
+      "source": "baileys-acessus"
+    }
+  }
+}
+```
+
+Mensagem enviada (`MESSAGE_OUTBOUND`):
+
+```json
+{
+  "event": "MESSAGE_OUTBOUND",
+  "instanceId": "alan",
+  "timestamp": 1760219146,
+  "payload": {
+    "contact": { /* mesmo formato descrito acima */ },
+    "message": {
+      "id": "wamid-1002",
+      "chatId": "554499999999@s.whatsapp.net",
+      "type": "media",
+      "text": "Segue o catálogo",
+      "media": {
+        "mediaType": "image",
+        "mimetype": "image/jpeg",
+        "fileName": "catalogo.jpg",
+        "size": 234567,
+        "caption": "Segue o catálogo"
+      }
+    },
+    "metadata": {
+      "timestamp": "2024-10-11T22:45:46.000Z",
+      "broker": { "type": "baileys", "direction": "outbound" },
+      "source": "baileys-acessus"
+    }
+  }
+}
+```
+
+Voto em enquete (`POLL_CHOICE`):
+
+```json
+{
+  "event": "POLL_CHOICE",
+  "instanceId": "alan",
+  "timestamp": 1760219150,
+  "payload": {
+    "pollId": "poll-abc",
+    "question": "Qual produto?",
+    "chatId": "556299999999@g.us",
+    "voterJid": "556288888888@s.whatsapp.net",
+    "selectedOptions": [{ "id": "p1", "text": "Produto A" }],
+    "optionsAggregates": [
+      { "id": "p1", "text": "Produto A", "votes": 3 },
+      { "id": "p2", "text": "Produto B", "votes": 1 }
+    ],
+    "contact": { /* dados do votante */ }
+  }
+}
+```
+
+Eventos brutos do Baileys (`WHATSAPP_MESSAGES_UPSERT` / `WHATSAPP_MESSAGES_UPDATE`) mantêm o payload no formato:
+
+```json
+{
+  "iid": "alan",
+  "raw": { /* evento original emitido pelo Baileys */ }
+}
+```
+
+#### Endpoint de exemplo
+
+Execute `npm run example:poll-webhook` para iniciar um receptor Express que valida API key e assinatura `x-signature` com o mesmo segredo do emissor:
 
 ```ts
 import 'dotenv/config';
 import crypto from 'node:crypto';
-import express, { type Request } from 'express';
+import express from 'express';
 import pino from 'pino';
 
 const app = express();
 const PORT = Number(process.env.WEBHOOK_PORT ?? process.env.PORT ?? 3001);
 const EXPECTED_API_KEY = process.env.WEBHOOK_API_KEY;
-const HMAC_SECRET = process.env.WEBHOOK_HMAC_SECRET;
+const HMAC_SECRET = process.env.WEBHOOK_HMAC_SECRET ?? EXPECTED_API_KEY ?? null;
 const logger = pino({ level: process.env.LOG_LEVEL ?? 'info', base: { service: 'poll-webhook-example' } });
-
-interface RequestWithRawBody extends Request {
-  rawBody?: Buffer;
-}
 
 app.use(
   express.json({
     verify: (req, _res, buf) => {
-      (req as RequestWithRawBody).rawBody = Buffer.from(buf);
+      (req as any).rawBody = Buffer.from(buf);
     },
   }),
 );
 
-function timingSafeEqual(a: string, b: string): boolean {
-  const A = Buffer.from(a);
-  const B = Buffer.from(b);
-  if (A.length !== B.length) return false;
-  return crypto.timingSafeEqual(A, B);
+function timingSafeEqual(a: Buffer, b: Buffer): boolean {
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
-function buildSignature(rawBody: Buffer, secret: string): string {
-  const hmac = crypto.createHmac('sha256', secret);
-  hmac.update(rawBody);
-  return `sha256=${hmac.digest('hex')}`;
-}
-
-function isValidSignature(req: RequestWithRawBody): boolean {
-  if (!HMAC_SECRET) return true;
-  const rawBody = req.rawBody;
-  const received = req.header('x-signature-256');
-  if (!rawBody || !received) return false;
-  const expected = buildSignature(rawBody, HMAC_SECRET);
-  return timingSafeEqual(received, expected);
-}
-
-app.post('/webhooks/baileys', (req: RequestWithRawBody, res) => {
+app.post('/webhooks/baileys', (req, res) => {
   if (EXPECTED_API_KEY && req.header('x-api-key') !== EXPECTED_API_KEY) {
+    logger.warn({ ip: req.ip }, 'webhook.invalid_api_key');
     return res.status(401).json({ error: 'invalid_api_key' });
   }
 
-  if (!isValidSignature(req)) {
-    return res.status(401).json({ error: 'invalid_signature' });
+  if (HMAC_SECRET) {
+    const rawBody: Buffer = (req as any).rawBody ?? Buffer.from('');
+    const expected = crypto.createHmac('sha256', HMAC_SECRET).update(rawBody).digest('hex');
+    const received = req.header('x-signature');
+    if (!received || !timingSafeEqual(Buffer.from(received), Buffer.from(expected))) {
+      logger.warn({ ip: req.ip, expected, received }, 'webhook.signature.mismatch');
+      return res.status(401).json({ error: 'invalid_signature' });
+    }
   }
 
-  const { event, payload, timestamp } = req.body ?? {};
-  if (event === 'POLL_CHOICE') {
-    logger.info({ event, timestamp, payload }, 'webhook.poll_choice');
-  }
-
+  const { event, timestamp, payload } = req.body ?? {};
+  logger.info({ event, timestamp, payload }, 'webhook.event.received');
   return res.sendStatus(204);
-});
-
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
 });
 
 app.listen(PORT, () => {
@@ -143,39 +261,7 @@ app.listen(PORT, () => {
 });
 ```
 
-Depois de publicar esse endpoint, configure `WEBHOOK_URL` apontando para ele (ex.: `https://sua-api.com/webhooks/baileys`).
-
-#### Payload do evento `POLL_CHOICE`
-
-O evento tem o tipo `POLL_CHOICE` e carrega o payload:
-
-```json
-{
-  "event": "POLL_CHOICE",
-  "timestamp": "2024-01-01T12:00:00.000Z",
-  "instanceId": "leadengine",
-  "payload": {
-    "pollId": "ABCD",
-    "question": "Qual a melhor data?",
-    "chatId": "123@g.us",
-    "voterJid": "555199999999@whatsapp.net",
-    "selectedOptions": ["Sexta"],
-    "aggregate": [
-      {
-        "name": "Sexta",
-        "voters": ["555199999999@whatsapp.net"],
-        "count": 1
-      }
-    ],
-    "lead": {
-      "name": "Fulano",
-      "phone": "+55 51 99999-9999"
-    }
-  }
-}
-```
-
-Basta expor um endpoint HTTPS que valide a chave/assinatura (se configuradas) e processe o corpo recebido. O campo `selectedOptions` contém as alternativas escolhidas pelo contato e `aggregate` apresenta o consolidado de votos por opção.
+Publique o endpoint e informe a URL em `WEBHOOK_URL` (ex.: `https://sua-api.com/webhooks/baileys`).
 
 ## Uso
 
@@ -206,37 +292,36 @@ Todos os endpoints requerem o header `X-API-Key` com sua chave de API.
 
 #### Estrutura dos eventos `MESSAGE_INBOUND` e `MESSAGE_OUTBOUND`
 
-Os eventos disparados pelo webhook e disponíveis no `eventStore` compartilham a mesma estrutura. O payload contém informações da instância, contato e mensagem, além de metadados de rastreabilidade:
+Os eventos disparados pelo webhook e disponíveis no `eventStore` compartilham a mesma estrutura de payload (contato, mensagem e metadados):
 
 ```json
 {
-  "instanceId": "acme-support",
   "contact": {
-    "owner": "customer",
+    "owner": "user",
     "remoteJid": "5511987654321@s.whatsapp.net",
     "participant": null,
-    "phone": "5511987654321",
+    "phone": "+5511987654321",
     "displayName": "Maria da Silva",
     "isGroup": false
   },
   "message": {
     "id": "ABC123",
-    "messageId": "ABC123",
     "chatId": "5511987654321@s.whatsapp.net",
-    "type": "conversation",
-    "conversation": "Olá! Tudo bem?"
+    "type": "text",
+    "text": "Olá! Tudo bem?"
   },
   "metadata": {
     "timestamp": "2023-11-14T22:13:20.000Z",
     "broker": {
       "direction": "inbound",
-      "type": "MESSAGE_INBOUND"
-    }
+      "type": "baileys"
+    },
+    "source": "baileys-acessus"
   }
 }
 ```
 
-Para mensagens com mídia, o bloco `message` inclui o objeto `media` com detalhes como `type`, `caption`, `mimetype`, `fileName`, `source` e `size`. O campo `message.messageId` permanece como alias de `message.id` para compatibilidade.
+Para mensagens com mídia, o bloco `message` inclui o objeto `media` com detalhes como `mediaType`, `caption`, `mimetype`, `fileName` e `size`.
 
 #### Autenticação
 

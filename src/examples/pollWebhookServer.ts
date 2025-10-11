@@ -13,7 +13,7 @@ interface RequestWithRawBody extends ExpressRequest {
 
 const PORT = Number(process.env.WEBHOOK_PORT ?? process.env.PORT ?? 3001);
 const EXPECTED_API_KEY = process.env.WEBHOOK_API_KEY;
-const HMAC_SECRET = process.env.WEBHOOK_HMAC_SECRET;
+const HMAC_SECRET = process.env.WEBHOOK_HMAC_SECRET ?? EXPECTED_API_KEY ?? null;
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 const SERVICE_NAME = process.env.WEBHOOK_SERVICE_NAME ?? 'poll-webhook-example';
 
@@ -29,13 +29,13 @@ function timingSafeEqual(a: string, b: string): boolean {
 function buildSignature(rawBody: Buffer, secret: string): string {
   const hmac = crypto.createHmac('sha256', secret);
   hmac.update(rawBody);
-  return `sha256=${hmac.digest('hex')}`;
+  return hmac.digest('hex');
 }
 
 function validateSignature(req: RequestWithRawBody): boolean {
   if (!HMAC_SECRET) return true;
   const rawBody = req.rawBody;
-  const received = req.header('x-signature-256');
+  const received = req.header('x-signature');
   if (!rawBody || !received) return false;
   const expected = buildSignature(rawBody, HMAC_SECRET);
   return timingSafeEqual(received, expected);
@@ -66,7 +66,10 @@ app.post('/webhooks/baileys', (req: RequestWithRawBody, res: Response) => {
   }
 
   if (!validateSignature(req)) {
-    logger.warn({ ip: req.ip }, 'webhook.invalid_signature');
+    const rawBody = req.rawBody ?? Buffer.from('');
+    const expected = HMAC_SECRET ? buildSignature(rawBody, HMAC_SECRET) : null;
+    const received = req.header('x-signature');
+    logger.warn({ ip: req.ip, expected, received }, 'webhook.signature.mismatch');
     return res.status(401).json({ error: 'invalid_signature' });
   }
 

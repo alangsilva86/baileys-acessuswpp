@@ -7,7 +7,8 @@ import type {
 } from '@whiskeysockets/baileys';
 import { getAggregateVotesInPollMessage } from '@whiskeysockets/baileys';
 import pino from 'pino';
-import { mapLeadFromMessage } from '../services/leadMapper.js';
+import { buildContactPayload, mapLeadFromMessage } from '../services/leadMapper.js';
+import type { ContactPayload } from '../services/leadMapper.js';
 import { WebhookClient } from '../services/webhook.js';
 import { getSendTimeoutMs } from '../utils.js';
 import { PollMessageStore } from './store.js';
@@ -30,11 +31,11 @@ export interface PollServiceOptions {
 interface PollChoiceEventPayload {
   pollId: string;
   question: string;
-  chatId?: string | null;
-  voterJid?: string | null;
-  selectedOptions: string[];
-  aggregate: ReturnType<typeof getAggregateVotesInPollMessage>;
-  lead: ReturnType<typeof mapLeadFromMessage>;
+  chatId: string | null;
+  voterJid: string | null;
+  selectedOptions: Array<{ id: string | null; text: string | null }>;
+  optionsAggregates: Array<{ id: string | null; text: string | null; votes: number }>;
+  contact: ContactPayload;
 }
 
 const DEFAULT_SELECTABLE_COUNT = 1;
@@ -135,20 +136,27 @@ export class PollService {
       );
 
       const voterJid = update.key?.participant ?? update.key?.remoteJid ?? null;
+      const lead = mapLeadFromMessage(buildSyntheticMessageForVoter(update, pollMessage));
+      const contact = buildContactPayload(lead);
+
       const selectedOptions = aggregate
         .filter((opt) => (voterJid ? opt.voters.includes(voterJid) : false))
-        .map((opt) => opt.name);
+        .map((opt) => ({ id: opt.name || null, text: opt.name || null }));
 
-      const lead = mapLeadFromMessage(buildSyntheticMessageForVoter(update, pollMessage));
+      const optionsAggregates = aggregate.map((opt) => ({
+        id: opt.name || null,
+        text: opt.name || null,
+        votes: Array.isArray(opt.voters) ? opt.voters.length : 0,
+      }));
 
       const payload: PollChoiceEventPayload = {
         pollId,
         question: extractPollQuestion(pollMessage),
-        chatId: pollMessage.key?.remoteJid,
+        chatId: pollMessage.key?.remoteJid ?? null,
         voterJid,
         selectedOptions,
-        aggregate,
-        lead,
+        optionsAggregates,
+        contact,
       };
 
       if (this.eventStore) {
@@ -173,9 +181,14 @@ export class PollService {
 
     if (this.sock.user?.id && this.sock.user.id === voterJid) return;
 
+    const optionText = payload.selectedOptions
+      .map((opt) => opt.text || opt.id || '')
+      .filter((value) => value)
+      .join(', ');
+
     const text = this.feedbackTemplate
       .replace('{question}', payload.question)
-      .replace('{option}', payload.selectedOptions.join(', '));
+      .replace('{option}', optionText);
 
     try {
       if (this.messageService) {
