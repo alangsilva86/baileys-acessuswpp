@@ -50,7 +50,7 @@ npm start
 - `LOG_LEVEL`: Nível de log (padrão: info)
 - `SERVICE_NAME`: Nome do serviço para logs (padrão: baileys-api)
 - `WEBHOOK_URL`: URL para receber webhooks de eventos
-- `WEBHOOK_API_KEY`: Chave opcional para autenticar o webhook
+- `WEBHOOK_API_KEY`: Chave para autenticar o webhook (padrão: `57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce`)
 - Logs de falha do webhook registram apenas status, mensagem e URL para evitar exposição de segredos
 - `WEBHOOK_HMAC_SECRET`: Segredo opcional para assinar os eventos via HMAC
 - `RATE_MAX_SENDS`: Máximo de mensagens por janela de tempo (padrão: 20)
@@ -61,7 +61,7 @@ npm start
 
 ### Webhooks
 
-Defina `WEBHOOK_URL` (e opcionalmente `WEBHOOK_API_KEY`/`WEBHOOK_HMAC_SECRET`) para receber eventos push. Ao ativar, o serviço envia um `POST` para o endpoint configurado sempre que um voto de enquete é processado.
+Defina `WEBHOOK_URL` (e opcionalmente substitua `WEBHOOK_API_KEY`/adicione `WEBHOOK_HMAC_SECRET`) para receber eventos push. Ao ativar, o serviço envia um `POST` para o endpoint configurado sempre que um voto de enquete é processado. Caso nenhuma chave seja fornecida, o cliente usa por padrão `57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce` no header `x-api-key`.
 
 #### Implementando o endpoint receptor
 
