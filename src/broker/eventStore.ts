@@ -6,6 +6,21 @@ export interface BrokerEventPayload {
   [key: string]: unknown;
 }
 
+export interface EventDeliveryState {
+  state: 'pending' | 'retry' | 'success' | 'failed';
+  attempts: number;
+  lastAttemptAt: number | null;
+  lastStatus?: number | null;
+  lastError?:
+    | {
+        message: string;
+        status?: number;
+        statusText?: string;
+        responseBody?: string;
+      }
+    | null;
+}
+
 export interface BrokerEvent {
   id: string;
   sequence: number;
@@ -15,6 +30,7 @@ export interface BrokerEvent {
   payload: BrokerEventPayload;
   createdAt: number;
   acknowledged: boolean;
+  delivery?: EventDeliveryState | null;
 }
 
 export interface BrokerEventListOptions {
@@ -55,6 +71,7 @@ export class BrokerEventStore {
       createdAt,
       sequence: ++this.sequence,
       acknowledged: false,
+      delivery: event.delivery ?? null,
     };
     this.events.push(record);
     this.index.set(record.id, record);
@@ -128,6 +145,32 @@ export class BrokerEventStore {
     this.pruneAcked();
 
     return { acknowledged, missing };
+  }
+
+  markDelivery(
+    eventId: string,
+    updates:
+      | Partial<EventDeliveryState>
+      | ((current: EventDeliveryState | null | undefined) => Partial<EventDeliveryState> | null | undefined),
+  ): BrokerEvent | null {
+    const record = this.index.get(eventId);
+    if (!record) return null;
+
+    const patch = typeof updates === 'function' ? updates(record.delivery) : updates;
+    if (!patch) return { ...record };
+
+    const base: EventDeliveryState = record.delivery ?? {
+      state: 'pending',
+      attempts: 0,
+      lastAttemptAt: null,
+    };
+
+    record.delivery = {
+      ...base,
+      ...patch,
+    };
+
+    return { ...record };
   }
 
   metrics(): { pending: number; total: number; lastEventAt: number | null; lastAckAt: number | null } {

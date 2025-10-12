@@ -10,7 +10,7 @@ import type { WebhookClient } from '../src/services/webhook.js';
 class FakeWebhook {
   public readonly events: Array<{ event: string; payload: unknown }> = [];
 
-  async emit(event: string, payload: unknown): Promise<void> {
+  async emit(event: string, payload: unknown, _opts?: unknown): Promise<void> {
     this.events.push({ event, payload });
   }
 }
@@ -119,7 +119,7 @@ test('MessageService emits structured inbound payload', async () => {
   const webhookEvents: Array<{ event: string; payload: any }> = [];
 
   const webhook = {
-    async emit(event: string, payload: unknown) {
+    async emit(event: string, payload: unknown, _opts?: unknown) {
       webhookEvents.push({ event, payload });
     },
   } as unknown as WebhookClient;
@@ -175,7 +175,7 @@ test('MessageService maps participant phone for group messages when valid', asyn
   const webhookEvents: Array<{ event: string; payload: any }> = [];
 
   const webhook = {
-    async emit(event: string, payload: unknown) {
+    async emit(event: string, payload: unknown, _opts?: unknown) {
       webhookEvents.push({ event, payload });
     },
   } as unknown as WebhookClient;
@@ -215,7 +215,7 @@ test('MessageService omits phone for group and broadcast messages without E.164 
   const webhookEvents: Array<{ event: string; payload: any }> = [];
 
   const webhook = {
-    async emit(event: string, payload: unknown) {
+    async emit(event: string, payload: unknown, _opts?: unknown) {
       webhookEvents.push({ event, payload });
     },
   } as unknown as WebhookClient;

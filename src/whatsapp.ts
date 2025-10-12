@@ -109,6 +109,7 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     instanceId: inst.id,
     logger,
     hmacSecret: process.env.WEBHOOK_HMAC_SECRET || API_KEYS[0] || null,
+    eventStore: brokerEventStore,
   });
   const messageService = new MessageService(sock, webhook, logger, {
     eventStore: brokerEventStore,

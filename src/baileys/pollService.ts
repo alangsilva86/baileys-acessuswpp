@@ -13,7 +13,7 @@ import { WebhookClient } from '../services/webhook.js';
 import { getSendTimeoutMs } from '../utils.js';
 import { PollMessageStore } from './store.js';
 import type { MessageService } from './messageService.js';
-import type { BrokerEventStore } from '../broker/eventStore.js';
+import type { BrokerEvent, BrokerEventStore } from '../broker/eventStore.js';
 
 export interface SendPollOptions {
   selectableCount?: number;
@@ -159,16 +159,24 @@ export class PollService {
         contact,
       };
 
+      let queued: BrokerEvent | null = null;
       if (this.eventStore) {
-        this.eventStore.enqueue({
+        queued = this.eventStore.enqueue({
           instanceId: this.instanceId,
           direction: 'inbound',
           type: 'POLL_CHOICE',
           payload: { ...payload },
+          delivery: {
+            state: 'pending',
+            attempts: 0,
+            lastAttemptAt: null,
+          },
         });
       }
 
-      await this.webhook.emit('POLL_CHOICE', payload);
+      await this.webhook.emit('POLL_CHOICE', payload, {
+        eventId: queued?.id,
+      });
       await this.maybeSendFeedback(voterJid, payload);
     }
   }

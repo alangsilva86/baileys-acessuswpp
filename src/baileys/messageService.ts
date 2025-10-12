@@ -17,6 +17,7 @@ import {
   getNormalizedMessageContent,
 } from './messageUtils.js';
 import type {
+  BrokerEvent,
   BrokerEventDirection,
   BrokerEventPayload,
   BrokerEventStore,
@@ -658,16 +659,24 @@ export class MessageService {
       try {
         const eventPayload = this.createStructuredPayload(message, 'inbound');
 
+        let queued: BrokerEvent | null = null;
         if (this.eventStore) {
-          this.eventStore.enqueue({
+          queued = this.eventStore.enqueue({
             instanceId: this.instanceId,
             direction: 'inbound',
             type: 'MESSAGE_INBOUND',
             payload: eventPayload,
+            delivery: {
+              state: 'pending',
+              attempts: 0,
+              lastAttemptAt: null,
+            },
           });
         }
 
-        await this.webhook.emit('MESSAGE_INBOUND', eventPayload);
+        await this.webhook.emit('MESSAGE_INBOUND', eventPayload, {
+          eventId: queued?.id,
+        });
       } catch (err) {
         this.logger.warn({ err }, 'message.inbound.emit.failed');
       }
@@ -722,16 +731,24 @@ export class MessageService {
 
     const eventPayload = this.createStructuredPayload(message, 'outbound', overrides);
 
+    let queued: BrokerEvent | null = null;
     if (this.eventStore) {
-      this.eventStore.enqueue({
+      queued = this.eventStore.enqueue({
         instanceId: this.instanceId,
         direction: 'outbound',
         type: 'MESSAGE_OUTBOUND',
         payload: eventPayload,
+        delivery: {
+          state: 'pending',
+          attempts: 0,
+          lastAttemptAt: null,
+        },
       });
     }
 
-    await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload);
+    await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload, {
+      eventId: queued?.id,
+    });
   }
 
   private createStructuredPayload(

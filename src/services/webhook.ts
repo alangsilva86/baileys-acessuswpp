@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance } from 'axios';
 import pino from 'pino';
 import { buildSignature } from '../utils.js';
+import type { BrokerEventStore, EventDeliveryState } from '../broker/eventStore.js';
 
 const DEFAULT_WEBHOOK_API_KEY = '57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce';
 
@@ -23,6 +24,13 @@ export interface WebhookClientOptions {
   logger?: Logger;
   instanceId?: string;
   httpClient?: HttpClient;
+  eventStore?: BrokerEventStore;
+}
+
+export interface WebhookEmitOptions {
+  eventId?: string | null;
+  instanceId?: string | null;
+  meta?: Record<string, unknown>;
 }
 
 export class WebhookClient {
@@ -32,6 +40,7 @@ export class WebhookClient {
   private readonly logger: Logger;
   private readonly http: HttpClient;
   private readonly instanceId?: string;
+  private readonly eventStore?: BrokerEventStore;
 
   constructor(options: WebhookClientOptions = {}) {
     this.url = options.url ?? process.env.WEBHOOK_URL ?? null;
@@ -46,12 +55,15 @@ export class WebhookClient {
     this.logger = options.logger ?? pino({ level: process.env.LOG_LEVEL ?? 'info' });
     this.instanceId = options.instanceId;
     this.http = options.httpClient ?? axios.create({ timeout: 5000 });
+    this.eventStore = options.eventStore;
   }
 
-  async emit<T>(event: string, payload: T): Promise<void> {
+  async emit<T>(event: string, payload: T, options: WebhookEmitOptions = {}): Promise<void> {
     if (!this.url) return;
 
-    const instanceId = this.instanceId ?? 'unknown';
+    const instanceId = options.instanceId ?? this.instanceId ?? 'unknown';
+    const eventId = options.eventId ?? null;
+
     const body: WebhookEventPayload<T> = {
       event,
       instanceId,
@@ -69,13 +81,74 @@ export class WebhookClient {
       headers['x-signature'] = buildSignature(serialized, signatureSecret);
     }
 
+    const logAttempt = (
+      state: EventDeliveryState['state'],
+      attempt: number,
+      extra: {
+        status?: number | null;
+        statusText?: string | null;
+        error?: Record<string, unknown> | null;
+        responseBody?: string | null;
+      } = {},
+    ) => {
+      if (this.eventStore && eventId) {
+        this.eventStore.markDelivery(eventId, (current) => ({
+          state,
+          attempts: (current?.attempts ?? 0) + 1,
+          lastAttemptAt: Date.now(),
+          lastStatus: extra.status ?? current?.lastStatus,
+          lastError:
+            state === 'success'
+              ? null
+              : {
+                  message: extra.error?.message
+                    ? String(extra.error.message)
+                    : current?.lastError?.message ?? 'Erro desconhecido',
+                  status: extra.error?.status ?? extra.status ?? current?.lastError?.status,
+                  statusText: extra.error?.statusText ?? current?.lastError?.statusText,
+                  responseBody:
+                    extra.responseBody ??
+                    (typeof extra.error?.responseBody === 'string'
+                      ? extra.error.responseBody
+                      : current?.lastError?.responseBody),
+                },
+        }));
+      }
+
+      if (this.eventStore) {
+        this.eventStore.enqueue({
+          instanceId,
+          direction: 'system',
+          type: 'WEBHOOK_DELIVERY',
+          payload: {
+            event,
+            eventId,
+            attempt,
+            maxAttempts: RETRY_SCHEDULE_MS.length,
+            state,
+            status: extra.status ?? null,
+            statusText: extra.statusText ?? null,
+            error: extra.error ?? null,
+            responseBody: extra.responseBody ?? null,
+            meta: options.meta ?? null,
+            body,
+          },
+          delivery: null,
+        });
+      }
+    };
+
     for (let attempt = 0; attempt < RETRY_SCHEDULE_MS.length; attempt += 1) {
       if (attempt > 0) {
         await delay(RETRY_SCHEDULE_MS[attempt]);
       }
 
       try {
-        await this.http.post(this.url, serialized, { headers });
+        const response = await this.http.post(this.url, serialized, { headers });
+        logAttempt('success', attempt + 1, {
+          status: response?.status ?? 200,
+          statusText: response?.statusText ?? 'OK',
+        });
         return;
       } catch (err) {
         const sanitizedError = this.sanitizeError(err);
@@ -89,6 +162,15 @@ export class WebhookClient {
 
         const message = attempt === RETRY_SCHEDULE_MS.length - 1 ? 'webhook.emit.failed' : 'webhook.emit.retry';
         this.logger.warn(context, message);
+
+        const state = attempt === RETRY_SCHEDULE_MS.length - 1 ? 'failed' : 'retry';
+        logAttempt(state, attempt + 1, {
+          status: (sanitizedError.status as number | undefined) ?? null,
+          statusText: (sanitizedError.statusText as string | undefined) ?? null,
+          error: sanitizedError,
+          responseBody:
+            typeof sanitizedError.responseBody === 'string' ? sanitizedError.responseBody : undefined,
+        });
 
         if (attempt === RETRY_SCHEDULE_MS.length - 1) break;
       }

@@ -127,9 +127,11 @@ const LOG_DIRECTION_META = {
   system: { label: 'System', className: 'bg-slate-200 text-slate-700' },
 };
 
-const LOG_ACK_META = {
-  true: { label: 'Ack', className: 'bg-emerald-100 text-emerald-700' },
-  false: { label: 'Pendente', className: 'bg-amber-100 text-amber-700' },
+const DELIVERY_STATE_META = {
+  pending: { label: 'Webhook pendente', className: 'bg-amber-100 text-amber-700' },
+  retry: { label: 'Reenvio agendado', className: 'bg-amber-100 text-amber-700' },
+  success: { label: 'Webhook entregue', className: 'bg-emerald-100 text-emerald-700' },
+  failed: { label: 'Webhook falhou', className: 'bg-rose-100 text-rose-700' },
 };
 
 let lastLogsSignature = '';
@@ -281,11 +283,37 @@ function formatRelativeTime(iso) {
 function formatLogTimestamp(event) {
   const ts = event?.payload?.metadata?.timestamp;
   if (ts) return formatDateTime(ts);
+
+  const webhookTs = event?.payload?.body?.timestamp;
+  if (webhookTs != null) {
+    const secs = Number(webhookTs);
+    if (Number.isFinite(secs)) {
+      return formatDateTime(new Date(secs * 1000).toISOString());
+    }
+  }
+
   if (event?.createdAt) return formatDateTime(new Date(event.createdAt).toISOString());
   return '';
 }
 
-function summarizeLogMessage(payload) {
+function summarizeLogMessage(event) {
+  const payload = event?.payload;
+  if (!payload || typeof payload !== 'object') return '';
+
+  if (event?.type === 'WEBHOOK_DELIVERY') {
+    const state = (payload.state || '').toString();
+    const attempt = Number(payload.attempt) || 0;
+    const maxAttempts = Number(payload.maxAttempts) || null;
+    const status = payload.status != null ? `HTTP ${payload.status}` : '';
+    const pieces = [
+      payload.event ? `Webhook ${payload.event}` : 'Webhook',
+      state ? `estado: ${state}` : '',
+      attempt ? `tentativa ${attempt}${maxAttempts ? `/${maxAttempts}` : ''}` : '',
+      status,
+    ].filter(Boolean);
+    return pieces.join(' • ');
+  }
+
   if (!payload || typeof payload !== 'object') return '';
   const message = payload.message || {};
   if (message.text) return String(message.text).slice(0, 140);
@@ -294,6 +322,62 @@ function summarizeLogMessage(payload) {
   if (message.interactive?.type) return `Interativo: ${message.interactive.type}`;
   if (message.type) return `Tipo: ${message.type}`;
   return '';
+}
+
+function extractDeliveryInfo(event) {
+  if (event?.delivery) {
+    return {
+      state: event.delivery.state,
+      attempts: event.delivery.attempts,
+      lastAttemptAt: event.delivery.lastAttemptAt,
+      lastStatus: event.delivery.lastStatus ?? null,
+      lastError: event.delivery.lastError ?? null,
+    };
+  }
+
+  if (event?.type === 'WEBHOOK_DELIVERY') {
+    const payload = event.payload || {};
+    return {
+      state: payload.state || 'pending',
+      attempts: Number(payload.attempt) || 0,
+      lastAttemptAt:
+        event.createdAt != null && Number.isFinite(Number(event.createdAt))
+          ? Number(event.createdAt)
+          : null,
+      lastStatus: payload.status ?? null,
+      lastError: payload.error ?? null,
+      maxAttempts: Number(payload.maxAttempts) || null,
+    };
+  }
+
+  return null;
+}
+
+function buildDeliveryBadge(event) {
+  const info = extractDeliveryInfo(event);
+  if (!info) return null;
+  const meta = DELIVERY_STATE_META[info.state] || DELIVERY_STATE_META.pending;
+  const badge = document.createElement('span');
+  badge.className = 'px-2 py-0.5 rounded-full text-[11px] ' + meta.className;
+  const attemptsText = info.attempts
+    ? ` (${info.attempts} tentativa${info.attempts > 1 ? 's' : ''})`
+    : '';
+  badge.textContent = meta.label + attemptsText;
+
+  const parts = [];
+  if (info.lastStatus) parts.push(`HTTP ${info.lastStatus}`);
+  if (info.lastError?.message && info.state !== 'success') parts.push(info.lastError.message);
+  if (info.lastAttemptAt) parts.push(`Última: ${formatDateTime(new Date(info.lastAttemptAt).toISOString())}`);
+  if (parts.length) badge.title = parts.join(' • ');
+
+  return badge;
+}
+
+function extractContactInfo(event) {
+  if (event?.payload?.contact) return event.payload.contact;
+  const webhookContact = event?.payload?.body?.payload?.contact;
+  if (webhookContact) return webhookContact;
+  return null;
 }
 
 function renderLogs(events) {
@@ -319,21 +403,26 @@ function renderLogs(events) {
     left.className = 'flex items-center gap-2';
 
     const directionMeta = LOG_DIRECTION_META[event.direction] || LOG_DIRECTION_META.system;
-    const badge = document.createElement('span');
-    badge.className = 'px-2 py-0.5 rounded-full text-xs ' + directionMeta.className;
-    badge.textContent = directionMeta.label;
+    const directionBadge = document.createElement('span');
+    directionBadge.className = 'px-2 py-0.5 rounded-full text-xs ' + directionMeta.className;
+    directionBadge.textContent = directionMeta.label;
+    left.appendChild(directionBadge);
 
-    const typeSpan = document.createElement('span');
-    typeSpan.textContent = event.type || '—';
+    const typeBadge = document.createElement('span');
+    typeBadge.textContent = event.type || '—';
+    left.appendChild(typeBadge);
 
-    const ackMeta = LOG_ACK_META[String(Boolean(event.acknowledged))] || LOG_ACK_META.false;
-    const ackBadge = document.createElement('span');
-    ackBadge.className = 'px-2 py-0.5 rounded-full text-[11px] ' + ackMeta.className;
-    ackBadge.textContent = ackMeta.label;
-
-    left.appendChild(badge);
-    left.appendChild(typeSpan);
-    left.appendChild(ackBadge);
+    const deliveryBadge = buildDeliveryBadge(event);
+    if (deliveryBadge) {
+      left.appendChild(deliveryBadge);
+    } else {
+      const ackBadge = document.createElement('span');
+      ackBadge.className =
+        'px-2 py-0.5 rounded-full text-[11px] ' +
+        (event.acknowledged ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700');
+      ackBadge.textContent = event.acknowledged ? 'Ack recebido' : 'Sem ack';
+      left.appendChild(ackBadge);
+    }
 
     const ts = document.createElement('span');
     ts.className = 'text-xs text-slate-500';
@@ -345,17 +434,7 @@ function renderLogs(events) {
     const body = document.createElement('div');
     body.className = 'px-3 pb-3 pt-1 space-y-2 text-sm text-slate-600';
 
-    const contactInfo = document.createElement('div');
-    contactInfo.className = 'text-xs text-slate-500';
-    const contact = event?.payload?.contact || {};
-    const parts = [];
-    if (contact.displayName) parts.push(`Contato: ${contact.displayName}`);
-    if (contact.phone) parts.push(`Telefone: ${contact.phone}`);
-    if (contact.remoteJid) parts.push(`Chat: ${contact.remoteJid}`);
-    if (!parts.length) parts.push('Contato não identificado');
-    contactInfo.textContent = parts.join(' • ');
-
-    const snippetText = summarizeLogMessage(event.payload);
+    const snippetText = summarizeLogMessage(event);
     if (snippetText) {
       const snippet = document.createElement('p');
       snippet.className = 'text-sm text-slate-600';
@@ -363,7 +442,32 @@ function renderLogs(events) {
       body.appendChild(snippet);
     }
 
-    body.appendChild(contactInfo);
+    const contact = extractContactInfo(event);
+    if (contact) {
+      const contactInfo = document.createElement('div');
+      contactInfo.className = 'text-xs text-slate-500';
+      const parts = [];
+      if (contact.displayName) parts.push(`Contato: ${contact.displayName}`);
+      if (contact.phone) parts.push(`Telefone: ${contact.phone}`);
+      if (contact.remoteJid) parts.push(`Chat: ${contact.remoteJid}`);
+      if (!parts.length) parts.push('Contato não identificado');
+      contactInfo.textContent = parts.join(' • ');
+      body.appendChild(contactInfo);
+    }
+
+    const deliveryInfo = extractDeliveryInfo(event);
+    if (deliveryInfo) {
+      const deliveryDetails = document.createElement('div');
+      deliveryDetails.className = 'text-xs text-slate-500';
+      const parts = [`Estado: ${deliveryInfo.state}`];
+      if (deliveryInfo.attempts) parts.push(`Tentativas: ${deliveryInfo.attempts}`);
+      if (deliveryInfo.lastStatus) parts.push(`HTTP: ${deliveryInfo.lastStatus}`);
+      if (deliveryInfo.lastError?.message && deliveryInfo.state !== 'success') {
+        parts.push(`Erro: ${deliveryInfo.lastError.message}`);
+      }
+      deliveryDetails.textContent = parts.join(' • ');
+      body.appendChild(deliveryDetails);
+    }
 
     const pre = document.createElement('pre');
     pre.className = 'text-xs bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto';
@@ -1245,7 +1349,13 @@ async function refreshLogs(options = {}) {
     const params = new URLSearchParams({ limit: '20' });
     const data = await fetchJSON('/instances/' + iid + '/logs?' + params.toString(), true);
     const events = Array.isArray(data?.events) ? data.events : [];
-    const signature = events.map(ev => `${ev.id}:${ev.acknowledged ? 1 : 0}`).join('|');
+    const signature = events
+      .map((ev) => {
+        const delivery = extractDeliveryInfo(ev);
+        const deliveryKey = delivery ? `${delivery.state}:${delivery.attempts}:${delivery.lastStatus ?? ''}` : '';
+        return `${ev.id}:${ev.acknowledged ? 1 : 0}:${deliveryKey}`;
+      })
+      .join('|');
     if (signature !== lastLogsSignature) {
       renderLogs(events);
       lastLogsSignature = signature;
