@@ -45,6 +45,11 @@ const els = {
   sendOut: document.getElementById('sendOut'),
   msgCounter: document.getElementById('msgCounter'),
 
+  // Logs recentes
+  btnRefreshLogs: document.getElementById('btnRefreshLogs'),
+  logsList: document.getElementById('logsList'),
+  logsEmpty: document.getElementById('logsEmpty'),
+
   // Modal
   modalDelete: document.getElementById('modalDelete'),
   modalInstanceName: document.getElementById('modalInstanceName'),
@@ -116,6 +121,19 @@ const NOTE_STATE = {
 
 const REFRESH_INTERVAL_MS = 5000;
 
+const LOG_DIRECTION_META = {
+  inbound: { label: 'Inbound', className: 'bg-emerald-100 text-emerald-700' },
+  outbound: { label: 'Outbound', className: 'bg-sky-100 text-sky-700' },
+  system: { label: 'System', className: 'bg-slate-200 text-slate-700' },
+};
+
+const LOG_ACK_META = {
+  true: { label: 'Ack', className: 'bg-emerald-100 text-emerald-700' },
+  false: { label: 'Pendente', className: 'bg-amber-100 text-amber-700' },
+};
+
+let lastLogsSignature = '';
+
 /* ---------- Helpers UI ---------- */
 const BADGE_STYLES = {
   'status-connected': 'bg-emerald-100 text-emerald-800',
@@ -174,6 +192,13 @@ function setCardsLoading(isLoading) {
 
 function setMetricsLoading(isLoading) {
   toggleHidden(els.metricsSkeleton, !isLoading);
+}
+
+function resetLogs() {
+  if (!els.logsList || !els.logsEmpty) return;
+  els.logsList.textContent = '';
+  toggleHidden(els.logsEmpty, false);
+  lastLogsSignature = '';
 }
 
 function setQrState(state, message) {
@@ -251,6 +276,106 @@ function formatRelativeTime(iso) {
   if (absSec < 3600) return relativeTimeFmt.format(Math.round(diffSec / 60), 'minute');
   if (absSec < 86400) return relativeTimeFmt.format(Math.round(diffSec / 3600), 'hour');
   return relativeTimeFmt.format(Math.round(diffSec / 86400), 'day');
+}
+
+function formatLogTimestamp(event) {
+  const ts = event?.payload?.metadata?.timestamp;
+  if (ts) return formatDateTime(ts);
+  if (event?.createdAt) return formatDateTime(new Date(event.createdAt).toISOString());
+  return '';
+}
+
+function summarizeLogMessage(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  const message = payload.message || {};
+  if (message.text) return String(message.text).slice(0, 140);
+  if (message.media?.caption) return String(message.media.caption).slice(0, 140);
+  if (payload.error) return String(payload.error).slice(0, 140);
+  if (message.interactive?.type) return `Interativo: ${message.interactive.type}`;
+  if (message.type) return `Tipo: ${message.type}`;
+  return '';
+}
+
+function renderLogs(events) {
+  if (!els.logsList || !els.logsEmpty) return;
+  els.logsList.textContent = '';
+
+  if (!events.length) {
+    toggleHidden(els.logsEmpty, false);
+    return;
+  }
+
+  toggleHidden(els.logsEmpty, true);
+  const fragment = document.createDocumentFragment();
+
+  events.forEach((event) => {
+    const details = document.createElement('details');
+    details.className = 'bg-slate-50 border border-slate-200 rounded-xl overflow-hidden';
+
+    const summary = document.createElement('summary');
+    summary.className = 'flex items-center justify-between gap-3 px-3 py-2 cursor-pointer select-none text-sm font-medium text-slate-700';
+
+    const left = document.createElement('span');
+    left.className = 'flex items-center gap-2';
+
+    const directionMeta = LOG_DIRECTION_META[event.direction] || LOG_DIRECTION_META.system;
+    const badge = document.createElement('span');
+    badge.className = 'px-2 py-0.5 rounded-full text-xs ' + directionMeta.className;
+    badge.textContent = directionMeta.label;
+
+    const typeSpan = document.createElement('span');
+    typeSpan.textContent = event.type || '—';
+
+    const ackMeta = LOG_ACK_META[String(Boolean(event.acknowledged))] || LOG_ACK_META.false;
+    const ackBadge = document.createElement('span');
+    ackBadge.className = 'px-2 py-0.5 rounded-full text-[11px] ' + ackMeta.className;
+    ackBadge.textContent = ackMeta.label;
+
+    left.appendChild(badge);
+    left.appendChild(typeSpan);
+    left.appendChild(ackBadge);
+
+    const ts = document.createElement('span');
+    ts.className = 'text-xs text-slate-500';
+    ts.textContent = formatLogTimestamp(event);
+
+    summary.appendChild(left);
+    summary.appendChild(ts);
+
+    const body = document.createElement('div');
+    body.className = 'px-3 pb-3 pt-1 space-y-2 text-sm text-slate-600';
+
+    const contactInfo = document.createElement('div');
+    contactInfo.className = 'text-xs text-slate-500';
+    const contact = event?.payload?.contact || {};
+    const parts = [];
+    if (contact.displayName) parts.push(`Contato: ${contact.displayName}`);
+    if (contact.phone) parts.push(`Telefone: ${contact.phone}`);
+    if (contact.remoteJid) parts.push(`Chat: ${contact.remoteJid}`);
+    if (!parts.length) parts.push('Contato não identificado');
+    contactInfo.textContent = parts.join(' • ');
+
+    const snippetText = summarizeLogMessage(event.payload);
+    if (snippetText) {
+      const snippet = document.createElement('p');
+      snippet.className = 'text-sm text-slate-600';
+      snippet.textContent = snippetText;
+      body.appendChild(snippet);
+    }
+
+    body.appendChild(contactInfo);
+
+    const pre = document.createElement('pre');
+    pre.className = 'text-xs bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto';
+    pre.textContent = JSON.stringify(event.payload, null, 2);
+    body.appendChild(pre);
+
+    details.appendChild(summary);
+    details.appendChild(body);
+    fragment.appendChild(details);
+  });
+
+  els.logsList.appendChild(fragment);
 }
 
 const NOTE_STATUS_VARIANTS = {
@@ -527,6 +652,7 @@ async function refreshInstances(options = {}) {
         NOTE_STATE.updatedAt = null;
         updateNoteMetaText();
         resetChart();
+        resetLogs();
         toggleHidden(els.qrImg, true);
         setQrState('idle', 'Selecione uma instância para visualizar o QR.');
         setBadgeState('info', 'Crie uma instância para começar', 4000);
@@ -693,6 +819,7 @@ async function refreshSelected(options = {}) {
     setQrState('idle', 'Nenhuma instância selecionada.');
     if (els.noteCard) els.noteCard.classList.add('hidden');
     resetChart();
+    resetLogs();
     hasLoadedSelected = false;
     return;
   }
@@ -751,6 +878,8 @@ async function refreshSelected(options = {}) {
     } else {
       resetChart();
     }
+
+    await refreshLogs({ silent: true });
 
     hasLoadedSelected = true;
   } catch (err) {
@@ -1048,7 +1177,7 @@ els.btnPair.onclick = async () => {
 };
 
 /* Envio rápido */
-els.btnSend.onclick = async () => {
+if (els.btnSend) els.btnSend.onclick = async () => {
   localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
   const iid = els.selInstance.value;
   if (!iid) { setSendOut('Selecione uma instância antes de enviar.', 'error'); showError('Selecione uma instância.'); return; }
@@ -1101,10 +1230,42 @@ els.btnSend.onclick = async () => {
   }
 };
 
+async function refreshLogs(options = {}) {
+  if (!els.logsList || !els.logsEmpty) return;
+  const { silent = false } = options;
+  const iid = els.selInstance?.value;
+  if (!iid) {
+    resetLogs();
+    return;
+  }
+
+  if (!silent && els.btnRefreshLogs) setBusy(els.btnRefreshLogs, true, 'Atualizando…');
+
+  try {
+    const params = new URLSearchParams({ limit: '20' });
+    const data = await fetchJSON('/instances/' + iid + '/logs?' + params.toString(), true);
+    const events = Array.isArray(data?.events) ? data.events : [];
+    const signature = events.map(ev => `${ev.id}:${ev.acknowledged ? 1 : 0}`).join('|');
+    if (signature !== lastLogsSignature) {
+      renderLogs(events);
+      lastLogsSignature = signature;
+    }
+  } catch (err) {
+    console.error('[dashboard] erro ao carregar logs', err);
+    if (!silent) showError('Falha ao carregar eventos recentes');
+  } finally {
+    if (!silent && els.btnRefreshLogs) setBusy(els.btnRefreshLogs, false);
+  }
+}
+
+if (els.btnRefreshLogs) {
+  els.btnRefreshLogs.addEventListener('click', () => refreshLogs({ silent: false }));
+}
+
 /* Boot do dashboard */
 initChart();
 refreshInstances({ withSkeleton: true });
 setInterval(() => {
   refreshInstances({ silent: true }).catch(err => console.debug('[dashboard] auto-refresh falhou', err));
+  refreshLogs({ silent: true }).catch(err => console.debug('[dashboard] auto-refresh logs falhou', err));
 }, REFRESH_INTERVAL_MS);
-

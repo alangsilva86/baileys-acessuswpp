@@ -696,6 +696,29 @@ router.post('/:iid/events/ack', (req, res) => {
   res.json(result);
 });
 
+router.get('/:iid/logs', (req, res) => {
+  const inst = getInstance(req.params.iid);
+  if (!inst) {
+    res.status(404).json({ error: 'instance_not_found' });
+    return;
+  }
+
+  const limit = Number(req.query.limit);
+  const direction =
+    req.query.direction === 'inbound' || req.query.direction === 'outbound' || req.query.direction === 'system'
+      ? req.query.direction
+      : undefined;
+
+  const events = brokerEventStore.recent({
+    instanceId: inst.id,
+    type: typeof req.query.type === 'string' ? req.query.type : undefined,
+    direction,
+    limit: Number.isFinite(limit) ? limit : 20,
+  });
+
+  res.json({ events });
+});
+
 router.get('/:iid/metrics', (req, res) => {
   const inst = getInstance(req.params.iid);
   if (!inst) {

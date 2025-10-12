@@ -86,6 +86,24 @@ export class BrokerEventStore {
     return filtered.slice(0, limit).map((event) => ({ ...event }));
   }
 
+  recent(options: BrokerEventListOptions = {}): BrokerEvent[] {
+    const limitRaw = Number(options.limit);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(Math.floor(limitRaw), MAX_LIMIT))
+      : DEFAULT_LIMIT;
+
+    const results: BrokerEvent[] = [];
+    for (let i = this.events.length - 1; i >= 0 && results.length < limit; i -= 1) {
+      const event = this.events[i];
+      if (options.instanceId && event.instanceId !== options.instanceId) continue;
+      if (options.type && event.type !== options.type) continue;
+      if (options.direction && event.direction !== options.direction) continue;
+      results.push({ ...event });
+    }
+
+    return results;
+  }
+
   ack(ids: string[]): BrokerEventAckResult {
     const acknowledged: string[] = [];
     const missing: string[] = [];
