@@ -7,6 +7,17 @@ const DEFAULT_WEBHOOK_API_KEY = '57c1acd47dc2524ab06dc4640443d755072565ebed06e1a
 
 const RETRY_SCHEDULE_MS = [0, 1000, 3000, 10_000, 30_000, 120_000] as const;
 
+function toNumberOrNull(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 export interface WebhookEventPayload<T> {
   event: string;
   instanceId: string;
@@ -85,34 +96,69 @@ export class WebhookClient {
       state: EventDeliveryState['state'],
       attempt: number,
       extra: {
-        status?: number | null;
-        statusText?: string | null;
+        status?: unknown;
+        statusText?: unknown;
         error?: Record<string, unknown> | null;
         responseBody?: string | null;
       } = {},
     ) => {
+      const numericStatus = toNumberOrNull(extra.status);
+      const normalizedStatusText =
+        typeof extra.statusText === 'string' ? extra.statusText : undefined;
+
       if (this.eventStore && eventId) {
-        this.eventStore.markDelivery(eventId, (current) => ({
-          state,
-          attempts: (current?.attempts ?? 0) + 1,
-          lastAttemptAt: Date.now(),
-          lastStatus: extra.status ?? current?.lastStatus,
-          lastError:
-            state === 'success'
-              ? null
-              : {
-                  message: extra.error?.message
-                    ? String(extra.error.message)
-                    : current?.lastError?.message ?? 'Erro desconhecido',
-                  status: extra.error?.status ?? extra.status ?? current?.lastError?.status,
-                  statusText: extra.error?.statusText ?? current?.lastError?.statusText,
-                  responseBody:
-                    extra.responseBody ??
-                    (typeof extra.error?.responseBody === 'string'
-                      ? extra.error.responseBody
-                      : current?.lastError?.responseBody),
-                },
-        }));
+        this.eventStore.markDelivery(eventId, (current) => {
+          const attempts = (current?.attempts ?? 0) + 1;
+          const lastAttemptAt = Date.now();
+          const lastStatus = numericStatus ?? current?.lastStatus ?? null;
+
+          if (state === 'success') {
+            return {
+              state,
+              attempts,
+              lastAttemptAt,
+              lastStatus,
+              lastError: null,
+            };
+          }
+
+          const rawError = extra.error ?? {};
+          const message =
+            typeof rawError.message === 'string'
+              ? rawError.message
+              : current?.lastError?.message ?? 'Erro desconhecido';
+          const errorStatus =
+            toNumberOrNull(rawError.status) ??
+            numericStatus ??
+            (current?.lastError?.status ?? null);
+
+          const statusTextValue =
+            typeof rawError.statusText === 'string'
+              ? rawError.statusText
+              : current?.lastError?.statusText;
+
+          const responseBodyValue =
+            typeof extra.responseBody === 'string'
+              ? extra.responseBody
+              : typeof rawError.responseBody === 'string'
+              ? rawError.responseBody
+              : current?.lastError?.responseBody;
+
+          const lastError: Exclude<EventDeliveryState['lastError'], undefined> = {
+            message,
+          };
+          if (errorStatus != null) lastError.status = errorStatus;
+          if (statusTextValue) lastError.statusText = statusTextValue;
+          if (responseBodyValue) lastError.responseBody = responseBodyValue;
+
+          return {
+            state,
+            attempts,
+            lastAttemptAt,
+            lastStatus,
+            lastError,
+          };
+        });
       }
 
       if (this.eventStore) {
@@ -126,8 +172,8 @@ export class WebhookClient {
             attempt,
             maxAttempts: RETRY_SCHEDULE_MS.length,
             state,
-            status: extra.status ?? null,
-            statusText: extra.statusText ?? null,
+            status: numericStatus,
+            statusText: normalizedStatusText ?? null,
             error: extra.error ?? null,
             responseBody: extra.responseBody ?? null,
             meta: options.meta ?? null,
