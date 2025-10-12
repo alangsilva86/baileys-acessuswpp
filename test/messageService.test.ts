@@ -267,3 +267,172 @@ test('MessageService omits phone for group and broadcast messages without E.164 
   assert.equal(broadcastPayload.contact.isGroup, false);
   assert.equal(broadcastPayload.contact.phone, null);
 });
+
+test('MessageService emits structured outbound payload for text messages', async () => {
+  const eventStore = new BrokerEventStore();
+  const webhook = new FakeWebhook();
+  const sendCalls: Array<{ jid: string; content: any }> = [];
+  const remoteJid = '551199999999@s.whatsapp.net';
+  const outboundMessage = {
+    key: {
+      id: 'OUT-TEXT-1',
+      remoteJid,
+      fromMe: true,
+    },
+    messageTimestamp: 1700000100,
+    pushName: 'Agente CS',
+    message: {
+      conversation: 'Olá lead!',
+    },
+  } as unknown as WAMessage;
+
+  const sock = {
+    async sendMessage(jid: string, content: any) {
+      sendCalls.push({ jid, content });
+      return outboundMessage;
+    },
+  } as unknown as WASocket;
+
+  const service = new MessageService(
+    sock,
+    webhook as unknown as WebhookClient,
+    { warn: () => {} } as unknown as pino.Logger,
+    { eventStore, instanceId: 'test-instance' },
+  );
+
+  const response = await service.sendText(remoteJid, 'Olá lead!');
+
+  assert.equal(response, outboundMessage);
+  assert.equal(sendCalls.length, 1);
+  assert.deepStrictEqual(sendCalls[0], {
+    jid: remoteJid,
+    content: { text: 'Olá lead!' },
+  });
+
+  assert.equal(webhook.events.length, 1);
+  const { event, payload } = webhook.events[0] as { event: string; payload: any };
+  assert.equal(event, 'MESSAGE_OUTBOUND');
+  assert.deepStrictEqual(payload.contact, {
+    owner: 'device',
+    remoteJid,
+    participant: null,
+    phone: '+551199999999',
+    displayName: 'Agente CS',
+    isGroup: false,
+  });
+  assert.deepStrictEqual(payload.message, {
+    id: 'OUT-TEXT-1',
+    chatId: remoteJid,
+    type: 'text',
+    text: 'Olá lead!',
+  });
+  assert.deepStrictEqual(payload.metadata, {
+    timestamp: new Date(1700000100 * 1000).toISOString(),
+    broker: {
+      direction: 'outbound',
+      type: 'baileys',
+    },
+    source: 'baileys-acessus',
+  });
+
+  const stored = eventStore.list({ limit: 5 });
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0]?.type, 'MESSAGE_OUTBOUND');
+  assert.equal(stored[0]?.direction, 'outbound');
+  assert.deepStrictEqual(stored[0]?.payload, payload);
+});
+
+test('MessageService inclui metadados de mídia ao enviar para o LeadEngine', async () => {
+  const eventStore = new BrokerEventStore();
+  const webhook = new FakeWebhook();
+  const sendCalls: Array<{ jid: string; content: any }> = [];
+  const remoteJid = '551199999999@s.whatsapp.net';
+  const base64Data = Buffer.from('fake image data');
+  const outboundMessage = {
+    key: {
+      id: 'OUT-MEDIA-1',
+      remoteJid,
+      fromMe: true,
+    },
+    messageTimestamp: 1700000200,
+    pushName: 'Agente CS',
+    message: {
+      imageMessage: {
+        caption: 'Legenda original',
+      },
+    },
+  } as unknown as WAMessage;
+
+  const sock = {
+    async sendMessage(jid: string, content: any) {
+      sendCalls.push({ jid, content });
+      return outboundMessage;
+    },
+  } as unknown as WASocket;
+
+  const service = new MessageService(
+    sock,
+    webhook as unknown as WebhookClient,
+    { warn: () => {} } as unknown as pino.Logger,
+    { eventStore, instanceId: 'test-instance' },
+  );
+
+  await service.sendMedia(
+    remoteJid,
+    'image',
+    {
+      base64: `data:image/png;base64,${base64Data.toString('base64')}`,
+      fileName: 'catalogo.png',
+    },
+    {
+      caption: 'Segue o catálogo',
+      mimetype: 'image/png',
+    },
+  );
+
+  assert.equal(sendCalls.length, 1);
+  assert.equal(sendCalls[0]?.jid, remoteJid);
+  assert.ok(sendCalls[0]?.content?.image, 'expected image payload to be sent');
+
+  assert.equal(webhook.events.length, 1);
+  const { event, payload } = webhook.events[0] as { event: string; payload: any };
+  assert.equal(event, 'MESSAGE_OUTBOUND');
+
+  assert.deepStrictEqual(payload.contact, {
+    owner: 'device',
+    remoteJid,
+    participant: null,
+    phone: '+551199999999',
+    displayName: 'Agente CS',
+    isGroup: false,
+  });
+
+  assert.deepStrictEqual(payload.message, {
+    id: 'OUT-MEDIA-1',
+    chatId: remoteJid,
+    type: 'media',
+    text: 'Segue o catálogo',
+    media: {
+      mediaType: 'image',
+      mimetype: 'image/png',
+      fileName: 'catalogo.png',
+      size: base64Data.length,
+      caption: 'Segue o catálogo',
+    },
+  });
+
+  assert.deepStrictEqual(payload.metadata, {
+    timestamp: new Date(1700000200 * 1000).toISOString(),
+    broker: {
+      direction: 'outbound',
+      type: 'baileys',
+    },
+    source: 'baileys-acessus',
+  });
+
+  const stored = eventStore.list({ limit: 5 });
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0]?.type, 'MESSAGE_OUTBOUND');
+  assert.equal(stored[0]?.direction, 'outbound');
+  assert.deepStrictEqual(stored[0]?.payload, payload);
+});
