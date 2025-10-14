@@ -34,6 +34,13 @@ app.use(
           'https://cdn.tailwindcss.com',
           'https://cdn.jsdelivr.net',
         ],
+        'connect-src': Array.from(
+          new Set([
+            ...(defaultCsp['connect-src'] ?? ["'self'"]),
+            "'self'",
+            'https://cdn.jsdelivr.net',
+          ]),
+        ),
         'img-src': [
           ...(defaultCsp['img-src'] ?? []),
           'blob:',
