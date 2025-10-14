@@ -1318,8 +1318,24 @@ if (els.btnSend) els.btnSend.onclick = async () => {
       body,
     });
     if (!response.ok) {
-      const txt = await response.text().catch(() => '');
-      throw new Error('HTTP ' + response.status + (txt ? ' — ' + txt : ''));
+      const raw = await response.text().catch(() => '');
+      let payload;
+      if (raw) {
+        try { payload = JSON.parse(raw); } catch (err) {
+          console.warn('[dashboard] erro ao interpretar resposta', err);
+        }
+      }
+      if (response.status === 503 && payload?.error === 'socket_unavailable') {
+        const details = [payload.detail, payload.message]
+          .map(v => (typeof v === 'string' ? v.trim() : ''))
+          .filter(Boolean);
+        const detailMsg = details.join(' — ') || 'Socket indisponível.';
+        setSendOut('Instância desconectada: ' + detailMsg, 'error');
+        showError('Instância desconectada. Refaça o pareamento e tente novamente.');
+        return;
+      }
+      const bodyMsg = payload?.detail || payload?.error || raw;
+      throw new Error('HTTP ' + response.status + (bodyMsg ? ' — ' + bodyMsg : ''));
     }
     const payload = await response.json().catch(() => ({}));
     setSendOut('Sucesso: ' + JSON.stringify(payload), 'success');
