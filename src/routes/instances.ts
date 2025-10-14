@@ -64,6 +64,32 @@ function auth(req: Request, res: Response, next: NextFunction): void {
 
 router.use(auth);
 
+function getErrorMessage(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const anyErr = err as Record<string, unknown>;
+    if (typeof anyErr.message === 'string' && anyErr.message.trim()) {
+      return anyErr.message;
+    }
+    if (typeof anyErr.reason === 'string' && anyErr.reason.trim()) {
+      return anyErr.reason;
+    }
+  }
+  if (typeof err === 'string') {
+    return err;
+  }
+  return 'unknown error';
+}
+
+function isSocketUnavailableError(err: unknown): boolean {
+  const message = getErrorMessage(err).toLowerCase();
+  if (!message || message === 'unknown error') return false;
+  return (
+    message.includes('connection closed') ||
+    message.includes('socket is unavailable') ||
+    message.includes('socket closed')
+  );
+}
+
 const GROUP_ACTION_STATUS_MESSAGES: Record<string, string> = {
   '200': 'ok',
   '401': 'ação não autorizada para o participante',
@@ -823,9 +849,23 @@ router.post(
     const timeoutMs = getSendTimeoutMs();
     const targetJid = entry?.jid ?? `${normalized}@s.whatsapp.net`;
 
-    const sent = (inst.context?.messageService
-      ? await inst.context.messageService.sendText(targetJid, content, { timeoutMs })
-      : await sendWithTimeout(inst, targetJid, { text: content })) as any;
+    let sent: any;
+    try {
+      sent = inst.context?.messageService
+        ? await inst.context.messageService.sendText(targetJid, content, { timeoutMs })
+        : await sendWithTimeout(inst, targetJid, { text: content });
+    } catch (err) {
+      if (isSocketUnavailableError(err)) {
+        const message = getErrorMessage(err);
+        res.status(503).json({
+          error: 'socket_unavailable',
+          detail: 'Conexão com o WhatsApp indisponível. Refaça o pareamento e tente novamente.',
+          message,
+        });
+        return;
+      }
+      throw err;
+    }
     const messageId = sent?.key?.id ?? null;
 
     inst.metrics.sent += 1;
