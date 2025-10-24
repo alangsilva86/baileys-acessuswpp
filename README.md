@@ -186,6 +186,8 @@ Voto em enquete (`POLL_CHOICE`):
     "pollId": "poll-abc",
     "question": "Qual produto?",
     "chatId": "556299999999@g.us",
+    "messageId": "BAE5F1F0E6C9",
+    "timestamp": "2024-10-11T22:45:46.000Z",
     "voterJid": "556288888888@s.whatsapp.net",
     "selectedOptions": [{ "id": "p1", "text": "Produto A" }],
     "optionsAggregates": [
