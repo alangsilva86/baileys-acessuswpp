@@ -132,6 +132,41 @@ test('onMessageUpdate enqueues metadata with messageId and ISO timestamp', async
   assert.equal(payload.contact.remoteJid, POLL_REMOTE_JID);
 });
 
+test('onMessageUpdate maps selected options without pollUpdateMessageKey', async () => {
+  const store = new PollMessageStore();
+  const pollMessage = buildPollMessage();
+  store.remember(pollMessage, 60_000);
+
+  const webhook = new FakeWebhook();
+  const logger = { warn: () => {} } as unknown as pino.Logger;
+  const sock = { user: { id: '556277777777@s.whatsapp.net' } } as unknown as WASocket;
+
+  const aggregateWithoutVoter = () => [
+    { name: 'Produto A', voters: [] as string[] },
+    { name: 'Produto B', voters: [] as string[] },
+  ];
+
+  const service = new PollService(sock, webhook as any, logger, {
+    store,
+    feedbackTemplate: null,
+    aggregateVotesFn: aggregateWithoutVoter,
+  });
+
+  const update = buildPollUpdate();
+  if (update.update?.pollUpdates?.[0]) {
+    update.update.pollUpdates[0].pollUpdateMessageKey = undefined;
+  }
+
+  await service.onMessageUpdate([update]);
+
+  assert.equal(webhook.events.length, 1, 'expected webhook to be emitted');
+  const event = webhook.events[0];
+  const payload = event.payload as any;
+  assert.deepStrictEqual(payload.selectedOptions, [
+    { id: 'Produto A', text: 'Produto A' },
+  ]);
+});
+
 test('onMessageUpdate ignores updates without messageId metadata', async () => {
   const pollMessage: WAMessage = {
     key: {
