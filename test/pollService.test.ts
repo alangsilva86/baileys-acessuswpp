@@ -22,6 +22,7 @@ function buildPollMessage(): WAMessage {
     key: {
       id: 'poll-123',
       remoteJid: POLL_REMOTE_JID,
+      participant: '556277777777@s.whatsapp.net',
     },
     messageTimestamp: 1_700_000_000,
     message: {
@@ -31,6 +32,7 @@ function buildPollMessage(): WAMessage {
           { optionName: 'Produto A' },
           { optionName: 'Produto B' },
         ],
+        encKey: new Uint8Array(Buffer.alloc(32, 5)),
       },
     },
   } as unknown as WAMessage;
@@ -69,6 +71,32 @@ function buildPollUpdate(
       pollUpdates: [pollUpdate],
     },
   } as unknown as WAMessageUpdate;
+}
+
+function buildPollUpdateMessage(
+  optionName = 'Produto A',
+  selectedHash?: Uint8Array,
+): WAMessage {
+  const update = buildPollUpdate(optionName, selectedHash);
+  const pollUpdate = update.update?.pollUpdates?.[0];
+  if (!pollUpdate) {
+    throw new Error('expected poll update payload');
+  }
+
+  const pollUpdateMessage = {
+    pollCreationMessageKey: pollUpdate.pollCreationMessageKey,
+    pollUpdateMessageKey: pollUpdate.pollUpdateMessageKey,
+    pollUpdates: update.update?.pollUpdates,
+  } as unknown as proto.Message.IPollUpdateMessage & { pollUpdates: proto.IPollUpdate[] };
+
+  return {
+    key: update.key,
+    messageTimestamp: update.messageTimestamp,
+    message: {
+      pollUpdateMessage,
+    },
+    pushName: (update as unknown as { pushName?: string }).pushName,
+  } as unknown as WAMessage;
 }
 
 class FakeWebhook {
@@ -260,6 +288,126 @@ test('onMessageUpsert stores poll creation sent from current device', async () =
   assert.equal(event, 'POLL_CHOICE');
 });
 
+test('onMessageUpsert processes poll updates and emits poll choice webhook', async () => {
+  const store = new PollMessageStore();
+  const pollMessage = buildPollMessage();
+  store.remember(pollMessage, 60_000);
+
+  const eventStore = new BrokerEventStore();
+  const webhook = new FakeWebhook();
+  const logger = { warn: () => {} } as unknown as pino.Logger;
+  const sock = { user: { id: '556277777777@s.whatsapp.net' } } as unknown as WASocket;
+
+  const service = new PollService(sock, webhook as any, logger, {
+    store,
+    eventStore,
+    instanceId: 'instance-1',
+    feedbackTemplate: null,
+    aggregateVotesFn: () => aggregateResult,
+  });
+
+  const updateMessage = buildPollUpdateMessage();
+  const upsertEvent: BaileysEventMap['messages.upsert'] = {
+    type: 'notify',
+    messages: [updateMessage],
+  };
+
+  await service.onMessageUpsert(upsertEvent);
+
+  const [queued] = eventStore.recent({ limit: 1, type: 'POLL_CHOICE' });
+  assert.ok(queued, 'expected poll choice event to be queued');
+  assert.equal(queued.payload.pollId, 'poll-123');
+
+  assert.equal(webhook.events.length, 1, 'expected webhook to be emitted');
+  const [{ event, payload }] = webhook.events as Array<{ event: string; payload: any }>;
+  assert.equal(event, 'POLL_CHOICE');
+  assert.equal(payload.voterJid, VOTER_JID);
+  assert.deepStrictEqual(payload.selectedOptions, [{ id: 'Produto A', text: 'Produto A' }]);
+});
+
+test('onMessageUpsert decrypts encrypted poll votes before aggregating', async () => {
+  const store = new PollMessageStore();
+  const pollMessage = buildPollMessage();
+  store.remember(pollMessage, 60_000);
+
+  const eventStore = new BrokerEventStore();
+  const webhook = new FakeWebhook();
+  const logger = { warn: () => {} } as unknown as pino.Logger;
+  const sock = { user: { id: '556277777777@s.whatsapp.net' } } as unknown as WASocket;
+
+  const decryptCalls: Array<{ ctx: { pollCreatorJid: string; pollMsgId: string; voterJid: string } }> = [];
+
+  const decryptStub: typeof import('@whiskeysockets/baileys/lib/Utils/process-message.js').decryptPollVote = (
+    _vote,
+    ctx,
+  ) => {
+    decryptCalls.push({ ctx });
+    return {
+      selectedOptions: [createHash('sha256').update('Produto B').digest()],
+    } as proto.Message.IPollVoteMessage;
+  };
+
+  const aggregateWithVoterOnB = () => [
+    { name: 'Produto A', voters: [] as string[] },
+    { name: 'Produto B', voters: [VOTER_JID] },
+  ];
+
+  const service = new PollService(sock, webhook as any, logger, {
+    store,
+    eventStore,
+    instanceId: 'instance-1',
+    feedbackTemplate: null,
+    aggregateVotesFn: aggregateWithVoterOnB,
+    decryptPollVoteFn: decryptStub,
+  });
+
+  const encryptedUpdate: proto.Message.IPollUpdateMessage = {
+    pollCreationMessageKey: {
+      id: 'poll-123',
+      remoteJid: POLL_REMOTE_JID,
+      participant: '556277777777@s.whatsapp.net',
+    },
+    pollUpdateMessageKey: {
+      id: 'vote-999',
+      remoteJid: POLL_REMOTE_JID,
+      participant: VOTER_JID,
+      fromMe: false,
+    },
+    vote: {
+      encPayload: Buffer.alloc(48, 9),
+      encIv: Buffer.alloc(16, 7),
+    },
+  };
+
+  const upsertEvent: BaileysEventMap['messages.upsert'] = {
+    type: 'append',
+    messages: [
+      {
+        key: {
+          id: 'poll-123',
+          remoteJid: POLL_REMOTE_JID,
+          participant: VOTER_JID,
+        },
+        messageTimestamp: 1_700_000_200,
+        message: {
+          pollUpdateMessage: encryptedUpdate,
+        },
+        pushName: 'Votante',
+      } as unknown as WAMessage,
+    ],
+  };
+
+  await service.onMessageUpsert(upsertEvent);
+
+  assert.equal(decryptCalls.length, 1, 'expected decrypt to be called once');
+  assert.equal(decryptCalls[0]?.ctx.pollMsgId, 'poll-123');
+  assert.equal(decryptCalls[0]?.ctx.voterJid, VOTER_JID);
+
+  const [{ payload }] = webhook.events as Array<{ event: string; payload: any }>;
+  assert.deepStrictEqual(payload.selectedOptions, [{ id: 'Produto B', text: 'Produto B' }]);
+  assert.equal(payload.voterJid, VOTER_JID);
+});
+
 test('onMessageUpdate ignores updates without messageId metadata', async () => {
   const pollMessage: WAMessage = {
     key: {
@@ -402,6 +550,14 @@ test('PollService emits aggregated totals for poll updates', async () => {
           {
             pollCreationMessageKey: {
               id: 'poll-message-id',
+            },
+            pollUpdateMessageKey: {
+              id: 'vote-agg-1',
+              remoteJid: '556200000000@g.us',
+              participant: '556288888888@s.whatsapp.net',
+            },
+            vote: {
+              selectedOptions: [createHash('sha256').update('Produto A').digest()],
             },
           },
         ],
