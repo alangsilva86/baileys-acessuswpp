@@ -14,6 +14,7 @@ import { getSendTimeoutMs } from '../utils.js';
 import { PollMessageStore } from './store.js';
 import type { MessageService } from './messageService.js';
 import type { BrokerEvent, BrokerEventStore } from '../broker/eventStore.js';
+import { toIsoDate } from './time.js';
 
 export interface SendPollOptions {
   selectableCount?: number;
@@ -32,6 +33,8 @@ interface PollChoiceEventPayload {
   pollId: string;
   question: string;
   chatId: string | null;
+  messageId: string;
+  timestamp: string;
   voterJid: string | null;
   selectedOptions: Array<{ id: string | null; text: string | null }>;
   optionsAggregates: Array<{ id: string | null; text: string | null; votes: number }>;
@@ -135,6 +138,11 @@ export class PollService {
         this.sock.user?.id,
       );
 
+      const messageId = update.key?.id ?? pollMessage.key?.id ?? undefined;
+      if (!messageId) continue;
+
+      const timestamp = toIsoDate(update.messageTimestamp ?? pollMessage.messageTimestamp);
+
       const voterJid = update.key?.participant ?? update.key?.remoteJid ?? null;
       const lead = mapLeadFromMessage(buildSyntheticMessageForVoter(update, pollMessage));
       const contact = buildContactPayload(lead);
@@ -153,6 +161,8 @@ export class PollService {
         pollId,
         question: extractPollQuestion(pollMessage),
         chatId: pollMessage.key?.remoteJid ?? null,
+        messageId,
+        timestamp,
         voterJid,
         selectedOptions,
         optionsAggregates,
