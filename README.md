@@ -12,7 +12,6 @@ Uma API completa para WhatsApp usando a biblioteca Baileys, com interface web pa
 - ✅ Autenticação por API Key
 - ✅ Logs estruturados com Pino
 - ✅ Suporte a QR Code e pareamento por código
-- ✅ Envio de enquetes (polls) com feedback opcional
 
 ## Instalação
 
@@ -54,12 +53,10 @@ npm start
 - `RATE_MAX_SENDS`: Máximo de mensagens por janela de tempo (padrão: 20)
 - `RATE_WINDOW_MS`: Janela de tempo para rate limiting em ms (padrão: 15000)
 - `SEND_TIMEOUT_MS`: Timeout padrão para envios ativos, aplicado tanto às rotas HTTP quanto ao `MessageService` (padrão: 25000)
-- `POLL_STORE_TTL_MS`: Tempo de retenção das mensagens de enquete (padrão: 6h)
-- `POLL_FEEDBACK_TEMPLATE`: Template opcional para resposta automática após voto em enquete
 
 ### Webhooks
 
-Defina `WEBHOOK_URL` (e opcionalmente substitua `WEBHOOK_API_KEY` / `WEBHOOK_HMAC_SECRET`) para receber eventos estruturados sempre que mensagens ou enquetes forem processadas.
+Defina `WEBHOOK_URL` (e opcionalmente substitua `WEBHOOK_API_KEY` / `WEBHOOK_HMAC_SECRET`) para receber eventos estruturados sempre que mensagens forem processadas.
 
 #### Envelope e cabeçalhos
 
@@ -175,40 +172,6 @@ Mensagem enviada (`MESSAGE_OUTBOUND`):
 }
 ```
 
-Voto em enquete (`POLL_CHOICE`):
-
-```json
-{
-  "event": "POLL_CHOICE",
-  "instanceId": "alan",
-  "timestamp": 1760219150,
-  "payload": {
-    "pollId": "poll-abc",
-    "question": "Qual produto?",
-    "chatId": "556299999999@g.us",
-    "messageId": "BAE5F1F0E6C9",
-    "timestamp": "2024-10-11T22:45:46.000Z",
-    "voterJid": "556288888888@s.whatsapp.net",
-    "selectedOptions": [{ "id": "p1", "text": "Produto A" }],
-    "optionsAggregates": [
-      { "id": "p1", "text": "Produto A", "votes": 3 },
-      { "id": "p2", "text": "Produto B", "votes": 1 }
-    ],
-    "aggregates": {
-      "totalVoters": 3,
-      "totalVotes": 4,
-      "optionTotals": [
-        { "id": "p1", "text": "Produto A", "votes": 3 },
-        { "id": "p2", "text": "Produto B", "votes": 1 }
-      ]
-    },
-    "contact": { /* dados do votante */ }
-  }
-}
-```
-
-O campo `aggregates` resume os totais atuais da enquete, indicando o número total de votantes (`totalVoters`), de votos computados (`totalVotes`) e repetindo os totais por opção em `optionTotals` para facilitar a transição de integrações que ainda utilizam `optionsAggregates`.
-
 Eventos brutos do Baileys (`WHATSAPP_MESSAGES_UPSERT` / `WHATSAPP_MESSAGES_UPDATE`) mantêm o payload no formato:
 
 ```json
@@ -217,63 +180,6 @@ Eventos brutos do Baileys (`WHATSAPP_MESSAGES_UPSERT` / `WHATSAPP_MESSAGES_UPDAT
   "raw": { /* evento original emitido pelo Baileys */ }
 }
 ```
-
-#### Endpoint de exemplo
-
-Execute `npm run example:poll-webhook` para iniciar um receptor Express que valida API key e assinatura `x-signature` com o mesmo segredo do emissor:
-
-```ts
-import 'dotenv/config';
-import crypto from 'node:crypto';
-import express from 'express';
-import pino from 'pino';
-
-const app = express();
-const PORT = Number(process.env.WEBHOOK_PORT ?? process.env.PORT ?? 3001);
-const EXPECTED_API_KEY = process.env.WEBHOOK_API_KEY;
-const HMAC_SECRET = process.env.WEBHOOK_HMAC_SECRET ?? EXPECTED_API_KEY ?? null;
-const logger = pino({ level: process.env.LOG_LEVEL ?? 'info', base: { service: 'poll-webhook-example' } });
-
-app.use(
-  express.json({
-    verify: (req, _res, buf) => {
-      (req as any).rawBody = Buffer.from(buf);
-    },
-  }),
-);
-
-function timingSafeEqual(a: Buffer, b: Buffer): boolean {
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
-app.post('/webhooks/baileys', (req, res) => {
-  if (EXPECTED_API_KEY && req.header('x-api-key') !== EXPECTED_API_KEY) {
-    logger.warn({ ip: req.ip }, 'webhook.invalid_api_key');
-    return res.status(401).json({ error: 'invalid_api_key' });
-  }
-
-  if (HMAC_SECRET) {
-    const rawBody: Buffer = (req as any).rawBody ?? Buffer.from('');
-    const expected = crypto.createHmac('sha256', HMAC_SECRET).update(rawBody).digest('hex');
-    const received = req.header('x-signature');
-    if (!received || !timingSafeEqual(Buffer.from(received), Buffer.from(expected))) {
-      logger.warn({ ip: req.ip, expected, received }, 'webhook.signature.mismatch');
-      return res.status(401).json({ error: 'invalid_signature' });
-    }
-  }
-
-  const { event, timestamp, payload } = req.body ?? {};
-  logger.info({ event, timestamp, payload }, 'webhook.event.received');
-  return res.sendStatus(204);
-});
-
-app.listen(PORT, () => {
-  logger.info({ port: PORT }, 'webhook.server.listening');
-});
-```
-
-Publique o endpoint e informe a URL em `WEBHOOK_URL` (ex.: `https://sua-api.com/webhooks/baileys`).
 
 ## Uso
 
@@ -347,7 +253,6 @@ Para mensagens com mídia, o bloco `message` inclui o objeto `media` com detalhe
 - `POST /instances/:id/send-buttons` - Enviar botões de resposta rápida
 - `POST /instances/:id/send-list` - Enviar lista interativa com seções/opções
 - `POST /instances/:id/send-media` - Enviar mídia (imagem, vídeo, áudio ou documento)
-- `POST /instances/:id/send-poll` - Enviar enquete para um contato ou grupo
 - `POST /instances/:id/exists` - Verificar se número existe no WhatsApp
 - `GET /instances/:id/status` - Verificar status de mensagem
 
