@@ -104,6 +104,49 @@ function computeOptionHash(text: string): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
+function normalizeOptionHash(value: unknown): string | null {
+  if (value == null) return null;
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+
+    if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0) {
+      return trimmed.toLowerCase();
+    }
+
+    const base64Pattern = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
+    if (base64Pattern.test(trimmed)) {
+      try {
+        const buffer = Buffer.from(trimmed, 'base64');
+        if (buffer.length > 0) {
+          return buffer.toString('hex');
+        }
+      } catch {
+        // Ignore and fall back to utf-8 encoding below.
+      }
+    }
+
+    const utf8Buffer = Buffer.from(trimmed, 'utf-8');
+    return utf8Buffer.length > 0 ? utf8Buffer.toString('hex') : null;
+  }
+
+  if (Buffer.isBuffer(value)) {
+    return value.length > 0 ? value.toString('hex') : null;
+  }
+
+  if (value instanceof Uint8Array) {
+    return value.length > 0 ? Buffer.from(value).toString('hex') : null;
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return null;
+    return Buffer.from(value).toString('hex');
+  }
+
+  return null;
+}
+
 function buildOptionHashMaps(
   pollMessage: WAMessage | undefined,
 ): {
@@ -123,7 +166,12 @@ function buildOptionHashMaps(
   for (const option of options) {
     const text = extractOptionText(option);
     if (!text) continue;
-    const hash = computeOptionHash(text);
+    const providedHashValue = (option as { optionHash?: unknown }).optionHash;
+    const normalizedProvidedHash =
+      providedHashValue !== undefined && providedHashValue !== null
+        ? normalizeOptionHash(providedHashValue)
+        : null;
+    const hash = normalizedProvidedHash ?? computeOptionHash(text);
     if (!hashMap.has(hash)) {
       hashMap.set(hash, { id: text, text });
     }
@@ -271,15 +319,8 @@ export class PollService {
         if (!selected) continue;
         for (const optionHash of selected) {
           if (!optionHash) continue;
-          let buffer: Buffer | null = null;
-          if (optionHash instanceof Uint8Array) {
-            buffer = Buffer.from(optionHash);
-          } else if (Array.isArray(optionHash)) {
-            buffer = Buffer.from(optionHash);
-          }
-          if (!buffer || buffer.length === 0) continue;
-          const hex = buffer.toString('hex');
-          if (hex) selectedOptionHashes.add(hex);
+          const normalized = normalizeOptionHash(optionHash);
+          if (normalized) selectedOptionHashes.add(normalized);
         }
       }
 
