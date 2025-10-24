@@ -5,6 +5,8 @@ import type {
   WAMessageUpdate,
   WASocket,
 } from '@whiskeysockets/baileys';
+import type Long from 'long';
+import { createHash } from 'crypto';
 import { getAggregateVotesInPollMessage, getKeyAuthor } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { buildContactPayload, mapLeadFromMessage } from '../services/leadMapper.js';
@@ -60,6 +62,77 @@ function extractPollQuestion(message: WAMessage | undefined): string {
     message?.message?.pollCreationMessageV3?.name ||
     ''
   );
+}
+
+function normalizeOptionText(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function extractOptionText(option: unknown): string | null {
+  if (!option || typeof option !== 'object') return null;
+  const withName = option as {
+    optionName?: unknown;
+    name?: unknown;
+  };
+
+  const optionName = withName.optionName;
+  if (typeof optionName === 'string') {
+    const normalized = normalizeOptionText(optionName);
+    if (normalized) return normalized;
+  } else if (optionName && typeof optionName === 'object') {
+    const text = (optionName as { text?: unknown }).text;
+    const normalized = normalizeOptionText(typeof text === 'string' ? text : null);
+    if (normalized) return normalized;
+  }
+
+  const name = withName.name;
+  if (typeof name === 'string') {
+    const normalized = normalizeOptionText(name);
+    if (normalized) return normalized;
+  } else if (name && typeof name === 'object') {
+    const text = (name as { text?: unknown }).text;
+    const normalized = normalizeOptionText(typeof text === 'string' ? text : null);
+    if (normalized) return normalized;
+  }
+
+  return null;
+}
+
+function computeOptionHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+function buildOptionHashMaps(
+  pollMessage: WAMessage | undefined,
+): {
+  hashMap: Map<string, { id: string | null; text: string | null }>;
+  textToHash: Map<string, string>;
+} {
+  const pollCreation =
+    pollMessage?.message?.pollCreationMessage ??
+    pollMessage?.message?.pollCreationMessageV2 ??
+    pollMessage?.message?.pollCreationMessageV3 ??
+    undefined;
+
+  const options = (pollCreation?.options ?? []) as unknown[];
+  const hashMap = new Map<string, { id: string | null; text: string | null }>();
+  const textToHash = new Map<string, string>();
+
+  for (const option of options) {
+    const text = extractOptionText(option);
+    if (!text) continue;
+    const hash = computeOptionHash(text);
+    if (!hashMap.has(hash)) {
+      hashMap.set(hash, { id: text, text });
+    }
+    if (!textToHash.has(text)) {
+      textToHash.set(text, hash);
+    }
+  }
+
+  return { hashMap, textToHash };
 }
 
 function buildSyntheticMessageForVoter(
@@ -168,9 +241,12 @@ export class PollService {
       const messageId = update.key?.id ?? pollMessage.key?.id ?? undefined;
       if (!messageId) continue;
 
-      const timestamp = toIsoDate(
-        update.update?.messageTimestamp ?? pollMessage.messageTimestamp,
-      );
+      const timestampSource =
+        update.update?.messageTimestamp ??
+        (update as Partial<{ messageTimestamp: number | Long | bigint | null }>).messageTimestamp ??
+        pollMessage.messageTimestamp ??
+        undefined;
+      const timestamp = toIsoDate(timestampSource);
 
       const meId = this.sock.user?.id;
       const voterJid = voterKey
@@ -185,9 +261,74 @@ export class PollService {
       );
       const contact = buildContactPayload(lead);
 
-      const selectedOptions = aggregate
-        .filter((opt) => (voterJid ? opt.voters.includes(voterJid) : false))
-        .map((opt) => ({ id: opt.name || null, text: opt.name || null }));
+      const { hashMap: optionHashMap, textToHash } = buildOptionHashMaps(pollMessage);
+
+      const selectedOptionHashes = new Set<string>();
+      for (const pollUpdateEntry of pollUpdates) {
+        const selected = pollUpdateEntry?.vote?.selectedOptions;
+        if (!selected) continue;
+        for (const optionHash of selected) {
+          if (!optionHash) continue;
+          let buffer: Buffer | null = null;
+          if (optionHash instanceof Uint8Array) {
+            buffer = Buffer.from(optionHash);
+          } else if (Array.isArray(optionHash)) {
+            buffer = Buffer.from(optionHash);
+          }
+          if (!buffer || buffer.length === 0) continue;
+          const hex = buffer.toString('hex');
+          if (hex) selectedOptionHashes.add(hex);
+        }
+      }
+
+      const selectedOptionsByVoter =
+        voterJid
+          ? aggregate
+              .filter((opt) => Array.isArray(opt.voters) && opt.voters.includes(voterJid))
+              .map((opt) => {
+                const normalizedName = normalizeOptionText(
+                  typeof opt.name === 'string' ? opt.name : null,
+                );
+                if (normalizedName) {
+                  const optionHash = textToHash.get(normalizedName) ?? computeOptionHash(normalizedName);
+                  const mapped = optionHashMap.get(optionHash);
+                  if (mapped) return mapped;
+                  return { id: normalizedName, text: normalizedName };
+                }
+                const name = typeof opt.name === 'string' ? opt.name : null;
+                return { id: name, text: name };
+              })
+          : [];
+
+      const selectedOptionsMap = new Map<string, { id: string | null; text: string | null }>();
+      const registerSelectedOption = (
+        option: { id: string | null; text: string | null } | undefined,
+        hash?: string | null,
+      ) => {
+        if (!option) return;
+        const fallbackKey = option.id ?? option.text ?? `index:${selectedOptionsMap.size}`;
+        const key = hash ?? fallbackKey;
+        if (!selectedOptionsMap.has(key)) {
+          selectedOptionsMap.set(key, option);
+        }
+      };
+
+      for (const option of selectedOptionsByVoter) {
+        const hashKey =
+          option.text && textToHash.has(option.text)
+            ? textToHash.get(option.text) ?? null
+            : option.text
+              ? computeOptionHash(option.text)
+              : null;
+        registerSelectedOption(option, hashKey);
+      }
+
+      for (const hash of selectedOptionHashes) {
+        const option = optionHashMap.get(hash) ?? { id: null, text: null };
+        registerSelectedOption(option, hash);
+      }
+
+      const selectedOptions = Array.from(selectedOptionsMap.values());
 
       const uniqueVoters = new Set<string>();
       const optionTotals = aggregate.map((opt) => {
