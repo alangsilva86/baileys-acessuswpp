@@ -55,6 +55,17 @@ type PollUpdateWithCreationKey = proto.IPollUpdate & {
 
 const DEFAULT_SELECTABLE_COUNT = 1;
 
+interface PollVoteMetadata {
+  key?: WAMessage['key'];
+  timestampCandidates: Array<number | Long | bigint | null | undefined>;
+  update: WAMessageUpdate;
+}
+
+interface PollVoteVoterInfo {
+  voterKey?: proto.IMessageKey | null;
+  voterJid: string | null;
+}
+
 function extractPollQuestion(message: WAMessage | undefined): string {
   return (
     message?.message?.pollCreationMessage?.name ||
@@ -264,6 +275,63 @@ export class PollService {
       ) {
         this.store.remember(message);
       }
+
+      const pollUpdateMessage =
+        message.message?.pollUpdateMessage ??
+        (message.message as { pollUpdateMessageV2?: proto.Message.IPollUpdateMessage | null })
+          ?.pollUpdateMessageV2 ??
+        (message.message as { pollUpdateMessageV3?: proto.Message.IPollUpdateMessage | null })
+          ?.pollUpdateMessageV3 ??
+        null;
+
+      if (!pollUpdateMessage) continue;
+
+      const nestedUpdates = (pollUpdateMessage as { pollUpdates?: proto.IPollUpdate[] | null }).pollUpdates;
+      const pollUpdates: proto.IPollUpdate[] = [];
+      if (Array.isArray(nestedUpdates) && nestedUpdates.length) {
+        for (const entry of nestedUpdates) {
+          if (entry) pollUpdates.push(entry);
+        }
+      }
+
+      if (!pollUpdates.length) {
+        pollUpdates.push(pollUpdateMessage as unknown as proto.IPollUpdate);
+      }
+
+      if (!pollUpdates.length) continue;
+
+      const pollUpdate = pollUpdates[0] as PollUpdateWithCreationKey | undefined;
+      const creationKey = pollUpdate?.pollCreationMessageKey ?? undefined;
+      const pollMessage = this.store.get(creationKey?.id) ?? this.store.get(message.key?.id);
+      if (!pollMessage) continue;
+
+      const voterKey = pollUpdate?.pollUpdateMessageKey ?? null;
+      const voterJid = this.resolveVoterJid(voterKey, message.key);
+
+      const updateLike = {
+        key: message.key,
+        messageTimestamp: message.messageTimestamp,
+        update: { pollUpdates },
+      } as WAMessageUpdate;
+      (updateLike as unknown as { pushName?: string }).pushName =
+        (message as unknown as { pushName?: string }).pushName;
+
+      await this.processPollVote(
+        pollMessage,
+        pollUpdates,
+        {
+          key: message.key,
+          timestampCandidates: [
+            (message as Partial<{ messageTimestamp: number | Long | bigint | null }>).messageTimestamp ?? null,
+            pollMessage.messageTimestamp ?? null,
+          ],
+          update: updateLike,
+        },
+        {
+          voterKey,
+          voterJid,
+        },
+      );
     }
   }
 
@@ -271,163 +339,201 @@ export class PollService {
     if (!updates?.length) return;
 
     for (const update of updates) {
-      const pollUpdates = update.update?.pollUpdates;
+      const pollUpdates = update.update?.pollUpdates as proto.IPollUpdate[] | undefined;
       if (!pollUpdates?.length) continue;
 
       const pollUpdate = pollUpdates[0] as PollUpdateWithCreationKey | undefined;
       const creationKey = pollUpdate?.pollCreationMessageKey ?? undefined;
       const voterKey = pollUpdate?.pollUpdateMessageKey ?? null;
       const pollMessage = this.store.get(creationKey?.id) ?? this.store.get(update.key?.id);
-      const pollId = pollMessage?.key?.id;
-      if (!pollId || !pollMessage) continue;
-
-      const aggregate = this.aggregateVotes(
-        { message: pollMessage.message, pollUpdates },
-        this.sock.user?.id,
-      );
-
-      const messageId = update.key?.id ?? pollMessage.key?.id ?? undefined;
-      if (!messageId) continue;
+      if (!pollMessage) continue;
 
       const narrowedUpdate =
         update.update as Partial<{ messageTimestamp: number | Long | bigint | null }> | undefined;
-      const timestampSource =
-        narrowedUpdate?.messageTimestamp ??
-        (update as Partial<{ messageTimestamp: number | Long | bigint | null }>).messageTimestamp ??
-        pollMessage.messageTimestamp ??
-        undefined;
-      const timestamp = toIsoDate(timestampSource);
+      const voterJid = this.resolveVoterJid(voterKey, update.key);
 
-      const meId = this.sock.user?.id;
-      const voterJid = voterKey
-        ? ((): string | null => {
-            const author = getKeyAuthor(voterKey, meId);
-            return author ? author : null;
-          })()
-        : update.key?.participant ?? update.key?.remoteJid ?? null;
-
-      const lead = mapLeadFromMessage(
-        buildSyntheticMessageForVoter(update, pollMessage, voterKey, voterJid, meId),
-      );
-      const contact = buildContactPayload(lead);
-
-      const { hashMap: optionHashMap, textToHash } = buildOptionHashMaps(pollMessage);
-
-      const selectedOptionHashes = new Set<string>();
-      for (const pollUpdateEntry of pollUpdates) {
-        const selected = pollUpdateEntry?.vote?.selectedOptions;
-        if (!selected) continue;
-        for (const optionHash of selected) {
-          if (!optionHash) continue;
-          const normalized = normalizeOptionHash(optionHash);
-          if (normalized) selectedOptionHashes.add(normalized);
-        }
-      }
-
-      const selectedOptionsByVoter =
-        voterJid
-          ? aggregate
-              .filter((opt) => Array.isArray(opt.voters) && opt.voters.includes(voterJid))
-              .map((opt) => {
-                const normalizedName = normalizeOptionText(
-                  typeof opt.name === 'string' ? opt.name : null,
-                );
-                if (normalizedName) {
-                  const optionHash = textToHash.get(normalizedName) ?? computeOptionHash(normalizedName);
-                  const mapped = optionHashMap.get(optionHash);
-                  if (mapped) return mapped;
-                  return { id: normalizedName, text: normalizedName };
-                }
-                const name = typeof opt.name === 'string' ? opt.name : null;
-                return { id: name, text: name };
-              })
-          : [];
-
-      const selectedOptionsMap = new Map<string, { id: string | null; text: string | null }>();
-      const registerSelectedOption = (
-        option: { id: string | null; text: string | null } | undefined,
-        hash?: string | null,
-      ) => {
-        if (!option) return;
-        const fallbackKey = option.id ?? option.text ?? `index:${selectedOptionsMap.size}`;
-        const key = hash ?? fallbackKey;
-        if (!selectedOptionsMap.has(key)) {
-          selectedOptionsMap.set(key, option);
-        }
-      };
-
-      for (const option of selectedOptionsByVoter) {
-        const hashKey =
-          option.text && textToHash.has(option.text)
-            ? textToHash.get(option.text) ?? null
-            : option.text
-              ? computeOptionHash(option.text)
-              : null;
-        registerSelectedOption(option, hashKey);
-      }
-
-      for (const hash of selectedOptionHashes) {
-        const option = optionHashMap.get(hash) ?? { id: null, text: null };
-        registerSelectedOption(option, hash);
-      }
-
-      const selectedOptions = Array.from(selectedOptionsMap.values());
-
-      const uniqueVoters = new Set<string>();
-      const optionTotals = aggregate.map((opt) => {
-        const votes = Array.isArray(opt.voters) ? opt.voters.length : 0;
-        if (Array.isArray(opt.voters)) {
-          for (const voter of opt.voters) {
-            if (typeof voter === 'string' && voter) uniqueVoters.add(voter);
-          }
-        }
-        return {
-          id: opt.name || null,
-          text: opt.name || null,
-          votes,
-        };
-      });
-
-      const totalVotes = optionTotals.reduce((sum, option) => sum + option.votes, 0);
-      const totalVoters = uniqueVoters.size;
-
-      const payload: PollChoiceEventPayload = {
-        pollId,
-        question: extractPollQuestion(pollMessage),
-        chatId: pollMessage.key?.remoteJid ?? null,
-        messageId,
-        timestamp,
-        voterJid,
-        selectedOptions,
-        optionsAggregates: optionTotals,
-        aggregates: {
-          totalVoters,
-          totalVotes,
-          optionTotals,
+      await this.processPollVote(
+        pollMessage,
+        pollUpdates,
+        {
+          key: update.key,
+          timestampCandidates: [
+            narrowedUpdate?.messageTimestamp ?? null,
+            (update as Partial<{ messageTimestamp: number | Long | bigint | null }>).messageTimestamp ?? null,
+            pollMessage.messageTimestamp ?? null,
+          ],
+          update,
         },
-        contact,
-      };
-
-      let queued: BrokerEvent | null = null;
-      if (this.eventStore) {
-        queued = this.eventStore.enqueue({
-          instanceId: this.instanceId,
-          direction: 'inbound',
-          type: 'POLL_CHOICE',
-          payload: { ...payload },
-          delivery: {
-            state: 'pending',
-            attempts: 0,
-            lastAttemptAt: null,
-          },
-        });
-      }
-
-      await this.webhook.emit('POLL_CHOICE', payload, {
-        eventId: queued?.id,
-      });
-      await this.maybeSendFeedback(voterJid, payload);
+        {
+          voterKey,
+          voterJid,
+        },
+      );
     }
+  }
+
+  private resolveVoterJid(
+    voterKey: proto.IMessageKey | null | undefined,
+    fallbackKey?: WAMessage['key'],
+  ): string | null {
+    if (voterKey) {
+      const author = getKeyAuthor(voterKey, this.sock.user?.id);
+      if (author) return author;
+    }
+
+    return fallbackKey?.participant ?? fallbackKey?.remoteJid ?? null;
+  }
+
+  private async processPollVote(
+    pollMessage: WAMessage,
+    pollUpdates: proto.IPollUpdate[],
+    metadata: PollVoteMetadata,
+    voterInfo: PollVoteVoterInfo,
+  ): Promise<void> {
+    const pollId = pollMessage.key?.id;
+    if (!pollId) return;
+
+    const aggregate = this.aggregateVotes(
+      { message: pollMessage.message, pollUpdates },
+      this.sock.user?.id,
+    );
+
+    const messageId = metadata.key?.id ?? pollMessage.key?.id ?? undefined;
+    if (!messageId) return;
+
+    const timestampSource =
+      metadata.timestampCandidates.find((candidate) => candidate != null) ?? undefined;
+    const timestamp = toIsoDate(timestampSource);
+
+    const meId = this.sock.user?.id;
+    const lead = mapLeadFromMessage(
+      buildSyntheticMessageForVoter(
+        metadata.update,
+        pollMessage,
+        voterInfo.voterKey ?? null,
+        voterInfo.voterJid,
+        meId,
+      ),
+    );
+    const contact = buildContactPayload(lead);
+
+    const { hashMap: optionHashMap, textToHash } = buildOptionHashMaps(pollMessage);
+
+    const selectedOptionHashes = new Set<string>();
+    for (const pollUpdateEntry of pollUpdates) {
+      const selected = pollUpdateEntry?.vote?.selectedOptions;
+      if (!selected) continue;
+      for (const optionHash of selected) {
+        if (!optionHash) continue;
+        const normalized = normalizeOptionHash(optionHash);
+        if (normalized) selectedOptionHashes.add(normalized);
+      }
+    }
+
+    const voterJid = voterInfo.voterJid;
+    const selectedOptionsByVoter =
+      voterJid
+        ? aggregate
+            .filter((opt) => Array.isArray(opt.voters) && opt.voters.includes(voterJid))
+            .map((opt) => {
+              const normalizedName = normalizeOptionText(
+                typeof opt.name === 'string' ? opt.name : null,
+              );
+              if (normalizedName) {
+                const optionHash = textToHash.get(normalizedName) ?? computeOptionHash(normalizedName);
+                const mapped = optionHashMap.get(optionHash);
+                if (mapped) return mapped;
+                return { id: normalizedName, text: normalizedName };
+              }
+              const name = typeof opt.name === 'string' ? opt.name : null;
+              return { id: name, text: name };
+            })
+        : [];
+
+    const selectedOptionsMap = new Map<string, { id: string | null; text: string | null }>();
+    const registerSelectedOption = (
+      option: { id: string | null; text: string | null } | undefined,
+      hash?: string | null,
+    ) => {
+      if (!option) return;
+      const fallbackKey = option.id ?? option.text ?? `index:${selectedOptionsMap.size}`;
+      const key = hash ?? fallbackKey;
+      if (!selectedOptionsMap.has(key)) {
+        selectedOptionsMap.set(key, option);
+      }
+    };
+
+    for (const option of selectedOptionsByVoter) {
+      const hashKey =
+        option.text && textToHash.has(option.text)
+          ? textToHash.get(option.text) ?? null
+          : option.text
+            ? computeOptionHash(option.text)
+            : null;
+      registerSelectedOption(option, hashKey);
+    }
+
+    for (const hash of selectedOptionHashes) {
+      const option = optionHashMap.get(hash) ?? { id: null, text: null };
+      registerSelectedOption(option, hash);
+    }
+
+    const selectedOptions = Array.from(selectedOptionsMap.values());
+
+    const uniqueVoters = new Set<string>();
+    const optionTotals = aggregate.map((opt) => {
+      const votes = Array.isArray(opt.voters) ? opt.voters.length : 0;
+      if (Array.isArray(opt.voters)) {
+        for (const voter of opt.voters) {
+          if (typeof voter === 'string' && voter) uniqueVoters.add(voter);
+        }
+      }
+      return {
+        id: opt.name || null,
+        text: opt.name || null,
+        votes,
+      };
+    });
+
+    const totalVotes = optionTotals.reduce((sum, option) => sum + option.votes, 0);
+    const totalVoters = uniqueVoters.size;
+
+    const payload: PollChoiceEventPayload = {
+      pollId,
+      question: extractPollQuestion(pollMessage),
+      chatId: pollMessage.key?.remoteJid ?? null,
+      messageId,
+      timestamp,
+      voterJid,
+      selectedOptions,
+      optionsAggregates: optionTotals,
+      aggregates: {
+        totalVoters,
+        totalVotes,
+        optionTotals,
+      },
+      contact,
+    };
+
+    let queued: BrokerEvent | null = null;
+    if (this.eventStore) {
+      queued = this.eventStore.enqueue({
+        instanceId: this.instanceId,
+        direction: 'inbound',
+        type: 'POLL_CHOICE',
+        payload: { ...payload },
+        delivery: {
+          state: 'pending',
+          attempts: 0,
+          lastAttemptAt: null,
+        },
+      });
+    }
+
+    await this.webhook.emit('POLL_CHOICE', payload, {
+      eventId: queued?.id,
+    });
+    await this.maybeSendFeedback(voterJid, payload);
   }
 
   private async maybeSendFeedback(
