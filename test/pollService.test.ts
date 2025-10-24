@@ -36,9 +36,11 @@ function buildPollMessage(): WAMessage {
   } as unknown as WAMessage;
 }
 
-function buildPollUpdate(): WAMessageUpdate {
-  const optionName = 'Produto A';
-  const selectedHash = createHash('sha256').update(optionName).digest();
+function buildPollUpdate(
+  optionName = 'Produto A',
+  selectedHash?: Uint8Array,
+): WAMessageUpdate {
+  const hash = selectedHash ?? createHash('sha256').update(optionName).digest();
 
   const pollUpdate: proto.Message.IPollUpdateMessage = {
     pollCreationMessageKey: {
@@ -52,7 +54,7 @@ function buildPollUpdate(): WAMessageUpdate {
     },
     vote: {
       pollOptionId: optionName,
-      selectedOptions: [selectedHash],
+      selectedOptions: [hash],
     },
   };
 
@@ -170,6 +172,49 @@ test('onMessageUpdate maps selected options without pollUpdateMessageKey', async
   const payload = event.payload as any;
   assert.deepStrictEqual(payload.selectedOptions, [
     { id: 'Produto A', text: 'Produto A' },
+  ]);
+});
+
+test('onMessageUpdate maps selected options using provided option hash', async () => {
+  const store = new PollMessageStore();
+  const pollMessage = buildPollMessage();
+  const customOptionName = 'Produto Especial';
+  const customHash = Buffer.from('0102030405060708090a0b0c0d0e0f10', 'hex');
+
+  const pollCreation = pollMessage.message?.pollCreationMessage;
+  if (!pollCreation) {
+    throw new Error('expected poll creation message');
+  }
+
+  pollCreation.options = [
+    { optionName: customOptionName, optionHash: customHash },
+    { optionName: 'Produto B' },
+  ];
+
+  store.remember(pollMessage, 60_000);
+
+  const webhook = new FakeWebhook();
+  const logger = { warn: () => {} } as unknown as pino.Logger;
+  const sock = { user: { id: '556277777777@s.whatsapp.net' } } as unknown as WASocket;
+
+  const aggregateWithCustomHash = () => [
+    { name: customOptionName, voters: [VOTER_JID] },
+    { name: 'Produto B', voters: [] as string[] },
+  ];
+
+  const service = new PollService(sock, webhook as any, logger, {
+    store,
+    feedbackTemplate: null,
+    aggregateVotesFn: aggregateWithCustomHash,
+  });
+
+  const update = buildPollUpdate(customOptionName, customHash);
+  await service.onMessageUpdate([update]);
+
+  assert.equal(webhook.events.length, 1, 'expected webhook to be emitted');
+  const payload = webhook.events[0]?.payload as any;
+  assert.deepStrictEqual(payload.selectedOptions, [
+    { id: customOptionName, text: customOptionName },
   ]);
 });
 
