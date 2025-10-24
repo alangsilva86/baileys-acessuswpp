@@ -225,6 +225,12 @@ function buildSyntheticMessageForVoter(
   } as WAMessage;
 }
 
+function isPollVoteMessage(
+  value: proto.Message.IPollEncValue | proto.Message.IPollVoteMessage | null | undefined,
+): value is proto.Message.IPollVoteMessage {
+  return !!value && Array.isArray((value as proto.Message.IPollVoteMessage).selectedOptions);
+}
+
 export class PollService {
   private readonly store: PollMessageStore;
   private readonly feedbackTemplate?: string | null;
@@ -608,7 +614,9 @@ export class PollService {
       return this.normalizePollUpdates(nestedUpdates);
     }
 
-    const selectedOptions = pollUpdateMessage.vote?.selectedOptions;
+    const selectedOptions = isPollVoteMessage(pollUpdateMessage.vote)
+      ? pollUpdateMessage.vote.selectedOptions
+      : null;
     if (Array.isArray(selectedOptions) && selectedOptions.length) {
       return this.normalizePollUpdates([pollUpdateMessage as proto.IPollUpdate]);
     }

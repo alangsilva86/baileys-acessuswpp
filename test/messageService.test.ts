@@ -59,7 +59,7 @@ const invalidMessages: WAMessage[] = [
     messageStubType: 1,
   } as unknown as WAMessage,
   createMessage('drop-protocol', { message: { protocolMessage: {} as any } }),
-  createMessage('drop-history', { message: { historySyncNotification: {} as any } }),
+  createMessage('drop-history', { message: { historySyncNotification: {} as any } as any }),
   createMessage('drop-empty', { message: {} as any }),
 ];
 

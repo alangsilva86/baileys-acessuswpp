@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import type {
-  BaileysEventMap,
+import {
   proto,
-  WAMessage,
-  WAMessageUpdate,
-  WASocket,
+  type BaileysEventMap,
+  type WAMessage,
+  type WAMessageUpdate,
+  type WASocket,
 } from '@whiskeysockets/baileys';
 import type pino from 'pino';
 
@@ -16,6 +16,15 @@ import { BrokerEventStore } from '../src/broker/eventStore.js';
 
 const POLL_REMOTE_JID = '556299999999@g.us';
 const VOTER_JID = '556288888888@s.whatsapp.net';
+
+type TestPollUpdate = proto.IPollUpdate & {
+  pollCreationMessageKey?: proto.IMessageKey | null;
+};
+
+type TestPollUpdateMessage = proto.Message.IPollUpdateMessage & {
+  pollUpdateMessageKey?: proto.IMessageKey | null;
+  pollUpdates?: TestPollUpdate[] | null;
+};
 
 function buildPollMessage(): WAMessage {
   return {
@@ -42,9 +51,9 @@ function buildPollUpdate(
   optionName = 'Produto A',
   selectedHash?: Uint8Array,
 ): WAMessageUpdate {
-  const hash = selectedHash ?? createHash('sha256').update(optionName).digest();
+  const hash = selectedHash ?? new Uint8Array(createHash('sha256').update(optionName).digest());
 
-  const pollUpdate: proto.Message.IPollUpdateMessage = {
+  const pollUpdate: TestPollUpdate = {
     pollCreationMessageKey: {
       id: 'poll-123',
     },
@@ -55,7 +64,6 @@ function buildPollUpdate(
       fromMe: false,
     },
     vote: {
-      pollOptionId: optionName,
       selectedOptions: [hash],
     },
   };
@@ -78,23 +86,25 @@ function buildPollUpdateMessage(
   selectedHash?: Uint8Array,
 ): WAMessage {
   const update = buildPollUpdate(optionName, selectedHash);
-  const pollUpdate = update.update?.pollUpdates?.[0];
+  const pollUpdate = update.update?.pollUpdates?.[0] as TestPollUpdate | undefined;
   if (!pollUpdate) {
     throw new Error('expected poll update payload');
   }
 
-  const pollUpdateMessage = {
-    pollCreationMessageKey: pollUpdate.pollCreationMessageKey,
-    pollUpdateMessageKey: pollUpdate.pollUpdateMessageKey,
-    pollUpdates: update.update?.pollUpdates,
-  } as unknown as proto.Message.IPollUpdateMessage & { pollUpdates: proto.IPollUpdate[] };
+  const pollUpdateMessage: TestPollUpdateMessage = {
+    pollCreationMessageKey: pollUpdate.pollCreationMessageKey ?? undefined,
+    pollUpdateMessageKey: pollUpdate.pollUpdateMessageKey ?? undefined,
+    pollUpdates: (update.update?.pollUpdates as TestPollUpdate[]) ?? null,
+    vote: pollUpdate.vote
+      ? (pollUpdate.vote as unknown as proto.Message.IPollEncValue)
+      : undefined,
+  };
 
   return {
     key: update.key,
-    messageTimestamp: update.messageTimestamp,
+    messageTimestamp: (update as unknown as { messageTimestamp?: number }).messageTimestamp,
     message: {
       pollUpdateMessage,
-      pollUpdateMessage: pollUpdate,
     },
     pushName: (update as unknown as { pushName?: string }).pushName,
   } as unknown as WAMessage;
@@ -208,7 +218,7 @@ test('onMessageUpdate maps selected options using provided option hash', async (
   const store = new PollMessageStore();
   const pollMessage = buildPollMessage();
   const customOptionName = 'Produto Especial';
-  const customHash = Buffer.from('0102030405060708090a0b0c0d0e0f10', 'hex');
+  const customHashBuffer = Buffer.from('0102030405060708090a0b0c0d0e0f10', 'hex');
 
   const pollCreation = pollMessage.message?.pollCreationMessage;
   if (!pollCreation) {
@@ -216,7 +226,7 @@ test('onMessageUpdate maps selected options using provided option hash', async (
   }
 
   pollCreation.options = [
-    { optionName: customOptionName, optionHash: customHash },
+    { optionName: customOptionName, optionHash: customHashBuffer.toString('hex') },
     { optionName: 'Produto B' },
   ];
 
@@ -237,7 +247,7 @@ test('onMessageUpdate maps selected options using provided option hash', async (
     aggregateVotesFn: aggregateWithCustomHash,
   });
 
-  const update = buildPollUpdate(customOptionName, customHash);
+  const update = buildPollUpdate(customOptionName, new Uint8Array(customHashBuffer));
   await service.onMessageUpdate([update]);
 
   assert.equal(webhook.events.length, 1, 'expected webhook to be emitted');
@@ -344,7 +354,9 @@ test('onMessageUpsert handles plaintext poll update without encryption payload',
     aggregateVotesFn: () => aggregateResult,
   });
 
-  const plaintextUpdate: proto.Message.IPollUpdateMessage = {
+  const plaintextHash = new Uint8Array(createHash('sha256').update('Produto A').digest());
+
+  const plaintextUpdate: TestPollUpdateMessage = {
     pollCreationMessageKey: {
       id: 'poll-123',
       remoteJid: POLL_REMOTE_JID,
@@ -357,9 +369,8 @@ test('onMessageUpsert handles plaintext poll update without encryption payload',
       fromMe: false,
     },
     vote: {
-      pollOptionId: 'Produto A',
-      selectedOptions: [createHash('sha256').update('Produto A').digest()],
-    },
+      selectedOptions: [plaintextHash],
+    } as unknown as proto.Message.IPollEncValue,
   };
 
   const upsertEvent: BaileysEventMap['messages.upsert'] = {
@@ -405,9 +416,9 @@ test('onMessageUpsert decrypts encrypted poll votes before aggregating', async (
     ctx,
   ) => {
     decryptCalls.push({ ctx });
-    return {
-      selectedOptions: [createHash('sha256').update('Produto B').digest()],
-    } as proto.Message.IPollVoteMessage;
+    return proto.Message.PollVoteMessage.create({
+      selectedOptions: [new Uint8Array(createHash('sha256').update('Produto B').digest())],
+    });
   };
 
   const aggregateWithVoterOnB = () => [
@@ -424,7 +435,7 @@ test('onMessageUpsert decrypts encrypted poll votes before aggregating', async (
     decryptPollVoteFn: decryptStub,
   });
 
-  const encryptedUpdate: proto.Message.IPollUpdateMessage = {
+  const encryptedUpdate: TestPollUpdateMessage = {
     pollCreationMessageKey: {
       id: 'poll-123',
       remoteJid: POLL_REMOTE_JID,
