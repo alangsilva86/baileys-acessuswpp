@@ -247,6 +247,9 @@ export class PollService {
         pollMessage.messageTimestamp ??
         undefined;
       const timestamp = toIsoDate(timestampSource);
+      const timestamp = toIsoDate(
+        update.update?.messageTimestamp ?? update.messageTimestamp ?? pollMessage.messageTimestamp,
+      );
 
       const meId = this.sock.user?.id;
       const voterJid = voterKey
