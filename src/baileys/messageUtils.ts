@@ -108,6 +108,13 @@ function hasUsefulContent(content: MessageContent): boolean {
 
   const historySync = (content as { historySyncNotification?: unknown }).historySyncNotification;
   if (historySync) return false;
+
+  const pollUpdate =
+    (content as { pollUpdateMessage?: unknown }).pollUpdateMessage ??
+    (content as { pollUpdateMessageV2?: unknown }).pollUpdateMessageV2 ??
+    (content as { pollUpdateMessageV3?: unknown }).pollUpdateMessageV3;
+  if (pollUpdate) return true;
+
   if (extractTextFromContent(content)) return true;
   if (hasMediaContent(content)) return true;
   if (hasInteractiveContent(content)) return true;
@@ -160,4 +167,3 @@ export function filterClientMessages(
   if (!messages?.length) return [];
   return messages.filter((message) => hasClientMessageContent(message));
 }
-

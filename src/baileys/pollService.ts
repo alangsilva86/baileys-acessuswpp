@@ -52,6 +52,18 @@ interface PollChoiceEventPayload {
   contact: ContactPayload;
 }
 
+interface PollOptionMetadata {
+  id: string;
+  text: string;
+  hash: string;
+}
+
+interface PollMetadata {
+  pollId: string;
+  question: string;
+  options: PollOptionMetadata[];
+}
+
 type PollUpdateWithCreationKey = proto.IPollUpdate & {
   pollCreationMessageKey?: proto.IMessageKey | null;
 };
@@ -239,6 +251,7 @@ export class PollService {
   private readonly instanceId: string;
   private readonly aggregateVotes: typeof getAggregateVotesInPollMessage;
   private readonly decryptPollVote: typeof defaultDecryptPollVote;
+  private readonly pollMetadata = new Map<string, PollMetadata>();
 
   constructor(
     private readonly sock: WASocket,
@@ -271,7 +284,7 @@ export class PollService {
     } as const;
 
     const message = await this.sock.sendMessage(jid, payload, options.messageOptions);
-    this.store.remember(message);
+    this.rememberPoll(message, { question, options: values });
     return message;
   }
 
@@ -288,7 +301,7 @@ export class PollService {
         (content as { pollCreationMessageV3?: proto.Message.IPollCreationMessage | null })
           ?.pollCreationMessageV3
       ) {
-        this.store.remember(message);
+        this.rememberPoll(message);
       }
 
       const pollUpdateMessage =
@@ -404,6 +417,186 @@ export class PollService {
     return fallbackKey?.participant ?? fallbackKey?.remoteJid ?? null;
   }
 
+  private rememberPoll(
+    message: WAMessage,
+    fallback?: { question?: string; options?: string[] },
+  ): void {
+    this.store.remember(message);
+    this.cachePollMetadata(message, fallback);
+  }
+
+  private cachePollMetadata(
+    message: WAMessage,
+    fallback?: { question?: string; options?: string[] },
+  ): void {
+    const pollId = message.key?.id;
+    if (!pollId) return;
+
+    const extracted = this.extractPollMetadataFromMessage(message);
+    const fallbackMeta = this.buildMetadataFromFallback(pollId, fallback);
+    const existing = this.pollMetadata.get(pollId);
+    const merged = this.mergePollMetadata(existing, extracted, fallbackMeta);
+    if (merged) {
+      this.pollMetadata.set(pollId, merged);
+    }
+  }
+
+  private extractPollMetadataFromMessage(message: WAMessage): PollMetadata | null {
+    const pollId = message.key?.id;
+    if (!pollId) return null;
+
+    const question = extractPollQuestion(message);
+    const { hashMap } = buildOptionHashMaps(message);
+    const options: PollOptionMetadata[] = [];
+
+    for (const [hash, option] of hashMap.entries()) {
+      const normalized = this.normalizePollOption({ id: option.id, text: option.text, hash });
+      if (!normalized) continue;
+      options.push(normalized);
+    }
+
+    if (!options.length && !question) return { pollId, question: '', options: [] };
+
+    return {
+      pollId,
+      question,
+      options,
+    };
+  }
+
+  private buildMetadataFromFallback(
+    pollId: string,
+    fallback?: { question?: string; options?: string[] },
+  ): PollMetadata | null {
+    if (!fallback) return null;
+
+    const question = typeof fallback.question === 'string' ? fallback.question.trim() : '';
+    const options = (fallback.options ?? [])
+      .map((value) => this.normalizePollOption({ id: value, text: value }))
+      .filter((option): option is PollOptionMetadata => Boolean(option));
+
+    if (!options.length && !question) return null;
+
+    return {
+      pollId,
+      question,
+      options,
+    };
+  }
+
+  private mergePollMetadata(
+    ...sources: Array<PollMetadata | null | undefined>
+  ): PollMetadata | null {
+    let pollId: string | null = null;
+    let question = '';
+    const optionMap = new Map<string, PollOptionMetadata>();
+
+    for (const source of sources) {
+      if (!source) continue;
+      if (!pollId) {
+        pollId = source.pollId;
+      }
+
+      if (!question && source.question) {
+        question = source.question;
+      }
+
+      for (const option of source.options ?? []) {
+        const normalized = this.normalizePollOption(option);
+        if (!normalized) continue;
+        if (!optionMap.has(normalized.hash)) {
+          optionMap.set(normalized.hash, normalized);
+        } else {
+          const existing = optionMap.get(normalized.hash);
+          if (existing) {
+            if (!existing.text && normalized.text) existing.text = normalized.text;
+            if (!existing.id && normalized.id) existing.id = normalized.id;
+          }
+        }
+      }
+    }
+
+    if (!pollId) return null;
+
+    return {
+      pollId,
+      question,
+      options: Array.from(optionMap.values()),
+    };
+  }
+
+  private normalizePollOption(
+    option: { id?: string | null; text?: string | null; hash?: string | null },
+  ): PollOptionMetadata | null {
+    if (!option) return null;
+
+    const idCandidate = typeof option.id === 'string' ? option.id : null;
+    const textCandidate = typeof option.text === 'string' ? option.text : null;
+    const normalizedText = normalizeOptionText(textCandidate ?? idCandidate) ?? textCandidate ?? idCandidate ?? null;
+
+    let hash = option.hash ? normalizeOptionHash(option.hash) : null;
+    if (!hash && normalizedText) {
+      hash = computeOptionHash(normalizedText);
+    }
+    if (!hash && idCandidate) {
+      const trimmedId = normalizeOptionText(idCandidate) ?? idCandidate;
+      if (trimmedId) {
+        hash = computeOptionHash(trimmedId);
+        if (!normalizedText) {
+          return {
+            id: trimmedId,
+            text: trimmedId,
+            hash,
+          };
+        }
+      }
+    }
+
+    if (!hash) return null;
+
+    const text = normalizedText ?? hash;
+    const id = idCandidate && idCandidate.trim() ? idCandidate : text;
+
+    return {
+      id,
+      text,
+      hash,
+    };
+  }
+
+  private addObservedMetadata(
+    pollId: string,
+    question: string,
+    observed: Array<{ id: string | null; text: string | null; hash?: string | null }>,
+  ): void {
+    const options = observed
+      .map((option) =>
+        this.normalizePollOption({
+          id: option.id,
+          text: option.text,
+          hash: option.hash ?? null,
+        }),
+      )
+      .filter((entry): entry is PollOptionMetadata => Boolean(entry));
+
+    if (!options.length && !question) return;
+
+    const update: PollMetadata = {
+      pollId,
+      question,
+      options,
+    };
+
+    const existing = this.pollMetadata.get(pollId);
+    const merged = this.mergePollMetadata(existing, update);
+    if (merged) {
+      if (!merged.question && question) {
+        merged.question = question;
+      }
+      this.pollMetadata.set(pollId, merged);
+    }
+  }
+
   private async processPollVote(
     pollMessage: WAMessage,
     pollUpdates: proto.IPollUpdate[],
@@ -440,9 +633,37 @@ export class PollService {
     );
     const contact = buildContactPayload(lead);
 
+    let pollMetadata = this.pollMetadata.get(pollId);
+    if (!pollMetadata) {
+      pollMetadata = this.extractPollMetadataFromMessage(pollMessage);
+      if (pollMetadata) {
+        this.pollMetadata.set(pollId, pollMetadata);
+      }
+    }
+
     const { hashMap: optionHashMap, textToHash } = buildOptionHashMaps(pollMessage);
 
+    if (pollMetadata?.options.length) {
+      for (const option of pollMetadata.options) {
+        const normalized = this.normalizePollOption(option);
+        if (!normalized) continue;
+        if (!optionHashMap.has(normalized.hash)) {
+          optionHashMap.set(normalized.hash, { id: normalized.id, text: normalized.text });
+        } else {
+          const existing = optionHashMap.get(normalized.hash);
+          if (existing) {
+            existing.id = existing.id ?? normalized.id;
+            existing.text = existing.text ?? normalized.text;
+          }
+        }
+        if (!textToHash.has(normalized.text)) {
+          textToHash.set(normalized.text, normalized.hash);
+        }
+      }
+    }
+
     const selectedOptionsMap = new Map<string, { id: string | null; text: string | null }>();
+    const observedOptions: Array<{ id: string | null; text: string | null; hash?: string | null }> = [];
     const registerSelectedOption = (
       option: { id: string | null; text: string | null } | undefined,
       hash?: string | null,
@@ -452,6 +673,7 @@ export class PollService {
       const key = hash ?? fallbackKey;
       if (!selectedOptionsMap.has(key)) {
         selectedOptionsMap.set(key, option);
+        observedOptions.push({ ...option, hash: hash ?? null });
       }
     };
 
@@ -532,6 +754,13 @@ export class PollService {
 
     const selectedOptions = Array.from(selectedOptionsMap.values());
 
+    const question = extractPollQuestion(pollMessage) || pollMetadata?.question || '';
+
+    if (observedOptions.length || question) {
+      this.addObservedMetadata(pollId, question, observedOptions);
+      pollMetadata = this.pollMetadata.get(pollId) ?? pollMetadata;
+    }
+
     const uniqueVoters = new Set<string>();
     const optionTotals = aggregate.map((opt) => {
       const votes = Array.isArray(opt.voters) ? opt.voters.length : 0;
@@ -552,7 +781,7 @@ export class PollService {
 
     const payload: PollChoiceEventPayload = {
       pollId,
-      question: extractPollQuestion(pollMessage),
+      question,
       chatId: pollMessage.key?.remoteJid ?? null,
       messageId,
       timestamp,

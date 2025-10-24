@@ -218,7 +218,12 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     }
 
     void webhook
-      .emit('WHATSAPP_MESSAGES_UPSERT', { iid, raw: normalizedEvent })
+      .emit('WHATSAPP_MESSAGES_UPSERT', {
+        iid,
+        raw: evt,
+        normalized: normalizedEvent,
+        messages: filteredMessages,
+      })
       .catch((err: any) => logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.upsert.failed'));
   });
 
