@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import type { WAMessage } from '@whiskeysockets/baileys';
+import { pollMetadataStore, type PollMetadataRecord } from './pollMetadataStore.js';
 
 export interface PollOptionMetadata {
   id: string;
@@ -295,16 +296,27 @@ export function extractPollMetadataFromMessage(message: WAMessage): PollMetadata
   };
 }
 
-export function rememberPollMetadata(metadata: PollMetadata | null | undefined): void {
+export async function rememberPollMetadata(
+  metadata: PollMetadata | null | undefined,
+): Promise<void> {
   if (!metadata) return;
   const existing = pollMetadataCache.get(metadata.pollId);
   const merged = mergePollMetadata(existing, metadata);
   if (merged) {
     pollMetadataCache.set(metadata.pollId, merged);
+    await pollMetadataStore.put({
+      pollId: merged.pollId,
+      remoteJid: merged.remoteJid ?? null,
+      encKeyHex: merged.encKeyHex ?? null,
+      question: merged.question ?? null,
+      options: merged.options.map((option) => option.text),
+      selectableCount: merged.selectableCount ?? null,
+      updatedAt: Date.now(),
+    });
   }
 }
 
-export function rememberPollMetadataFromMessage(
+export async function rememberPollMetadataFromMessage(
   message: WAMessage,
   fallback?: {
     question?: string;
@@ -313,7 +325,7 @@ export function rememberPollMetadataFromMessage(
     messageSecret?: Uint8Array | Buffer | string | null;
     selectableCount?: number | null;
   },
-): void {
+): Promise<void> {
   const pollId = message.key?.id;
   if (!pollId) return;
 
@@ -343,14 +355,14 @@ export function rememberPollMetadataFromMessage(
     }
   }
 
-  rememberPollMetadata(mergePollMetadata(extracted, fallbackMetadata));
+  await rememberPollMetadata(mergePollMetadata(extracted, fallbackMetadata));
 }
 
-export function addObservedPollMetadata(
+export async function addObservedPollMetadata(
   pollId: string,
   question: string,
   observed: Array<{ id: string | null; text: string | null; hash?: string | null }>,
-): void {
+): Promise<void> {
   const options = observed
     .map((option) =>
       normalizePollOption({
@@ -367,11 +379,28 @@ export function addObservedPollMetadata(
     options,
   };
 
-  rememberPollMetadata(metadata);
+  await rememberPollMetadata(metadata);
 }
 
-export function getPollMetadata(pollId: string | null | undefined): PollMetadata | null {
+export function getPollMetadataFromCache(
+  pollId: string | null | undefined,
+): PollMetadata | null {
   if (!pollId) return null;
+  return pollMetadataCache.get(pollId) ?? null;
+}
+
+export async function getPollMetadata(
+  pollId: string | null | undefined,
+): Promise<PollMetadata | null> {
+  if (!pollId) return null;
+  const cached = pollMetadataCache.get(pollId);
+  if (cached) return cached;
+
+  const stored = await pollMetadataStore.get(pollId);
+  if (!stored) return null;
+
+  const normalized = pollMetadataRecordToMetadata(stored);
+  await rememberPollMetadata(normalized);
   return pollMetadataCache.get(pollId) ?? null;
 }
 
@@ -392,4 +421,19 @@ export function getVoteSelection(
 ): VoteSelection | null {
   if (!messageId) return null;
   return voteSelections.get(messageId) ?? null;
+}
+
+function pollMetadataRecordToMetadata(record: PollMetadataRecord): PollMetadata {
+  const options = record.options
+    .map((text) => normalizePollOption({ id: text, text }))
+    .filter((value): value is PollOptionMetadata => Boolean(value));
+
+  return {
+    pollId: record.pollId,
+    question: record.question ?? '',
+    options,
+    remoteJid: record.remoteJid ?? null,
+    encKeyHex: record.encKeyHex ?? null,
+    selectableCount: record.selectableCount ?? null,
+  };
 }

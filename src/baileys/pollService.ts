@@ -24,6 +24,7 @@ import {
   buildOptionHashMaps,
   computeOptionHash,
   getPollMetadata,
+  getPollMetadataFromCache,
   normalizeOptionHash,
   normalizeOptionText,
   normalizePollOption,
@@ -170,7 +171,7 @@ export class PollService {
 
     const message = await this.sock.sendMessage(jid, payload, options.messageOptions);
     this.store.remember(message);
-    rememberPollMetadataFromMessage(message, {
+    await rememberPollMetadataFromMessage(message, {
       question,
       options: values,
       remoteJid: message.key?.remoteJid ?? null,
@@ -194,7 +195,7 @@ export class PollService {
           ?.pollCreationMessageV3
       ) {
         this.store.remember(message);
-        rememberPollMetadataFromMessage(message);
+        await rememberPollMetadataFromMessage(message);
       }
 
       const pollUpdateMessage =
@@ -216,7 +217,7 @@ export class PollService {
         ?.pollCreationMessageKey;
       let pollMessage = this.store.get(creationKey?.id) ?? this.store.get(message.key?.id);
       if (!pollMessage) {
-        pollMessage = this.rehydratePollMessage(creationKey?.id ?? message.key?.id ?? null);
+        pollMessage = await this.rehydratePollMessage(creationKey?.id ?? message.key?.id ?? null);
         if (pollMessage) {
           this.store.remember(pollMessage);
         }
@@ -279,7 +280,7 @@ export class PollService {
       const voterKey = pollUpdate?.pollUpdateMessageKey ?? null;
       let pollMessage = this.store.get(creationKey?.id) ?? this.store.get(update.key?.id);
       if (!pollMessage) {
-        pollMessage = this.rehydratePollMessage(creationKey?.id ?? update.key?.id ?? null);
+        pollMessage = await this.rehydratePollMessage(creationKey?.id ?? update.key?.id ?? null);
         if (pollMessage) {
           this.store.remember(pollMessage);
         }
@@ -358,10 +359,10 @@ export class PollService {
     );
     const contact = buildContactPayload(lead);
 
-    let pollMetadata = getPollMetadata(pollId);
+    let pollMetadata = await getPollMetadata(pollId);
     if (!pollMetadata) {
-      rememberPollMetadataFromMessage(pollMessage);
-      pollMetadata = getPollMetadata(pollId);
+      await rememberPollMetadataFromMessage(pollMessage);
+      pollMetadata = await getPollMetadata(pollId);
     }
 
     const { hashMap: optionHashMap, textToHash } = buildOptionHashMaps(pollMessage);
@@ -510,8 +511,8 @@ export class PollService {
     const question = extractPollQuestion(pollMessage) || pollMetadata?.question || '';
 
     if (observedOptions.length || question) {
-      addObservedPollMetadata(pollId, question, observedOptions);
-      pollMetadata = getPollMetadata(pollId) ?? pollMetadata;
+      await addObservedPollMetadata(pollId, question, observedOptions);
+      pollMetadata = (await getPollMetadata(pollId)) ?? pollMetadata;
     }
 
     const uniqueVoters = new Set<string>();
@@ -580,9 +581,11 @@ export class PollService {
     }
   }
 
-  private rehydratePollMessage(pollId: string | null | undefined): WAMessage | null {
+  private async rehydratePollMessage(
+    pollId: string | null | undefined,
+  ): Promise<WAMessage | null> {
     if (!pollId) return null;
-    const metadata = getPollMetadata(pollId);
+    const metadata = await getPollMetadata(pollId);
     if (!metadata) return null;
 
     const secretBuffer = metadata.encKeyHex ? Buffer.from(metadata.encKeyHex, 'hex') : null;
@@ -780,6 +783,19 @@ export class PollService {
         ?.messageContextInfo?.messageSecret,
     );
     if (messageContextSecret) return messageContextSecret;
+
+    const pollId = pollMessage.key?.id;
+    if (pollId) {
+      const metadata = getPollMetadataFromCache(pollId);
+      if (metadata?.encKeyHex) {
+        try {
+          const buffer = Buffer.from(metadata.encKeyHex, 'hex');
+          if (buffer.length > 0) return new Uint8Array(buffer);
+        } catch {
+          // ignore malformed hex
+        }
+      }
+    }
 
     return null;
   }
