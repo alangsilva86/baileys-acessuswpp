@@ -47,6 +47,10 @@ interface PollChoiceEventPayload {
   contact: ContactPayload;
 }
 
+type PollUpdateWithCreationKey = proto.IPollUpdate & {
+  pollCreationMessageKey?: proto.IMessageKey | null;
+};
+
 const DEFAULT_SELECTABLE_COUNT = 1;
 
 function extractPollQuestion(message: WAMessage | undefined): string {
@@ -149,11 +153,11 @@ export class PollService {
       const pollUpdates = update.update?.pollUpdates;
       if (!pollUpdates?.length) continue;
 
-      const pollUpdate = pollUpdates[0] as proto.Message.IPollUpdateMessage | undefined;
-      const creationKey = pollUpdate?.pollCreationMessageKey;
+      const pollUpdate = pollUpdates[0] as PollUpdateWithCreationKey | undefined;
+      const creationKey = pollUpdate?.pollCreationMessageKey ?? undefined;
       const voterKey = pollUpdate?.pollUpdateMessageKey ?? null;
-      const pollId = creationKey?.id;
-      const pollMessage = this.store.get(pollId);
+      const pollMessage = this.store.get(creationKey?.id) ?? this.store.get(update.key?.id);
+      const pollId = pollMessage?.key?.id;
       if (!pollId || !pollMessage) continue;
 
       const aggregate = this.aggregateVotes(
@@ -164,7 +168,9 @@ export class PollService {
       const messageId = update.key?.id ?? pollMessage.key?.id ?? undefined;
       if (!messageId) continue;
 
-      const timestamp = toIsoDate(update.messageTimestamp ?? pollMessage.messageTimestamp);
+      const timestamp = toIsoDate(
+        update.update?.messageTimestamp ?? pollMessage.messageTimestamp,
+      );
 
       const meId = this.sock.user?.id;
       const voterJid = voterKey
