@@ -210,6 +210,42 @@ test('MessageService maps participant phone for group messages when valid', asyn
   assert.equal(payload.contact.participant, '5511987654321@s.whatsapp.net');
 });
 
+test('MessageService maps poll creation messages to poll_creation type', async () => {
+  const { service, webhook, eventStore } = createService({ eventStore: new BrokerEventStore() });
+
+  const pollMessage = createMessage('poll-1', {
+    message: {
+      pollCreationMessage: {
+        name: 'Favorite snack?',
+        selectableOptionsCount: 2,
+        options: [
+          { optionName: 'Chips' },
+          { optionName: 'Chocolate' },
+          { optionName: '  ' },
+        ],
+      },
+    } as any,
+  });
+
+  await service.onInbound([pollMessage]);
+
+  assert.equal(webhook.events.length, 1);
+  const payload = webhook.events[0]?.payload as any;
+
+  assert.equal(payload.message.type, 'poll_creation');
+  assert.equal(payload.message.text, 'Favorite snack?');
+  assert.deepStrictEqual(payload.message.interactive, {
+    type: 'poll_creation',
+    question: 'Favorite snack?',
+    options: ['Chips', 'Chocolate'],
+    selectableOptionsCount: 2,
+  });
+
+  const stored = eventStore.list();
+  assert.equal(stored.length, 1);
+  assert.deepStrictEqual(stored[0]?.payload?.message, payload.message);
+});
+
 test('MessageService omits phone for group and broadcast messages without E.164 sender', async () => {
   const eventStore = new BrokerEventStore();
   const webhookEvents: Array<{ event: string; payload: any }> = [];

@@ -271,6 +271,9 @@ function toSafeNumber(value: unknown): number | null {
 
 function normalizeMessageType(rawType: string | null): string | null {
   if (!rawType) return null;
+  if (rawType.startsWith('pollCreationMessage')) {
+    return 'poll_creation';
+  }
   switch (rawType) {
     case 'conversation':
     case 'extendedTextMessage':
@@ -299,10 +302,6 @@ function normalizeMessageType(rawType: string | null): string | null {
     case 'contactMessage':
     case 'contactsArrayMessage':
       return 'contact';
-    case 'pollCreationMessage':
-    case 'pollCreationMessageV2':
-    case 'pollCreationMessageV3':
-      return 'poll';
     default:
       return rawType;
   }
@@ -319,6 +318,42 @@ function getOptionalString(source: unknown, key: string): string | null {
 function buildInteractivePayloadFromMessage(message: WAMessage): InteractivePayload | null {
   const content = getNormalizedMessageContent(message);
   if (!content) return null;
+
+  const pollCreation =
+    content.pollCreationMessage ??
+    (content as { pollCreationMessageV2?: Record<string, unknown> | null })?.pollCreationMessageV2 ??
+    (content as { pollCreationMessageV3?: Record<string, unknown> | null })?.pollCreationMessageV3 ??
+    null;
+
+  if (pollCreation) {
+    const interactive: InteractivePayload = {
+      type: 'poll_creation',
+    };
+
+    const question = getOptionalString(pollCreation, 'name');
+    if (question) {
+      interactive.question = question;
+    }
+
+    const options = Array.isArray((pollCreation as { options?: unknown[] }).options)
+      ? ((pollCreation as { options?: unknown[] }).options ?? [])
+          .map((option) => getOptionalString(option, 'optionName'))
+          .filter((option): option is string => Boolean(option))
+      : [];
+
+    if (options.length) {
+      interactive.options = options;
+    }
+
+    const selectable = toSafeNumber(
+      (pollCreation as { selectableOptionsCount?: number | Long | bigint | null }).selectableOptionsCount ?? null,
+    );
+    if (selectable != null) {
+      interactive.selectableOptionsCount = selectable;
+    }
+
+    return interactive;
+  }
 
   const buttonsResponse = content.buttonsResponseMessage;
   if (buttonsResponse) {
