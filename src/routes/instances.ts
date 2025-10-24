@@ -1348,42 +1348,8 @@ router.post(
       return;
     }
 
-    const pollService = inst.context?.pollService;
-    if (!pollService) {
-      res.status(503).json({ error: 'poll_service_unavailable' });
-      return;
-    }
-
-    const check = await inst.sock.onWhatsApp(normalized);
-    const entry = Array.isArray(check) ? check[0] : null;
-    if (!entry || !entry.exists) {
-      res.status(404).json({ error: 'whatsapp_not_found' });
-      return;
-    }
-
-    const selectableRaw = Number(selectableCount);
-    const selectable = Number.isFinite(selectableRaw)
-      ? Math.max(1, Math.min(Math.floor(selectableRaw), sanitized.length))
-      : 1;
-
-    const targetJid = entry?.jid ?? `${normalized}@s.whatsapp.net`;
-
-    const sent = (await pollService.sendPoll(targetJid, question.trim(), sanitized, {
-      selectableCount: selectable,
-    })) as any;
-    inst.metrics.sent += 1;
-    inst.metrics.sent_by_type.buttons += 1;
-    inst.metrics.last.sentId = sent.key?.id ?? null;
-    if (sent.key?.id) {
-      inst.ackSentAt.set(sent.key.id, Date.now());
-    }
-
-    let ackStatus: number | null = null;
-    if (waitAckMs && sent.key?.id) {
-      ackStatus = await waitForAck(inst, sent.key.id, waitAckMs);
-    }
-
-    res.status(201).json({ id: sent.key?.id ?? null, status: sent.status, ack: ackStatus });
+    res.status(503).json({ error: 'poll_service_unavailable' });
+    return;
   }),
 );
 
