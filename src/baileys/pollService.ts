@@ -5,6 +5,7 @@ import type {
   WAMessageUpdate,
   WASocket,
 } from '@whiskeysockets/baileys';
+import type Long from 'long';
 import { createHash } from 'crypto';
 import { getAggregateVotesInPollMessage, getKeyAuthor } from '@whiskeysockets/baileys';
 import pino from 'pino';
@@ -240,6 +241,12 @@ export class PollService {
       const messageId = update.key?.id ?? pollMessage.key?.id ?? undefined;
       if (!messageId) continue;
 
+      const timestampSource =
+        update.update?.messageTimestamp ??
+        (update as Partial<{ messageTimestamp: number | Long | bigint | null }>).messageTimestamp ??
+        pollMessage.messageTimestamp ??
+        undefined;
+      const timestamp = toIsoDate(timestampSource);
       const timestamp = toIsoDate(
         update.update?.messageTimestamp ?? update.messageTimestamp ?? pollMessage.messageTimestamp,
       );
