@@ -94,6 +94,7 @@ function buildPollUpdateMessage(
     messageTimestamp: update.messageTimestamp,
     message: {
       pollUpdateMessage,
+      pollUpdateMessage: pollUpdate,
     },
     pushName: (update as unknown as { pushName?: string }).pushName,
   } as unknown as WAMessage;

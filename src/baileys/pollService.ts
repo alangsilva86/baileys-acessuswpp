@@ -290,12 +290,31 @@ export class PollService {
         (content as { pollUpdateMessageV2?: proto.Message.IPollUpdateMessage | null })
           ?.pollUpdateMessageV2 ??
         (content as { pollUpdateMessageV3?: proto.Message.IPollUpdateMessage | null })
+        message.message?.pollUpdateMessage ??
+        (message.message as { pollUpdateMessageV2?: proto.Message.IPollUpdateMessage | null })
+          ?.pollUpdateMessageV2 ??
+        (message.message as { pollUpdateMessageV3?: proto.Message.IPollUpdateMessage | null })
           ?.pollUpdateMessageV3 ??
         null;
 
       if (!pollUpdateMessage) continue;
 
       const pollUpdate = pollUpdateMessage as PollUpdateWithCreationKey | undefined;
+      const nestedUpdates = (pollUpdateMessage as { pollUpdates?: proto.IPollUpdate[] | null }).pollUpdates;
+      const pollUpdates: proto.IPollUpdate[] = [];
+      if (Array.isArray(nestedUpdates) && nestedUpdates.length) {
+        for (const entry of nestedUpdates) {
+          if (entry) pollUpdates.push(entry);
+        }
+      }
+
+      if (!pollUpdates.length) {
+        pollUpdates.push(pollUpdateMessage as unknown as proto.IPollUpdate);
+      }
+
+      if (!pollUpdates.length) continue;
+
+      const pollUpdate = pollUpdates[0] as PollUpdateWithCreationKey | undefined;
       const creationKey = pollUpdate?.pollCreationMessageKey ?? undefined;
       const pollMessage = this.store.get(creationKey?.id) ?? this.store.get(message.key?.id);
       if (!pollMessage) continue;
@@ -311,6 +330,9 @@ export class PollService {
       );
 
       if (!pollUpdates.length) continue;
+
+      const voterKey = pollUpdate?.pollUpdateMessageKey ?? null;
+      const voterJid = this.resolveVoterJid(voterKey, message.key);
 
       const updateLike = {
         key: message.key,
@@ -362,6 +384,9 @@ export class PollService {
       await this.processPollVote(
         pollMessage,
         normalizedUpdates,
+      await this.processPollVote(
+        pollMessage,
+        pollUpdates,
         {
           key: update.key,
           timestampCandidates: [
@@ -402,6 +427,7 @@ export class PollService {
 
     const aggregate = this.aggregateVotes(
       { message: pollMessage.message, pollUpdates: pollMessage.pollUpdates },
+      { message: pollMessage.message, pollUpdates },
       this.sock.user?.id,
     );
 
@@ -479,6 +505,12 @@ export class PollService {
             : null;
       registerSelectedOption(option, hashKey);
     }
+
+    for (const hash of selectedOptionHashes) {
+      const option = optionHashMap.get(hash) ?? { id: null, text: null };
+      registerSelectedOption(option, hash);
+    }
+
 
     for (const hash of selectedOptionHashes) {
       const option = optionHashMap.get(hash) ?? { id: null, text: null };
