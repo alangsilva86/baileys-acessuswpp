@@ -290,12 +290,31 @@ export class PollService {
         (content as { pollUpdateMessageV2?: proto.Message.IPollUpdateMessage | null })
           ?.pollUpdateMessageV2 ??
         (content as { pollUpdateMessageV3?: proto.Message.IPollUpdateMessage | null })
+        message.message?.pollUpdateMessage ??
+        (message.message as { pollUpdateMessageV2?: proto.Message.IPollUpdateMessage | null })
+          ?.pollUpdateMessageV2 ??
+        (message.message as { pollUpdateMessageV3?: proto.Message.IPollUpdateMessage | null })
           ?.pollUpdateMessageV3 ??
         null;
 
       if (!pollUpdateMessage) continue;
 
       const pollUpdate = pollUpdateMessage as PollUpdateWithCreationKey | undefined;
+      const nestedUpdates = (pollUpdateMessage as { pollUpdates?: proto.IPollUpdate[] | null }).pollUpdates;
+      const pollUpdates: proto.IPollUpdate[] = [];
+      if (Array.isArray(nestedUpdates) && nestedUpdates.length) {
+        for (const entry of nestedUpdates) {
+          if (entry) pollUpdates.push(entry);
+        }
+      }
+
+      if (!pollUpdates.length) {
+        pollUpdates.push(pollUpdateMessage as unknown as proto.IPollUpdate);
+      }
+
+      if (!pollUpdates.length) continue;
+
+      const pollUpdate = pollUpdates[0] as PollUpdateWithCreationKey | undefined;
       const creationKey = pollUpdate?.pollCreationMessageKey ?? undefined;
       const pollMessage = this.store.get(creationKey?.id) ?? this.store.get(message.key?.id);
       if (!pollMessage) continue;
@@ -311,6 +330,9 @@ export class PollService {
       );
 
       if (!pollUpdates.length) continue;
+
+      const voterKey = pollUpdate?.pollUpdateMessageKey ?? null;
+      const voterJid = this.resolveVoterJid(voterKey, message.key);
 
       const updateLike = {
         key: message.key,
@@ -357,11 +379,15 @@ export class PollService {
       const voterJid = this.resolveVoterJid(voterKey, update.key);
 
       const normalizedUpdates = this.normalizePollUpdates(pollUpdates);
+      const normalizedUpdates = this.applyPollUpdatesToMessage(pollMessage, pollUpdates);
       if (!normalizedUpdates.length) continue;
 
       await this.processPollVote(
         pollMessage,
         normalizedUpdates,
+      await this.processPollVote(
+        pollMessage,
+        pollUpdates,
         {
           key: update.key,
           timestampCandidates: [
@@ -483,6 +509,105 @@ export class PollService {
       registerSelectedOption(option, hashKey);
     }
 
+    return fallbackKey?.participant ?? fallbackKey?.remoteJid ?? null;
+  }
+
+  private async processPollVote(
+    pollMessage: WAMessage,
+    pollUpdates: proto.IPollUpdate[],
+    metadata: PollVoteMetadata,
+    voterInfo: PollVoteVoterInfo,
+  ): Promise<void> {
+    const pollId = pollMessage.key?.id;
+    if (!pollId) return;
+
+    const aggregate = this.aggregateVotes(
+      { message: pollMessage.message, pollUpdates: pollMessage.pollUpdates },
+      { message: pollMessage.message, pollUpdates },
+      this.sock.user?.id,
+    );
+
+    const messageId = metadata.key?.id ?? pollMessage.key?.id ?? undefined;
+    if (!messageId) return;
+
+    const timestampSource =
+      metadata.timestampCandidates.find((candidate) => candidate != null) ?? undefined;
+    const timestamp = toIsoDate(timestampSource);
+
+    const meId = this.sock.user?.id;
+    const lead = mapLeadFromMessage(
+      buildSyntheticMessageForVoter(
+        metadata.update,
+        pollMessage,
+        voterInfo.voterKey ?? null,
+        voterInfo.voterJid,
+        meId,
+      ),
+    );
+    const contact = buildContactPayload(lead);
+
+    const { hashMap: optionHashMap, textToHash } = buildOptionHashMaps(pollMessage);
+
+    const selectedOptionHashes = new Set<string>();
+    for (const pollUpdateEntry of pollUpdates) {
+      const selected = pollUpdateEntry?.vote?.selectedOptions;
+      if (!selected) continue;
+      for (const optionHash of selected) {
+        if (!optionHash) continue;
+        const normalized = normalizeOptionHash(optionHash);
+        if (normalized) selectedOptionHashes.add(normalized);
+      }
+    }
+
+    const voterJid = voterInfo.voterJid;
+    const selectedOptionsByVoter =
+      voterJid
+        ? aggregate
+            .filter((opt) => Array.isArray(opt.voters) && opt.voters.includes(voterJid))
+            .map((opt) => {
+              const normalizedName = normalizeOptionText(
+                typeof opt.name === 'string' ? opt.name : null,
+              );
+              if (normalizedName) {
+                const optionHash = textToHash.get(normalizedName) ?? computeOptionHash(normalizedName);
+                const mapped = optionHashMap.get(optionHash);
+                if (mapped) return mapped;
+                return { id: normalizedName, text: normalizedName };
+              }
+              const name = typeof opt.name === 'string' ? opt.name : null;
+              return { id: name, text: name };
+            })
+        : [];
+
+    const selectedOptionsMap = new Map<string, { id: string | null; text: string | null }>();
+    const registerSelectedOption = (
+      option: { id: string | null; text: string | null } | undefined,
+      hash?: string | null,
+    ) => {
+      if (!option) return;
+      const fallbackKey = option.id ?? option.text ?? `index:${selectedOptionsMap.size}`;
+      const key = hash ?? fallbackKey;
+      if (!selectedOptionsMap.has(key)) {
+        selectedOptionsMap.set(key, option);
+      }
+    };
+
+    for (const option of selectedOptionsByVoter) {
+      const hashKey =
+        option.text && textToHash.has(option.text)
+          ? textToHash.get(option.text) ?? null
+          : option.text
+            ? computeOptionHash(option.text)
+            : null;
+      registerSelectedOption(option, hashKey);
+    }
+
+    for (const hash of selectedOptionHashes) {
+      const option = optionHashMap.get(hash) ?? { id: null, text: null };
+      registerSelectedOption(option, hash);
+    }
+
+
     for (const hash of selectedOptionHashes) {
       const option = optionHashMap.get(hash) ?? { id: null, text: null };
       registerSelectedOption(option, hash);
@@ -600,6 +725,7 @@ export class PollService {
     const nestedUpdates = (pollUpdateMessage as { pollUpdates?: proto.IPollUpdate[] | null }).pollUpdates;
     if (Array.isArray(nestedUpdates) && nestedUpdates.length) {
       return this.normalizePollUpdates(nestedUpdates);
+      return this.applyPollUpdatesToMessage(pollMessage, nestedUpdates);
     }
 
     const decrypted = this.decryptPollUpdate(pollMessage, pollUpdateMessage, message, voterJid);
@@ -612,6 +738,7 @@ export class PollService {
     if (!Array.isArray(pollUpdates)) return [];
 
     return pollUpdates.filter((update) => update?.vote?.selectedOptions?.length);
+    return this.applyPollUpdatesToMessage(pollMessage, [decrypted]);
   }
 
   private decryptPollUpdate(
