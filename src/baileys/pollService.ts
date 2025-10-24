@@ -608,6 +608,11 @@ export class PollService {
       return this.normalizePollUpdates(nestedUpdates);
     }
 
+    const selectedOptions = pollUpdateMessage.vote?.selectedOptions;
+    if (Array.isArray(selectedOptions) && selectedOptions.length) {
+      return this.normalizePollUpdates([pollUpdateMessage as proto.IPollUpdate]);
+    }
+
     const decrypted = this.decryptPollUpdate(pollMessage, pollUpdateMessage, message, voterJid);
     if (!decrypted) return [];
 
