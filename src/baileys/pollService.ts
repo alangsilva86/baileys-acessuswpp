@@ -404,11 +404,15 @@ export class PollService {
       }
     }
 
-    const voterJid = voterInfo.voterJid;
+    const voterJid = normalizeJid(voterInfo.voterJid);
     const selectedOptionsByVoter =
       voterJid
         ? aggregate
-            .filter((opt) => Array.isArray(opt.voters) && opt.voters.includes(voterJid))
+            .filter(
+              (opt) =>
+                Array.isArray(opt.voters) &&
+                opt.voters.some((candidate) => normalizeJid(candidate) === voterJid),
+            )
             .map((opt) => {
               const normalizedName = normalizeOptionText(
                 typeof opt.name === 'string' ? opt.name : null,
@@ -457,7 +461,12 @@ export class PollService {
         }
       }
 
-      registerSelectedOption(option ?? { id: null, text: null }, hash);
+      if (!option) {
+        const fallbackText = hash ? `hash:${hash}` : 'unknown-option';
+        option = { id: fallbackText, text: fallbackText };
+      }
+
+      registerSelectedOption(option, hash);
     }
 
     if (selectedOptionHashes.size) {
