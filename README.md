@@ -218,63 +218,6 @@ Eventos brutos do Baileys (`WHATSAPP_MESSAGES_UPSERT` / `WHATSAPP_MESSAGES_UPDAT
 }
 ```
 
-#### Endpoint de exemplo
-
-Execute `npm run example:poll-webhook` para iniciar um receptor Express que valida API key e assinatura `x-signature` com o mesmo segredo do emissor:
-
-```ts
-import 'dotenv/config';
-import crypto from 'node:crypto';
-import express from 'express';
-import pino from 'pino';
-
-const app = express();
-const PORT = Number(process.env.WEBHOOK_PORT ?? process.env.PORT ?? 3001);
-const EXPECTED_API_KEY = process.env.WEBHOOK_API_KEY;
-const HMAC_SECRET = process.env.WEBHOOK_HMAC_SECRET ?? EXPECTED_API_KEY ?? null;
-const logger = pino({ level: process.env.LOG_LEVEL ?? 'info', base: { service: 'poll-webhook-example' } });
-
-app.use(
-  express.json({
-    verify: (req, _res, buf) => {
-      (req as any).rawBody = Buffer.from(buf);
-    },
-  }),
-);
-
-function timingSafeEqual(a: Buffer, b: Buffer): boolean {
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
-app.post('/webhooks/baileys', (req, res) => {
-  if (EXPECTED_API_KEY && req.header('x-api-key') !== EXPECTED_API_KEY) {
-    logger.warn({ ip: req.ip }, 'webhook.invalid_api_key');
-    return res.status(401).json({ error: 'invalid_api_key' });
-  }
-
-  if (HMAC_SECRET) {
-    const rawBody: Buffer = (req as any).rawBody ?? Buffer.from('');
-    const expected = crypto.createHmac('sha256', HMAC_SECRET).update(rawBody).digest('hex');
-    const received = req.header('x-signature');
-    if (!received || !timingSafeEqual(Buffer.from(received), Buffer.from(expected))) {
-      logger.warn({ ip: req.ip, expected, received }, 'webhook.signature.mismatch');
-      return res.status(401).json({ error: 'invalid_signature' });
-    }
-  }
-
-  const { event, timestamp, payload } = req.body ?? {};
-  logger.info({ event, timestamp, payload }, 'webhook.event.received');
-  return res.sendStatus(204);
-});
-
-app.listen(PORT, () => {
-  logger.info({ port: PORT }, 'webhook.server.listening');
-});
-```
-
-Publique o endpoint e informe a URL em `WEBHOOK_URL` (ex.: `https://sua-api.com/webhooks/baileys`).
-
 ## Uso
 
 ### Interface Web
