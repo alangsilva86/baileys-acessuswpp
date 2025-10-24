@@ -27,6 +27,7 @@ export interface PollServiceOptions {
   messageService?: MessageService;
   eventStore?: BrokerEventStore;
   instanceId?: string;
+  aggregateVotesFn?: typeof getAggregateVotesInPollMessage;
 }
 
 interface PollChoiceEventPayload {
@@ -38,6 +39,11 @@ interface PollChoiceEventPayload {
   voterJid: string | null;
   selectedOptions: Array<{ id: string | null; text: string | null }>;
   optionsAggregates: Array<{ id: string | null; text: string | null; votes: number }>;
+  aggregates: {
+    totalVoters: number;
+    totalVotes: number;
+    optionTotals: Array<{ id: string | null; text: string | null; votes: number }>;
+  };
   contact: ContactPayload;
 }
 
@@ -72,6 +78,7 @@ export class PollService {
   private readonly messageService?: MessageService;
   private readonly eventStore?: BrokerEventStore;
   private readonly instanceId: string;
+  private readonly aggregateVotes: typeof getAggregateVotesInPollMessage;
 
   constructor(
     private readonly sock: WASocket,
@@ -84,6 +91,7 @@ export class PollService {
     this.messageService = options.messageService;
     this.eventStore = options.eventStore;
     this.instanceId = options.instanceId ?? 'default';
+    this.aggregateVotes = options.aggregateVotesFn ?? getAggregateVotesInPollMessage;
   }
 
   async sendPoll(
@@ -133,7 +141,7 @@ export class PollService {
       const pollMessage = this.store.get(pollId);
       if (!pollId || !pollMessage) continue;
 
-      const aggregate = getAggregateVotesInPollMessage(
+      const aggregate = this.aggregateVotes(
         { message: pollMessage.message, pollUpdates },
         this.sock.user?.id,
       );
@@ -151,11 +159,23 @@ export class PollService {
         .filter((opt) => (voterJid ? opt.voters.includes(voterJid) : false))
         .map((opt) => ({ id: opt.name || null, text: opt.name || null }));
 
-      const optionsAggregates = aggregate.map((opt) => ({
-        id: opt.name || null,
-        text: opt.name || null,
-        votes: Array.isArray(opt.voters) ? opt.voters.length : 0,
-      }));
+      const uniqueVoters = new Set<string>();
+      const optionTotals = aggregate.map((opt) => {
+        const votes = Array.isArray(opt.voters) ? opt.voters.length : 0;
+        if (Array.isArray(opt.voters)) {
+          for (const voter of opt.voters) {
+            if (typeof voter === 'string' && voter) uniqueVoters.add(voter);
+          }
+        }
+        return {
+          id: opt.name || null,
+          text: opt.name || null,
+          votes,
+        };
+      });
+
+      const totalVotes = optionTotals.reduce((sum, option) => sum + option.votes, 0);
+      const totalVoters = uniqueVoters.size;
 
       const payload: PollChoiceEventPayload = {
         pollId,
@@ -165,7 +185,12 @@ export class PollService {
         timestamp,
         voterJid,
         selectedOptions,
-        optionsAggregates,
+        optionsAggregates: optionTotals,
+        aggregates: {
+          totalVoters,
+          totalVotes,
+          optionTotals,
+        },
         contact,
       };
 

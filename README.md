@@ -194,10 +194,20 @@ Voto em enquete (`POLL_CHOICE`):
       { "id": "p1", "text": "Produto A", "votes": 3 },
       { "id": "p2", "text": "Produto B", "votes": 1 }
     ],
+    "aggregates": {
+      "totalVoters": 3,
+      "totalVotes": 4,
+      "optionTotals": [
+        { "id": "p1", "text": "Produto A", "votes": 3 },
+        { "id": "p2", "text": "Produto B", "votes": 1 }
+      ]
+    },
     "contact": { /* dados do votante */ }
   }
 }
 ```
+
+O campo `aggregates` resume os totais atuais da enquete, indicando o número total de votantes (`totalVoters`), de votos computados (`totalVotes`) e repetindo os totais por opção em `optionTotals` para facilitar a transição de integrações que ainda utilizam `optionsAggregates`.
 
 Eventos brutos do Baileys (`WHATSAPP_MESSAGES_UPSERT` / `WHATSAPP_MESSAGES_UPDATE`) mantêm o payload no formato:
 
