@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import type { proto, WAMessage, WAMessageUpdate, WASocket } from '@whiskeysockets/baileys';
 import type pino from 'pino';
 
@@ -7,11 +8,14 @@ import { PollService } from '../src/baileys/pollService.js';
 import { PollMessageStore } from '../src/baileys/store.js';
 import { BrokerEventStore } from '../src/broker/eventStore.js';
 
+const POLL_REMOTE_JID = '556299999999@g.us';
+const VOTER_JID = '556288888888@s.whatsapp.net';
+
 function buildPollMessage(): WAMessage {
   return {
     key: {
       id: 'poll-123',
-      remoteJid: '556299999999@g.us',
+      remoteJid: POLL_REMOTE_JID,
     },
     messageTimestamp: 1_700_000_000,
     message: {
@@ -27,28 +31,59 @@ function buildPollMessage(): WAMessage {
 }
 
 function buildPollUpdate(): WAMessageUpdate {
-  const update: proto.IMessage = {
-    pollUpdateMessage: {
-      pollCreationMessageKey: {
-        id: 'poll-123',
-      },
-      vote: {
-        pollOptionId: 'Produto A',
-      },
+  const optionName = 'Produto A';
+  const selectedHash = createHash('sha256').update(optionName).digest();
+
+  const pollUpdate: proto.Message.IPollUpdateMessage = {
+    pollCreationMessageKey: {
+      id: 'poll-123',
+    },
+    pollUpdateMessageKey: {
+      id: 'vote-123',
+      remoteJid: POLL_REMOTE_JID,
+      participant: VOTER_JID,
+      fromMe: false,
+    },
+    vote: {
+      pollOptionId: optionName,
+      selectedOptions: [selectedHash],
     },
   };
 
   return {
     key: {
       id: 'poll-123',
-      participant: '556288888888@s.whatsapp.net',
+      remoteJid: POLL_REMOTE_JID,
+      participant: VOTER_JID,
     },
     messageTimestamp: 1_700_000_100,
     update: {
-      pollUpdates: [update.pollUpdateMessage],
+      pollUpdates: [pollUpdate],
     },
   } as unknown as WAMessageUpdate;
 }
+
+class FakeWebhook {
+  public readonly events: Array<{ event: string; payload: unknown; options: unknown }> = [];
+
+  async emit(event: string, payload: unknown, options?: unknown): Promise<void> {
+    this.events.push({ event, payload, options });
+  }
+}
+
+const aggregateResult = [
+  {
+    name: 'Produto A',
+    voters: [
+      '556288888888@s.whatsapp.net',
+      '556277777777@s.whatsapp.net',
+    ],
+  },
+  {
+    name: 'Produto B',
+    voters: ['556299999999@s.whatsapp.net'],
+  },
+];
 
 test('onMessageUpdate enqueues metadata with messageId and ISO timestamp', async () => {
   const store = new PollMessageStore();
@@ -91,35 +126,61 @@ test('onMessageUpdate enqueues metadata with messageId and ISO timestamp', async
   assert.equal(event, 'POLL_CHOICE');
   assert.equal(payload.messageId, 'poll-123');
   assert.equal(payload.timestamp, new Date(1_700_000_100 * 1000).toISOString());
+  assert.deepStrictEqual(payload.selectedOptions, [{ id: 'Produto A', text: 'Produto A' }]);
+  assert.equal(payload.voterJid, VOTER_JID);
+  assert.equal(payload.contact.participant, VOTER_JID);
+  assert.equal(payload.contact.remoteJid, POLL_REMOTE_JID);
 });
 
 test('onMessageUpdate ignores updates without messageId metadata', async () => {
   const pollMessage: WAMessage = {
     key: {
-      remoteJid: '556299999999@g.us',
+      remoteJid: POLL_REMOTE_JID,
     },
     messageTimestamp: 1_700_000_000,
-const aggregateResult = [
-  {
-    name: 'Produto A',
-    voters: [
-      '556288888888@s.whatsapp.net',
-      '556277777777@s.whatsapp.net',
-    ],
-  },
-  {
-    name: 'Produto B',
-    voters: ['556299999999@s.whatsapp.net'],
-  },
-];
+  } as unknown as WAMessage;
 
-class FakeWebhook {
-  public readonly events: Array<{ event: string; payload: unknown; options: unknown }> = [];
+  const store = new PollMessageStore();
+  store.remember(pollMessage, 60_000);
 
-  async emit(event: string, payload: unknown, options?: unknown): Promise<void> {
-    this.events.push({ event, payload, options });
-  }
-}
+  const eventStore = new BrokerEventStore();
+  const webhookEvents: Array<{ event: string; payload: unknown }> = [];
+
+  const webhook = {
+    async emit(event: string, payload: unknown): Promise<void> {
+      webhookEvents.push({ event, payload });
+    },
+  } as unknown as import('../src/services/webhook.js').WebhookClient;
+
+  const logger = { warn: () => {} } as unknown as pino.Logger;
+  const sock = { user: { id: 'device@s.whatsapp.net' } } as unknown as WASocket;
+
+  const service = new PollService(sock, webhook, logger, {
+    store,
+    eventStore,
+    feedbackTemplate: null,
+  });
+
+  const update = {
+    key: {},
+    messageTimestamp: undefined,
+    update: {
+      pollUpdates: [
+        {
+          pollCreationMessageKey: {
+            id: 'poll-123',
+          },
+        },
+      ],
+    },
+  } as unknown as WAMessageUpdate;
+
+  await service.onMessageUpdate([update]);
+
+  const recent = eventStore.recent({ limit: 1, type: 'POLL_CHOICE' });
+  assert.equal(recent.length, 0, 'expected no events to be queued');
+  assert.equal(webhookEvents.length, 0, 'expected webhook not to be emitted');
+});
 
 test('PollService emits aggregated totals for poll updates', async () => {
   const pollStore = new PollMessageStore();
@@ -152,21 +213,22 @@ test('PollService emits aggregated totals for poll updates', async () => {
 
   const store = {
     remember() {},
-    get() {
-      return pollMessage;
+    get(id?: string | null) {
+      if (id === 'poll-message-id') return pollMessage;
+      return undefined;
     },
     clear() {},
   } as unknown as PollMessageStore;
 
   let enqueueCalled = false;
-  const eventStore = {
+  const blockingEventStore = {
     enqueue() {
       enqueueCalled = true;
       throw new Error('should not enqueue');
     },
   } as unknown as BrokerEventStore;
 
-  const webhook = {
+  const blockingWebhook = {
     async emit(): Promise<void> {
       throw new Error('should not emit');
     },
@@ -175,9 +237,9 @@ test('PollService emits aggregated totals for poll updates', async () => {
   const logger = { warn: () => {} } as unknown as pino.Logger;
   const sock = { user: { id: 'device@s.whatsapp.net' } } as unknown as WASocket;
 
-  const service = new PollService(sock, webhook, logger, {
+  const blockingService = new PollService(sock, blockingWebhook, logger, {
     store,
-    eventStore,
+    eventStore: blockingEventStore,
     feedbackTemplate: null,
   });
 
@@ -195,10 +257,8 @@ test('PollService emits aggregated totals for poll updates', async () => {
     },
   } as unknown as WAMessageUpdate;
 
-  await service.onMessageUpdate([update]);
-
+  await blockingService.onMessageUpdate([update]);
   assert.equal(enqueueCalled, false, 'expected enqueue not to be called');
-  };
 
   pollStore.remember(pollMessage as any);
 

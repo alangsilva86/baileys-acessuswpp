@@ -5,7 +5,7 @@ import type {
   WAMessageUpdate,
   WASocket,
 } from '@whiskeysockets/baileys';
-import { getAggregateVotesInPollMessage } from '@whiskeysockets/baileys';
+import { getAggregateVotesInPollMessage, getKeyAuthor } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { buildContactPayload, mapLeadFromMessage } from '../services/leadMapper.js';
 import type { ContactPayload } from '../services/leadMapper.js';
@@ -61,12 +61,26 @@ function extractPollQuestion(message: WAMessage | undefined): string {
 function buildSyntheticMessageForVoter(
   update: WAMessageUpdate,
   pollMessage: WAMessage | undefined,
+  voterKey: proto.IMessageKey | null | undefined,
+  voterJid: string | null,
+  meId: string | undefined,
 ): WAMessage {
+  const participant =
+    voterJid ??
+    voterKey?.participant ??
+    update.key?.participant ??
+    undefined;
+  const fromMe =
+    voterKey?.fromMe ??
+    (meId && voterJid ? voterJid === meId : undefined) ??
+    update.key?.fromMe ??
+    false;
+
   return {
     key: {
       remoteJid: pollMessage?.key?.remoteJid,
-      fromMe: update.key?.fromMe ?? false,
-      participant: update.key?.participant ?? undefined,
+      fromMe,
+      participant,
     },
     pushName: (update as unknown as { pushName?: string }).pushName,
   } as WAMessage;
@@ -137,6 +151,7 @@ export class PollService {
 
       const pollUpdate = pollUpdates[0] as proto.Message.IPollUpdateMessage | undefined;
       const creationKey = pollUpdate?.pollCreationMessageKey;
+      const voterKey = pollUpdate?.pollUpdateMessageKey ?? null;
       const pollId = creationKey?.id;
       const pollMessage = this.store.get(pollId);
       if (!pollId || !pollMessage) continue;
@@ -151,8 +166,17 @@ export class PollService {
 
       const timestamp = toIsoDate(update.messageTimestamp ?? pollMessage.messageTimestamp);
 
-      const voterJid = update.key?.participant ?? update.key?.remoteJid ?? null;
-      const lead = mapLeadFromMessage(buildSyntheticMessageForVoter(update, pollMessage));
+      const meId = this.sock.user?.id;
+      const voterJid = voterKey
+        ? ((): string | null => {
+            const author = getKeyAuthor(voterKey, meId);
+            return author ? author : null;
+          })()
+        : update.key?.participant ?? update.key?.remoteJid ?? null;
+
+      const lead = mapLeadFromMessage(
+        buildSyntheticMessageForVoter(update, pollMessage, voterKey, voterJid, meId),
+      );
       const contact = buildContactPayload(lead);
 
       const selectedOptions = aggregate
