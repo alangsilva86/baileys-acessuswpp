@@ -122,6 +122,12 @@ function isPollVoteMessage(
   return !!value && Array.isArray((value as proto.Message.IPollVoteMessage).selectedOptions);
 }
 
+function normalizeJid(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const [base] = value.split(':');
+  return base || null;
+}
+
 export class PollService {
   private readonly store: PollMessageStore;
   private readonly feedbackTemplate?: string | null;
@@ -429,8 +435,29 @@ export class PollService {
     }
 
     for (const hash of selectedOptionHashes) {
-      const option = optionHashMap.get(hash) ?? { id: null, text: null };
-      registerSelectedOption(option, hash);
+      let option = optionHashMap.get(hash) ?? null;
+
+      if (!option || (!option.id && !option.text)) {
+        const aggregateMatch = aggregate.find((candidate) => {
+          const candidateName = normalizeOptionText(
+            typeof candidate.name === 'string' ? candidate.name : null,
+          );
+          if (!candidateName) return false;
+          const candidateHash = textToHash.get(candidateName) ?? computeOptionHash(candidateName);
+          return candidateHash === hash;
+        });
+
+        if (aggregateMatch) {
+          const aggregateName = normalizeOptionText(
+            typeof aggregateMatch.name === 'string' ? aggregateMatch.name : null,
+          );
+          if (aggregateName) {
+            option = { id: aggregateName, text: aggregateName };
+          }
+        }
+      }
+
+      registerSelectedOption(option ?? { id: null, text: null }, hash);
     }
 
     if (selectedOptionHashes.size) {
@@ -514,11 +541,15 @@ export class PollService {
     });
     await this.maybeSendFeedback(voterJid, payload);
 
-    recordVoteSelection(messageId, {
-      pollId,
-      question,
-      selectedOptions,
-    });
+    if (selectedOptions.length) {
+      recordVoteSelection(messageId, {
+        pollId,
+        question,
+        selectedOptions,
+      });
+    } else {
+      recordVoteSelection(messageId, null);
+    }
   }
 
   private async maybeSendFeedback(
@@ -615,8 +646,10 @@ export class PollService {
       return null;
     }
 
-    const pollCreatorJid = this.resolvePollCreatorJid(creationKey, pollMessage);
-    const resolvedVoterJid = voterJid ?? this.resolveVoterJid(pollUpdateMessage.pollUpdateMessageKey ?? null, message.key);
+    const pollCreatorJid = normalizeJid(this.resolvePollCreatorJid(creationKey, pollMessage));
+    const resolvedVoterJid = normalizeJid(
+      voterJid ?? this.resolveVoterJid(pollUpdateMessage.pollUpdateMessageKey ?? null, message.key),
+    );
 
     if (!pollCreatorJid || !resolvedVoterJid) {
       this.logger.warn({ pollId: pollMsgId }, 'poll.vote.decrypt.missingParticipants');
@@ -653,15 +686,29 @@ export class PollService {
     ];
 
     for (const creation of pollCreations) {
-      const encKey = this.toUint8Array((creation as { encKey?: Uint8Array | null })?.encKey);
+      const encKey = this.toUint8Array(
+        (creation as { encKey?: Uint8Array | string | null })?.encKey,
+      );
       if (encKey) return encKey;
 
-      const secret = this.toUint8Array(creation?.contextInfo?.messageSecret);
+      const secret = this.toUint8Array(
+        (
+          creation?.contextInfo as
+            | { messageSecret?: Uint8Array | string | null }
+            | null
+            | undefined
+        )?.messageSecret,
+      );
       if (secret) return secret;
     }
 
     const messageContextSecret = this.toUint8Array(
-      (pollMessage as { messageContextInfo?: { messageSecret?: Uint8Array | null } | null | undefined })
+      (pollMessage as {
+        messageContextInfo?:
+          | { messageSecret?: Uint8Array | string | null }
+          | null
+          | undefined;
+      })
         ?.messageContextInfo?.messageSecret,
     );
     if (messageContextSecret) return messageContextSecret;
@@ -669,10 +716,32 @@ export class PollService {
     return null;
   }
 
-  private toUint8Array(value: Uint8Array | Buffer | null | undefined): Uint8Array | null {
+  private toUint8Array(
+    value: Uint8Array | Buffer | string | null | undefined,
+  ): Uint8Array | null {
     if (!value) return null;
     if (value instanceof Uint8Array) return value;
     if (Buffer.isBuffer(value)) return new Uint8Array(value);
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+
+      try {
+        const base64 = Buffer.from(trimmed, 'base64');
+        if (base64.length > 0) return new Uint8Array(base64);
+      } catch {
+        // ignore invalid base64
+      }
+
+      if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0) {
+        try {
+          const hex = Buffer.from(trimmed, 'hex');
+          if (hex.length > 0) return new Uint8Array(hex);
+        } catch {
+          // ignore invalid hex
+        }
+      }
+    }
     return null;
   }
 
