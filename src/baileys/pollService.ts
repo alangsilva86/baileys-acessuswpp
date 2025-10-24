@@ -442,6 +442,19 @@ export class PollService {
 
     const { hashMap: optionHashMap, textToHash } = buildOptionHashMaps(pollMessage);
 
+    const selectedOptionsMap = new Map<string, { id: string | null; text: string | null }>();
+    const registerSelectedOption = (
+      option: { id: string | null; text: string | null } | undefined,
+      hash?: string | null,
+    ) => {
+      if (!option) return;
+      const fallbackKey = option.id ?? option.text ?? `index:${selectedOptionsMap.size}`;
+      const key = hash ?? fallbackKey;
+      if (!selectedOptionsMap.has(key)) {
+        selectedOptionsMap.set(key, option);
+      }
+    };
+
     const selectedOptionHashes = new Set<string>();
     for (const pollUpdateEntry of appliedUpdates) {
       const selected = pollUpdateEntry?.vote?.selectedOptions;
@@ -450,6 +463,18 @@ export class PollService {
         if (!optionHash) continue;
         const normalized = normalizeOptionHash(optionHash);
         if (normalized) selectedOptionHashes.add(normalized);
+      }
+
+      const optionIdCandidate = (pollUpdateEntry.vote as { pollOptionId?: unknown })?.pollOptionId;
+      const normalizedId = normalizeOptionText(
+        typeof optionIdCandidate === 'string' ? optionIdCandidate : null,
+      );
+      if (normalizedId) {
+        const hashKey = textToHash.get(normalizedId) ?? computeOptionHash(normalizedId);
+        registerSelectedOption(
+          optionHashMap.get(hashKey) ?? { id: normalizedId, text: normalizedId },
+          hashKey,
+        );
       }
     }
 
@@ -473,19 +498,6 @@ export class PollService {
             })
         : [];
 
-    const selectedOptionsMap = new Map<string, { id: string | null; text: string | null }>();
-    const registerSelectedOption = (
-      option: { id: string | null; text: string | null } | undefined,
-      hash?: string | null,
-    ) => {
-      if (!option) return;
-      const fallbackKey = option.id ?? option.text ?? `index:${selectedOptionsMap.size}`;
-      const key = hash ?? fallbackKey;
-      if (!selectedOptionsMap.has(key)) {
-        selectedOptionsMap.set(key, option);
-      }
-    };
-
     for (const option of selectedOptionsByVoter) {
       const hashKey =
         option.text && textToHash.has(option.text)
@@ -500,6 +512,24 @@ export class PollService {
       const option = optionHashMap.get(hash) ?? { id: null, text: null };
       registerSelectedOption(option, hash);
     }
+
+    if (selectedOptionHashes.size) {
+      for (const aggregateOption of aggregate) {
+        const aggregateName = normalizeOptionText(
+          typeof aggregateOption.name === 'string' ? aggregateOption.name : null,
+        );
+        if (!aggregateName) continue;
+        const hashKey = textToHash.get(aggregateName) ?? computeOptionHash(aggregateName);
+        if (!selectedOptionHashes.has(hashKey)) continue;
+
+        const existing = selectedOptionsMap.get(hashKey);
+        if (existing?.text) continue;
+
+        const mapped = optionHashMap.get(hashKey) ?? { id: aggregateName, text: aggregateName };
+        selectedOptionsMap.set(hashKey, mapped);
+      }
+    }
+
     const selectedOptions = Array.from(selectedOptionsMap.values());
 
     const uniqueVoters = new Set<string>();

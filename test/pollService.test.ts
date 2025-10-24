@@ -482,6 +482,39 @@ test('onMessageUpsert decrypts encrypted poll votes before aggregating', async (
   assert.equal(payload.voterJid, VOTER_JID);
 });
 
+test('onMessageUpdate infers selected option text when poll metadata is incomplete', async () => {
+  const store = new PollMessageStore();
+  const pollMessage = buildPollMessage();
+  if (pollMessage.message?.pollCreationMessage) {
+    pollMessage.message.pollCreationMessage.options = [];
+  }
+  store.remember(pollMessage, 60_000);
+
+  const webhook = new FakeWebhook();
+  const logger = { warn: () => {} } as unknown as pino.Logger;
+  const sock = { user: { id: '556277777777@s.whatsapp.net' } } as unknown as WASocket;
+
+  const aggregateNamesOnly = () => [
+    { name: 'Produto A', voters: [] as string[] },
+    { name: 'Produto B', voters: [] as string[] },
+  ];
+
+  const service = new PollService(sock, webhook as any, logger, {
+    store,
+    feedbackTemplate: null,
+    aggregateVotesFn: aggregateNamesOnly,
+  });
+
+  const update = buildPollUpdate();
+  await service.onMessageUpdate([update]);
+
+  assert.equal(webhook.events.length, 1, 'expected webhook to be emitted');
+  const payload = webhook.events[0]?.payload as any;
+  assert.deepStrictEqual(payload.selectedOptions, [
+    { id: 'Produto A', text: 'Produto A' },
+  ]);
+});
+
 test('onMessageUpdate ignores updates without messageId metadata', async () => {
   const pollMessage: WAMessage = {
     key: {
