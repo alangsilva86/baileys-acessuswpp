@@ -6,6 +6,7 @@ import type {
   WASocket,
 } from '@whiskeysockets/baileys';
 import type Long from 'long';
+import { Buffer } from 'node:buffer';
 import { getAggregateVotesInPollMessage, getKeyAuthor } from '@whiskeysockets/baileys';
 import { extractMessageContent, updateMessageWithPollUpdate } from '@whiskeysockets/baileys/lib/Utils/messages.js';
 import { decryptPollVote as defaultDecryptPollVote } from '@whiskeysockets/baileys/lib/Utils/process-message.js';
@@ -169,7 +170,13 @@ export class PollService {
 
     const message = await this.sock.sendMessage(jid, payload, options.messageOptions);
     this.store.remember(message);
-    rememberPollMetadataFromMessage(message, { question, options: values });
+    rememberPollMetadataFromMessage(message, {
+      question,
+      options: values,
+      remoteJid: message.key?.remoteJid ?? null,
+      messageSecret: message.message?.messageContextInfo?.messageSecret ?? null,
+      selectableCount,
+    });
     return message;
   }
 
@@ -207,7 +214,13 @@ export class PollService {
 
       const creationKey = (pollUpdateMessage as PollUpdateWithCreationKey | undefined)
         ?.pollCreationMessageKey;
-      const pollMessage = this.store.get(creationKey?.id) ?? this.store.get(message.key?.id);
+      let pollMessage = this.store.get(creationKey?.id) ?? this.store.get(message.key?.id);
+      if (!pollMessage) {
+        pollMessage = this.rehydratePollMessage(creationKey?.id ?? message.key?.id ?? null);
+        if (pollMessage) {
+          this.store.remember(pollMessage);
+        }
+      }
       if (!pollMessage) continue;
 
       const voterKey =
@@ -264,7 +277,13 @@ export class PollService {
       const pollUpdate = pollUpdates[0] as PollUpdateWithCreationKey | undefined;
       const creationKey = pollUpdate?.pollCreationMessageKey ?? undefined;
       const voterKey = pollUpdate?.pollUpdateMessageKey ?? null;
-      const pollMessage = this.store.get(creationKey?.id) ?? this.store.get(update.key?.id);
+      let pollMessage = this.store.get(creationKey?.id) ?? this.store.get(update.key?.id);
+      if (!pollMessage) {
+        pollMessage = this.rehydratePollMessage(creationKey?.id ?? update.key?.id ?? null);
+        if (pollMessage) {
+          this.store.remember(pollMessage);
+        }
+      }
       if (!pollMessage) continue;
 
       const narrowedUpdate =
@@ -559,6 +578,46 @@ export class PollService {
     } else {
       recordVoteSelection(messageId, null);
     }
+  }
+
+  private rehydratePollMessage(pollId: string | null | undefined): WAMessage | null {
+    if (!pollId) return null;
+    const metadata = getPollMetadata(pollId);
+    if (!metadata) return null;
+
+    const secretBuffer = metadata.encKeyHex ? Buffer.from(metadata.encKeyHex, 'hex') : null;
+    const selectableCount = metadata.selectableCount ?? DEFAULT_SELECTABLE_COUNT;
+    const optionsArray = metadata.options.map((option) => ({ optionName: option.text }));
+
+    const pollCreationPayload: Record<string, unknown> = {
+      name: metadata.question ?? '',
+      selectableOptionsCount: selectableCount,
+    };
+    if (optionsArray.length) {
+      pollCreationPayload.options = optionsArray;
+    }
+
+    const messageContent: Record<string, unknown> = {
+      pollCreationMessageV3: pollCreationPayload,
+    };
+
+    if (secretBuffer) {
+      messageContent.messageContextInfo = {
+        messageSecret: secretBuffer,
+      };
+    }
+
+    const synthetic: WAMessage = {
+      key: {
+        id: metadata.pollId,
+        remoteJid: metadata.remoteJid ?? undefined,
+        fromMe: true,
+      },
+      messageTimestamp: Date.now(),
+      message: messageContent as WAMessage['message'],
+    } as unknown as WAMessage;
+
+    return synthetic;
   }
 
   private async maybeSendFeedback(

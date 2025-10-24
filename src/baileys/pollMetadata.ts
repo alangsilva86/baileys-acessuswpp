@@ -11,6 +11,9 @@ export interface PollMetadata {
   pollId: string;
   question: string;
   options: PollOptionMetadata[];
+  remoteJid?: string | null;
+  encKeyHex?: string | null;
+  selectableCount?: number | null;
 }
 
 interface VoteSelection {
@@ -73,6 +76,10 @@ export function normalizeOptionHash(value: unknown): string | null {
   }
 
   return null;
+}
+
+function normalizeMessageSecret(value: unknown): string | null {
+  return normalizeOptionHash(value);
 }
 
 function extractOptionText(option: unknown): string | null {
@@ -182,6 +189,9 @@ export function mergePollMetadata(
 ): PollMetadata | null {
   let pollId: string | null = null;
   let question = '';
+  let remoteJid: string | null = null;
+  let encKeyHex: string | null = null;
+  let selectableCount: number | null = null;
   const optionMap = new Map<string, PollOptionMetadata>();
 
   for (const source of sources) {
@@ -191,6 +201,15 @@ export function mergePollMetadata(
     }
     if (!question && source.question) {
       question = source.question;
+    }
+    if (!remoteJid && source.remoteJid) {
+      remoteJid = source.remoteJid;
+    }
+    if (!encKeyHex && source.encKeyHex) {
+      encKeyHex = source.encKeyHex;
+    }
+    if (selectableCount == null && source.selectableCount != null) {
+      selectableCount = source.selectableCount;
     }
 
     for (const option of source.options ?? []) {
@@ -214,6 +233,9 @@ export function mergePollMetadata(
     pollId,
     question,
     options: Array.from(optionMap.values()),
+    remoteJid,
+    encKeyHex,
+    selectableCount,
   };
 }
 
@@ -227,6 +249,12 @@ export function extractPollMetadataFromMessage(message: WAMessage): PollMetadata
     message.message?.pollCreationMessageV3?.name ??
     '';
 
+  const pollCreation =
+    message.message?.pollCreationMessage ??
+    message.message?.pollCreationMessageV2 ??
+    message.message?.pollCreationMessageV3 ??
+    undefined;
+
   const { hashMap } = buildOptionHashMaps(message);
   const options: PollOptionMetadata[] = [];
   for (const [hash, option] of hashMap.entries()) {
@@ -235,10 +263,35 @@ export function extractPollMetadataFromMessage(message: WAMessage): PollMetadata
     options.push(normalized);
   }
 
+  const selectableCount =
+    (pollCreation as { selectableOptionsCount?: number | null } | undefined)
+      ?.selectableOptionsCount ?? null;
+
+  const remoteJid = message.key?.remoteJid ?? null;
+
+  const secretCandidates: unknown[] = [];
+  if (pollCreation) {
+    secretCandidates.push((pollCreation as { encKey?: unknown })?.encKey ?? null);
+    secretCandidates.push((pollCreation as { contextInfo?: { messageSecret?: unknown } | null })?.contextInfo?.messageSecret ?? null);
+  }
+  secretCandidates.push(message.message?.messageContextInfo?.messageSecret ?? null);
+
+  let encKeyHex: string | null = null;
+  for (const candidate of secretCandidates) {
+    const normalized = normalizeMessageSecret(candidate);
+    if (normalized) {
+      encKeyHex = normalized;
+      break;
+    }
+  }
+
   return {
     pollId,
     question,
     options,
+    remoteJid,
+    encKeyHex,
+    selectableCount,
   };
 }
 
@@ -253,7 +306,13 @@ export function rememberPollMetadata(metadata: PollMetadata | null | undefined):
 
 export function rememberPollMetadataFromMessage(
   message: WAMessage,
-  fallback?: { question?: string; options?: string[] },
+  fallback?: {
+    question?: string;
+    options?: string[];
+    remoteJid?: string | null;
+    messageSecret?: Uint8Array | Buffer | string | null;
+    selectableCount?: number | null;
+  },
 ): void {
   const pollId = message.key?.id;
   if (!pollId) return;
@@ -268,11 +327,18 @@ export function rememberPollMetadataFromMessage(
     const normalizedOptions = options.filter(
       (option): option is PollOptionMetadata => Boolean(option),
     );
-    if (question || normalizedOptions.length) {
+    const encKeyHex = normalizeMessageSecret(fallback.messageSecret ?? null);
+    const remoteJid = fallback.remoteJid ?? null;
+    const selectableCount =
+      typeof fallback.selectableCount === 'number' ? fallback.selectableCount : null;
+    if (question || normalizedOptions.length || encKeyHex || remoteJid || selectableCount != null) {
       fallbackMetadata = {
         pollId,
         question,
         options: normalizedOptions,
+        remoteJid,
+        encKeyHex,
+        selectableCount,
       };
     }
   }
