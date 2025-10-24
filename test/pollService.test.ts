@@ -326,6 +326,68 @@ test('onMessageUpsert processes poll updates and emits poll choice webhook', asy
   assert.deepStrictEqual(payload.selectedOptions, [{ id: 'Produto A', text: 'Produto A' }]);
 });
 
+test('onMessageUpsert handles plaintext poll update without encryption payload', async () => {
+  const store = new PollMessageStore();
+  const pollMessage = buildPollMessage();
+  store.remember(pollMessage, 60_000);
+
+  const eventStore = new BrokerEventStore();
+  const webhook = new FakeWebhook();
+  const logger = { warn: () => {} } as unknown as pino.Logger;
+  const sock = { user: { id: '556277777777@s.whatsapp.net' } } as unknown as WASocket;
+
+  const service = new PollService(sock, webhook as any, logger, {
+    store,
+    eventStore,
+    instanceId: 'instance-1',
+    feedbackTemplate: null,
+    aggregateVotesFn: () => aggregateResult,
+  });
+
+  const plaintextUpdate: proto.Message.IPollUpdateMessage = {
+    pollCreationMessageKey: {
+      id: 'poll-123',
+      remoteJid: POLL_REMOTE_JID,
+      participant: '556277777777@s.whatsapp.net',
+    },
+    pollUpdateMessageKey: {
+      id: 'vote-plaintext-1',
+      remoteJid: POLL_REMOTE_JID,
+      participant: VOTER_JID,
+      fromMe: false,
+    },
+    vote: {
+      pollOptionId: 'Produto A',
+      selectedOptions: [createHash('sha256').update('Produto A').digest()],
+    },
+  };
+
+  const upsertEvent: BaileysEventMap['messages.upsert'] = {
+    type: 'append',
+    messages: [
+      {
+        key: {
+          id: 'poll-123',
+          remoteJid: POLL_REMOTE_JID,
+          participant: VOTER_JID,
+        },
+        messageTimestamp: 1_700_000_150,
+        message: {
+          pollUpdateMessage: plaintextUpdate,
+        },
+        pushName: 'Votante',
+      } as unknown as WAMessage,
+    ],
+  };
+
+  await service.onMessageUpsert(upsertEvent);
+
+  assert.equal(webhook.events.length, 1, 'expected webhook to be emitted');
+  const [{ event, payload }] = webhook.events as Array<{ event: string; payload: any }>;
+  assert.equal(event, 'POLL_CHOICE');
+  assert.deepStrictEqual(payload.selectedOptions, [{ id: 'Produto A', text: 'Produto A' }]);
+});
+
 test('onMessageUpsert decrypts encrypted poll votes before aggregating', async () => {
   const store = new PollMessageStore();
   const pollMessage = buildPollMessage();
