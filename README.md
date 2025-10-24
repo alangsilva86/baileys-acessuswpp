@@ -347,7 +347,6 @@ Para mensagens com mídia, o bloco `message` inclui o objeto `media` com detalhe
 - `POST /instances/:id/send-buttons` - Enviar botões de resposta rápida
 - `POST /instances/:id/send-list` - Enviar lista interativa com seções/opções
 - `POST /instances/:id/send-media` - Enviar mídia (imagem, vídeo, áudio ou documento)
-- `POST /instances/:id/send-poll` - Enviar enquete para um contato ou grupo
 - `POST /instances/:id/exists` - Verificar se número existe no WhatsApp
 - `GET /instances/:id/status` - Verificar status de mensagem
 
