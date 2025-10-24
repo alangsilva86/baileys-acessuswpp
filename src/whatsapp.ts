@@ -206,15 +206,15 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     }
 
     try {
-      await messageService.onMessagesUpsert(normalizedEvent);
-    } catch (err: any) {
-      logger.warn({ iid, err: err?.message }, 'message.service.messages.upsert.failed');
-    }
-
-    try {
       await pollService.onMessageUpsert(evt);
     } catch (err: any) {
       logger.warn({ iid, err: err?.message }, 'poll.service.messages.upsert.failed');
+    }
+
+    try {
+      await messageService.onMessagesUpsert(normalizedEvent);
+    } catch (err: any) {
+      logger.warn({ iid, err: err?.message }, 'message.service.messages.upsert.failed');
     }
 
     void webhook

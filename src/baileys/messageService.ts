@@ -23,6 +23,7 @@ import type {
   BrokerEventStore,
 } from '../broker/eventStore.js';
 import { toIsoDate } from './time.js';
+import { getVoteSelection, recordVoteSelection } from './pollMetadata.js';
 
 export interface SendTextOptions {
   timeoutMs?: number;
@@ -734,11 +735,25 @@ export class MessageService {
     const messageId = message.key?.id ?? null;
     const chatId = message.key?.remoteJid ?? null;
     const extractedText = extractMessageText(message);
+    const voteSelection = getVoteSelection(messageId);
+    let voteText: string | null = null;
+    if (voteSelection?.selectedOptions?.length) {
+      const parts = voteSelection.selectedOptions
+        .map((option) => option.text || option.id || '')
+        .map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .filter((value) => Boolean(value));
+      if (parts.length) {
+        voteText = parts.join(', ');
+      }
+    }
+    if (voteSelection) {
+      recordVoteSelection(messageId, null);
+    }
 
     const text =
       Object.prototype.hasOwnProperty.call(messageOverrides, 'text')
         ? messageOverrides.text ?? null
-        : extractedText ?? null;
+        : voteText ?? extractedText ?? null;
 
     const interactive =
       Object.prototype.hasOwnProperty.call(messageOverrides, 'interactive')
