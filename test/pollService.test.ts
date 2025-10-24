@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import type { proto, WAMessage, WAMessageUpdate, WASocket } from '@whiskeysockets/baileys';
+import type {
+  BaileysEventMap,
+  proto,
+  WAMessage,
+  WAMessageUpdate,
+  WASocket,
+} from '@whiskeysockets/baileys';
 import type pino from 'pino';
 
 import { PollService } from '../src/baileys/pollService.js';
@@ -165,6 +171,48 @@ test('onMessageUpdate maps selected options without pollUpdateMessageKey', async
   assert.deepStrictEqual(payload.selectedOptions, [
     { id: 'Produto A', text: 'Produto A' },
   ]);
+});
+
+test('onMessageUpsert stores poll creation sent from current device', async () => {
+  const store = new PollMessageStore();
+  const eventStore = new BrokerEventStore();
+  const webhook = new FakeWebhook();
+  const logger = { warn: () => {} } as unknown as pino.Logger;
+  const sock = { user: { id: '556277777777@s.whatsapp.net' } } as unknown as WASocket;
+
+  const service = new PollService(sock, webhook as any, logger, {
+    store,
+    eventStore,
+    instanceId: 'instance-1',
+    feedbackTemplate: null,
+    aggregateVotesFn: () => aggregateResult,
+  });
+
+  const pollMessage = buildPollMessage();
+  pollMessage.key = {
+    ...(pollMessage.key || {}),
+    fromMe: true,
+  } as WAMessage['key'];
+
+  const upsertEvent: BaileysEventMap['messages.upsert'] = {
+    type: 'notify',
+    messages: [pollMessage],
+  };
+
+  await service.onMessageUpsert(upsertEvent);
+
+  assert.ok(store.get('poll-123'), 'expected poll message to be stored');
+
+  const update = buildPollUpdate();
+  await service.onMessageUpdate([update]);
+
+  const [queued] = eventStore.recent({ limit: 1, type: 'POLL_CHOICE' });
+  assert.ok(queued, 'expected poll choice event to be queued');
+  assert.equal(queued.payload.pollId, 'poll-123');
+
+  assert.equal(webhook.events.length, 1, 'expected webhook event to be emitted');
+  const [{ event }] = webhook.events;
+  assert.equal(event, 'POLL_CHOICE');
 });
 
 test('onMessageUpdate ignores updates without messageId metadata', async () => {

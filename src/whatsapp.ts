@@ -5,6 +5,7 @@ import {
   makeWASocket,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
+import type { BaileysEventMap } from '@whiskeysockets/baileys';
 import { recordMetricsSnapshot } from './utils.js';
 import type { Instance } from './instanceManager.js';
 import { MessageService } from './baileys/messageService.js';
@@ -159,7 +160,7 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     }
   });
 
-  sock.ev.on('messages.upsert', async (evt: any) => {
+  sock.ev.on('messages.upsert', async (evt: BaileysEventMap['messages.upsert']) => {
     const rawMessages = evt.messages || [];
     const filteredMessages = filterClientMessages(rawMessages);
     const normalizedEvent = { ...evt, messages: filteredMessages };
@@ -211,7 +212,7 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     }
 
     try {
-      await pollService.onMessageUpsert(normalizedEvent);
+      await pollService.onMessageUpsert(evt);
     } catch (err: any) {
       logger.warn({ iid, err: err?.message }, 'poll.service.messages.upsert.failed');
     }
