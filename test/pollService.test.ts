@@ -71,6 +71,26 @@ function buildPollUpdate(
   } as unknown as WAMessageUpdate;
 }
 
+function buildPollUpdateMessage(
+  optionName = 'Produto A',
+  selectedHash?: Uint8Array,
+): WAMessage {
+  const update = buildPollUpdate(optionName, selectedHash);
+  const pollUpdate = update.update?.pollUpdates?.[0];
+  if (!pollUpdate) {
+    throw new Error('expected poll update payload');
+  }
+
+  return {
+    key: update.key,
+    messageTimestamp: update.messageTimestamp,
+    message: {
+      pollUpdateMessage: pollUpdate,
+    },
+    pushName: (update as unknown as { pushName?: string }).pushName,
+  } as unknown as WAMessage;
+}
+
 class FakeWebhook {
   public readonly events: Array<{ event: string; payload: unknown; options: unknown }> = [];
 
@@ -258,6 +278,43 @@ test('onMessageUpsert stores poll creation sent from current device', async () =
   assert.equal(webhook.events.length, 1, 'expected webhook event to be emitted');
   const [{ event }] = webhook.events;
   assert.equal(event, 'POLL_CHOICE');
+});
+
+test('onMessageUpsert processes poll updates and emits poll choice webhook', async () => {
+  const store = new PollMessageStore();
+  const pollMessage = buildPollMessage();
+  store.remember(pollMessage, 60_000);
+
+  const eventStore = new BrokerEventStore();
+  const webhook = new FakeWebhook();
+  const logger = { warn: () => {} } as unknown as pino.Logger;
+  const sock = { user: { id: '556277777777@s.whatsapp.net' } } as unknown as WASocket;
+
+  const service = new PollService(sock, webhook as any, logger, {
+    store,
+    eventStore,
+    instanceId: 'instance-1',
+    feedbackTemplate: null,
+    aggregateVotesFn: () => aggregateResult,
+  });
+
+  const updateMessage = buildPollUpdateMessage();
+  const upsertEvent: BaileysEventMap['messages.upsert'] = {
+    type: 'notify',
+    messages: [updateMessage],
+  };
+
+  await service.onMessageUpsert(upsertEvent);
+
+  const [queued] = eventStore.recent({ limit: 1, type: 'POLL_CHOICE' });
+  assert.ok(queued, 'expected poll choice event to be queued');
+  assert.equal(queued.payload.pollId, 'poll-123');
+
+  assert.equal(webhook.events.length, 1, 'expected webhook to be emitted');
+  const [{ event, payload }] = webhook.events as Array<{ event: string; payload: any }>;
+  assert.equal(event, 'POLL_CHOICE');
+  assert.equal(payload.voterJid, VOTER_JID);
+  assert.deepStrictEqual(payload.selectedOptions, [{ id: 'Produto A', text: 'Produto A' }]);
 });
 
 test('onMessageUpdate ignores updates without messageId metadata', async () => {
