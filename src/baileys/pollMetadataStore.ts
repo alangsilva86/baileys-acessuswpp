@@ -3,6 +3,7 @@ import { dirname, join } from 'path';
 import { pathToFileURL } from 'url';
 
 export interface PollMetadataRecord {
+  pollKey: string;
   pollId: string;
   remoteJid: string | null;
   encKeyHex: string | null;
@@ -13,7 +14,7 @@ export interface PollMetadataRecord {
 }
 
 export interface PollMetadataStore {
-  get(pollId: string): Promise<PollMetadataRecord | null>;
+  get(pollKey: string): Promise<PollMetadataRecord | null>;
   put(record: PollMetadataRecord): Promise<void>;
 }
 
@@ -35,18 +36,26 @@ class FilePollMetadataStore implements PollMetadataStore {
     this.filePath = filePath;
   }
 
-  async get(pollId: string): Promise<PollMetadataRecord | null> {
+  async get(pollKey: string): Promise<PollMetadataRecord | null> {
     const data = await this.readAll();
-    return data.get(pollId) ?? null;
+    return data.get(pollKey) ?? null;
   }
 
   async put(record: PollMetadataRecord): Promise<void> {
     this.writeQueue = this.writeQueue.then(async () => {
       const data = await this.readAll();
-      data.set(record.pollId, {
+      data.set(record.pollKey, {
         ...record,
         updatedAt: record.updatedAt ?? Date.now(),
       });
+
+      if (record.remoteJid) {
+        const fallbackKey = `#${record.pollId}`;
+        if (fallbackKey !== record.pollKey) {
+          data.delete(fallbackKey);
+        }
+      }
+
       await this.writeAll(data);
     });
     await this.writeQueue;
@@ -57,13 +66,26 @@ class FilePollMetadataStore implements PollMetadataStore {
       const buffer = await fs.readFile(this.filePath);
       const json = JSON.parse(buffer.toString()) as Record<string, PollMetadataRecord>;
       return new Map(
-        Object.entries(json).map(([pollId, value]) => [
-          pollId,
-          {
-            ...value,
-            pollId,
-          },
-        ]),
+        Object.entries(json).map(([storedKey, value]) => {
+          const pollKey = value.pollKey ?? storedKey;
+          const separatorIndex = pollKey.indexOf('#');
+          const derivedRemote = separatorIndex >= 0 ? pollKey.slice(0, separatorIndex) : '';
+          const derivedPollId =
+            separatorIndex >= 0 ? pollKey.slice(separatorIndex + 1) : pollKey;
+          const pollId = value.pollId ?? derivedPollId ?? pollKey;
+          const remoteJid =
+            value.remoteJid ?? (separatorIndex >= 0 ? derivedRemote || null : null);
+
+          return [
+            pollKey,
+            {
+              ...value,
+              pollKey,
+              pollId,
+              remoteJid: remoteJid ?? null,
+            },
+          ];
+        }),
       );
     } catch (err: any) {
       if (err && err.code === 'ENOENT') {
@@ -76,8 +98,8 @@ class FilePollMetadataStore implements PollMetadataStore {
   private async writeAll(data: Map<string, PollMetadataRecord>): Promise<void> {
     await ensureDirectory(this.filePath);
     const plain: Record<string, PollMetadataRecord> = {};
-    for (const [pollId, value] of data.entries()) {
-      plain[pollId] = { ...value, pollId };
+    for (const [pollKey, value] of data.entries()) {
+      plain[pollKey] = { ...value, pollKey };
     }
     await fs.writeFile(this.filePath, JSON.stringify(plain, null, 2), 'utf-8');
   }

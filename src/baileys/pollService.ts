@@ -28,6 +28,7 @@ import {
   normalizeOptionHash,
   normalizeOptionText,
   normalizePollOption,
+  normalizeJid,
   recordVoteSelection,
   rememberPollMetadataFromMessage,
 } from './pollMetadata.js';
@@ -124,12 +125,6 @@ function isPollVoteMessage(
   return !!value && Array.isArray((value as proto.Message.IPollVoteMessage).selectedOptions);
 }
 
-function normalizeJid(value: string | null | undefined): string | null {
-  if (typeof value !== 'string') return null;
-  const [base] = value.split(':');
-  return base || null;
-}
-
 export class PollService {
   private readonly store: PollMessageStore;
   private readonly feedbackTemplate?: string | null;
@@ -217,7 +212,10 @@ export class PollService {
         ?.pollCreationMessageKey;
       let pollMessage = this.store.get(creationKey?.id) ?? this.store.get(message.key?.id);
       if (!pollMessage) {
-        pollMessage = await this.rehydratePollMessage(creationKey?.id ?? message.key?.id ?? null);
+        pollMessage = await this.rehydratePollMessage(
+          creationKey?.id ?? message.key?.id ?? null,
+          creationKey?.remoteJid ?? message.key?.remoteJid ?? null,
+        );
         if (pollMessage) {
           this.store.remember(pollMessage);
         }
@@ -280,7 +278,10 @@ export class PollService {
       const voterKey = pollUpdate?.pollUpdateMessageKey ?? null;
       let pollMessage = this.store.get(creationKey?.id) ?? this.store.get(update.key?.id);
       if (!pollMessage) {
-        pollMessage = await this.rehydratePollMessage(creationKey?.id ?? update.key?.id ?? null);
+        pollMessage = await this.rehydratePollMessage(
+          creationKey?.id ?? update.key?.id ?? null,
+          creationKey?.remoteJid ?? update.key?.remoteJid ?? null,
+        );
         if (pollMessage) {
           this.store.remember(pollMessage);
         }
@@ -332,6 +333,8 @@ export class PollService {
     const pollId = pollMessage.key?.id;
     if (!pollId) return;
 
+    const pollRemoteJid = pollMessage.key?.remoteJid ?? null;
+
     const appliedUpdates = this.applyPollUpdatesToMessage(pollMessage, pollUpdates);
     if (!appliedUpdates.length) return;
 
@@ -359,10 +362,10 @@ export class PollService {
     );
     const contact = buildContactPayload(lead);
 
-    let pollMetadata = await getPollMetadata(pollId);
+    let pollMetadata = await getPollMetadata(pollId, pollRemoteJid);
     if (!pollMetadata) {
       await rememberPollMetadataFromMessage(pollMessage);
-      pollMetadata = await getPollMetadata(pollId);
+      pollMetadata = await getPollMetadata(pollId, pollRemoteJid);
     }
 
     const { hashMap: optionHashMap, textToHash } = buildOptionHashMaps(pollMessage);
@@ -511,8 +514,8 @@ export class PollService {
     const question = extractPollQuestion(pollMessage) || pollMetadata?.question || '';
 
     if (observedOptions.length || question) {
-      await addObservedPollMetadata(pollId, question, observedOptions);
-      pollMetadata = (await getPollMetadata(pollId)) ?? pollMetadata;
+      await addObservedPollMetadata(pollId, question, observedOptions, pollRemoteJid);
+      pollMetadata = (await getPollMetadata(pollId, pollRemoteJid)) ?? pollMetadata;
     }
 
     const uniqueVoters = new Set<string>();
@@ -583,9 +586,10 @@ export class PollService {
 
   private async rehydratePollMessage(
     pollId: string | null | undefined,
+    remoteJid?: string | null | undefined,
   ): Promise<WAMessage | null> {
     if (!pollId) return null;
-    const metadata = await getPollMetadata(pollId);
+    const metadata = await getPollMetadata(pollId, remoteJid ?? null);
     if (!metadata) return null;
 
     const secretBuffer = metadata.encKeyHex ? Buffer.from(metadata.encKeyHex, 'hex') : null;
@@ -613,7 +617,7 @@ export class PollService {
     const synthetic: WAMessage = {
       key: {
         id: metadata.pollId,
-        remoteJid: metadata.remoteJid ?? undefined,
+        remoteJid: (metadata.remoteJid ?? normalizeJid(remoteJid)) ?? undefined,
         fromMe: true,
       },
       messageTimestamp: Date.now(),
@@ -786,7 +790,7 @@ export class PollService {
 
     const pollId = pollMessage.key?.id;
     if (pollId) {
-      const metadata = getPollMetadataFromCache(pollId);
+      const metadata = getPollMetadataFromCache(pollId, pollMessage.key?.remoteJid ?? null);
       if (metadata?.encKeyHex) {
         try {
           const buffer = Buffer.from(metadata.encKeyHex, 'hex');
