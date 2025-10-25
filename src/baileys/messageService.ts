@@ -654,10 +654,22 @@ export class MessageService {
             {
               messageId,
               pollId,
+              pollUpdateMessageId: pollUpdate.pollUpdateMessageKey?.id ?? null,
               hasMetadata: Boolean(metadata),
               clue: 'sem metadados, estamos sem mapa do tesouro — talvez a criação não tenha sido vista',
             },
             'poll.vote.metadata.missing',
+          );
+        } else {
+          this.logger.info(
+            {
+              messageId,
+              pollId,
+              optionsCount: metadata.options.length,
+              hasEncKey: Boolean(metadata.encKeyHex),
+              clue: 'metadados recuperados — hora de traduzir o voto',
+            },
+            'poll.vote.metadata.ready',
           );
         }
 

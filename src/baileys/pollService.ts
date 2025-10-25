@@ -1012,41 +1012,83 @@ export class PollService {
       return null;
     }
 
-    try {
+    const attempts: Array<{ creator: string; voter: string; label: string }> = [];
+    const seen = new Set<string>();
+    const enqueueAttempt = (creator: string | null, voter: string | null, label: string) => {
+      if (!creator || !voter) return;
+      const key = `${creator}__${voter}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      attempts.push({ creator, voter, label });
+    };
+
+    enqueueAttempt(pollCreatorJid, resolvedVoterJid, 'exact');
+
+    const normalizedCreator = normalizeJid(pollCreatorJid);
+    const normalizedVoter = normalizeJid(resolvedVoterJid);
+
+    enqueueAttempt(normalizedCreator, normalizedVoter, 'normalized-both');
+    enqueueAttempt(normalizedCreator, resolvedVoterJid, 'normalized-creator');
+    enqueueAttempt(pollCreatorJid, normalizedVoter, 'normalized-voter');
+
+    const errors: Array<{ attempt: string; error: string }> = [];
+
+    for (const attempt of attempts) {
       this.logger.info(
         {
           pollId: pollMsgId,
-          pollCreatorJid,
-          voterJid: resolvedVoterJid,
+          pollCreatorJid: attempt.creator,
+          voterJid: attempt.voter,
           pollEncKeyHash,
-          clue: 'tudo pronto para abrir o voto — respirando fundo e decifrando',
+          attempt: attempt.label,
+          clue: 'tentativa de decifrar o voto — vamos ver se essa chave abre o cofre',
         },
-        'poll.vote.decrypt.start',
+        'poll.vote.decrypt.attempt',
       );
-      const vote = this.decryptPollVote(encVote, {
-        pollCreatorJid, // mantém sufixo :device se existir
-        pollMsgId,
-        pollEncKey,
-        voterJid: resolvedVoterJid, // mantém sufixo :device se existir
-      });
 
-      return {
-        pollUpdateMessageKey: pollUpdateMessage.pollUpdateMessageKey ?? message.key ?? undefined,
-        vote,
-        senderTimestampMs: pollUpdateMessage.senderTimestampMs ?? undefined,
-        serverTimestampMs: pollUpdateMessage.metadata?.serverTimestampMs ?? undefined,
-      } as proto.IPollUpdate;
-    } catch (err) {
-      const logContext: Record<string, unknown> = {
-        err: (err as Error)?.message ?? String(err),
-        pollId: pollMsgId,
-      };
-      if (pollEncKeyHash) logContext.pollEncKeyHash = pollEncKeyHash;
-      logContext.tip =
-        'se continuar falhando, confira se o messageSecret foi salvo ou se o voto veio de outro dispositivo';
-      this.logger.warn(logContext, 'poll.vote.decrypt.failed');
-      return null;
+      try {
+        const vote = this.decryptPollVote(encVote, {
+          pollCreatorJid: attempt.creator,
+          pollMsgId,
+          pollEncKey,
+          voterJid: attempt.voter,
+        });
+
+        if (attempt.label !== 'exact') {
+          this.logger.info(
+            {
+              pollId: pollMsgId,
+              attempt: attempt.label,
+              note: 'fallback funcionou — chaves harmonizadas com sucesso',
+            },
+            'poll.vote.decrypt.fallback_success',
+          );
+        }
+
+        return {
+          pollUpdateMessageKey: pollUpdateMessage.pollUpdateMessageKey ?? message.key ?? undefined,
+          vote,
+          senderTimestampMs: pollUpdateMessage.senderTimestampMs ?? undefined,
+          serverTimestampMs: pollUpdateMessage.metadata?.serverTimestampMs ?? undefined,
+        } as proto.IPollUpdate;
+      } catch (err) {
+        errors.push({
+          attempt: attempt.label,
+          error: (err as Error)?.message ?? String(err),
+        });
+      }
     }
+
+    this.logger.warn(
+      {
+        pollId: pollMsgId,
+        pollEncKeyHash,
+        attempts: errors,
+        tip: 'se continuar falhando, confira se o messageSecret foi salvo ou se o voto veio de outro dispositivo',
+      },
+      'poll.vote.decrypt.failed',
+    );
+    return null;
   }
 
   /** Busca encKey: payload → contextInfo → message.messageContextInfo → cache persistido (hex). */
