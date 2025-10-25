@@ -26,37 +26,20 @@ import type {
 import { toIsoDate } from './time.js';
 import { getVoteSelection, recordVoteSelection } from './pollMetadata.js';
 
-/* ========================================================================== */
-/* Tipos de envio                                                             */
-/* ========================================================================== */
-
 export interface SendTextOptions {
   timeoutMs?: number;
   messageOptions?: Parameters<WASocket['sendMessage']>[2];
 }
 
-export interface TemplateButtonOption {
-  id: string;
-  title: string;
-}
-
+export interface TemplateButtonOption { id: string; title: string; }
 export interface SendButtonsPayload {
   text: string;
   footer?: string;
   buttons: TemplateButtonOption[];
 }
 
-export interface ListOptionPayload {
-  id: string;
-  title: string;
-  description?: string;
-}
-
-export interface ListSectionPayload {
-  title?: string;
-  options: ListOptionPayload[];
-}
-
+export interface ListOptionPayload { id: string; title: string; description?: string; }
+export interface ListSectionPayload { title?: string; options: ListOptionPayload[]; }
 export interface SendListPayload {
   text: string;
   buttonText: string;
@@ -66,7 +49,6 @@ export interface SendListPayload {
 }
 
 export const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
-
 export type MediaMessageType = 'image' | 'video' | 'audio' | 'document';
 
 export interface MediaPayload {
@@ -94,28 +76,14 @@ export interface BuiltMediaContent {
   source: 'base64' | 'url';
 }
 
-/* ========================================================================== */
-/* Tipos internos                                                             */
-/* ========================================================================== */
-
-interface InteractivePayload {
-  type: string;
-  [key: string]: unknown;
-}
-
+interface InteractivePayload { type: string; [k: string]: unknown; }
 interface MediaMetadataPayload {
   mediaType: string | null;
   mimetype: string | null;
   fileName: string | null;
   size: number | null;
   caption: string | null;
-  [key: string]: unknown;
-}
-
-interface PollChoicePayload {
-  pollId: string | null | undefined;
-  question: string | null | undefined;
-  selectedOptions: Array<{ id: string | null; text: string | null }>;
+  [k: string]: unknown;
 }
 
 interface StructuredMessagePayload {
@@ -125,17 +93,13 @@ interface StructuredMessagePayload {
   text: string | null;
   interactive?: InteractivePayload | null;
   media?: MediaMetadataPayload | null;
-  poll?: PollChoicePayload | null;
 }
 
 type StructuredMessageOverrides = Partial<Omit<StructuredMessagePayload, 'id' | 'chatId'>>;
 
 interface EventMetadata {
   timestamp: string;
-  broker: {
-    direction: BrokerEventDirection;
-    type: string;
-  };
+  broker: { direction: BrokerEventDirection; type: string; };
   source: string;
 }
 
@@ -150,20 +114,18 @@ export interface MessageServiceOptions {
   instanceId: string;
 }
 
-/* ========================================================================== */
-/* Helpers                                                                    */
-/* ========================================================================== */
+/* --------------------------------- helpers -------------------------------- */
 
 const DEFAULT_DOCUMENT_MIMETYPE = 'application/octet-stream';
 
 function createError(code: string, message?: string): Error {
   const err = new Error(message ?? code);
-  (err as Error & { code?: string }).code = code;
+  (err as any).code = code;
   return err;
 }
 
-function sanitizeString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
+function sanitizeString(v: unknown): string {
+  return typeof v === 'string' ? v.trim() : '';
 }
 
 function extractBase64(value: string): { buffer: Buffer; mimetype: string | null } {
@@ -189,9 +151,7 @@ export function buildMediaMessageContent(
   const url = sanitizeString(media.url);
   const base64 = sanitizeString(media.base64);
 
-  if (!url && !base64) {
-    throw createError('media_source_missing', 'media.url ou media.base64 são obrigatórios');
-  }
+  if (!url && !base64) throw createError('media_source_missing', 'media.url ou media.base64 são obrigatórios');
 
   let source: Buffer | { url: string };
   let size: number | null = null;
@@ -199,28 +159,24 @@ export function buildMediaMessageContent(
 
   if (base64) {
     const { buffer, mimetype } = extractBase64(base64);
-    if (buffer.length > MAX_MEDIA_BYTES) {
-      throw createError('media_too_large', 'arquivo excede o tamanho máximo permitido');
-    }
+    if (buffer.length > MAX_MEDIA_BYTES) throw createError('media_too_large', 'arquivo excede o tamanho máximo permitido');
     source = buffer;
     size = buffer.length;
     detectedMime = mimetype;
   } else {
-    // valida url
     try {
       const parsed = new URL(url);
       if (!['http:', 'https:'].includes(parsed.protocol)) {
         throw createError('media_url_invalid', 'apenas URLs http(s) são aceitas');
       }
     } catch (err) {
-      if ((err as Error & { code?: string }).code === 'media_url_invalid') throw err;
+      if ((err as any).code === 'media_url_invalid') throw err;
       throw createError('media_url_invalid', (err as Error).message);
     }
     source = { url };
   }
 
-  const rawMime =
-    sanitizeString(options.mimetype) || sanitizeString(media.mimetype) || (detectedMime ?? '');
+  const rawMime = sanitizeString(options.mimetype) || sanitizeString(media.mimetype) || (detectedMime ?? '');
   let finalMime: string | null = rawMime || null;
   const fileName = sanitizeString(options.fileName) || sanitizeString(media.fileName) || null;
   const caption = sanitizeString(options.caption);
@@ -228,66 +184,47 @@ export function buildMediaMessageContent(
   const gifPlayback = Boolean(options.gifPlayback ?? media.gifPlayback ?? false);
 
   let content: AnyMessageContent;
-
   switch (type) {
     case 'image': {
       const image: AnyMessageContent = { image: source };
       if (caption) (image as any).caption = caption;
       if (finalMime) (image as any).mimetype = finalMime;
-      content = image;
-      break;
+      content = image; break;
     }
     case 'video': {
       const video: AnyMessageContent = { video: source };
       if (caption) (video as any).caption = caption;
       if (finalMime) (video as any).mimetype = finalMime;
       if (gifPlayback) (video as any).gifPlayback = true;
-      content = video;
-      break;
+      content = video; break;
     }
     case 'audio': {
       const audio: AnyMessageContent = { audio: source };
       if (finalMime) (audio as any).mimetype = finalMime;
       if (ptt) (audio as any).ptt = true;
-      content = audio;
-      break;
+      content = audio; break;
     }
     case 'document': {
       const documentMime = finalMime || DEFAULT_DOCUMENT_MIMETYPE;
       const document: AnyMessageContent = { document: source, mimetype: documentMime } as AnyMessageContent;
       if (caption) (document as any).caption = caption;
       if (fileName) (document as any).fileName = fileName;
-      content = document;
-      finalMime = documentMime;
-      break;
+      content = document; finalMime = documentMime; break;
     }
     default:
       throw createError('media_type_unsupported', `tipo de mídia não suportado: ${type}`);
   }
 
-  return {
-    content,
-    mimetype: finalMime,
-    fileName,
-    size,
-    source: base64 ? 'base64' : 'url',
-  };
+  return { content, mimetype: finalMime, fileName, size, source: base64 ? 'base64' : 'url' };
 }
 
 function toSafeNumber(value: unknown): number | null {
   if (value == null) return null;
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  if (typeof value === 'string') {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  if (typeof value === 'bigint') {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
+  if (typeof value === 'string') { const n = Number(value); return Number.isFinite(n) ? n : null; }
+  if (typeof value === 'bigint') { const n = Number(value); return Number.isFinite(n) ? n : null; }
   if (typeof value === 'object' && value !== null && typeof (value as Long).toNumber === 'function') {
-    const parsed = (value as Long).toNumber();
-    return Number.isFinite(parsed) ? parsed : null;
+    const n = (value as Long).toNumber(); return Number.isFinite(n) ? n : null;
   }
   return null;
 }
@@ -326,7 +263,6 @@ function normalizeMessageType(rawType: string | null): string | null {
     case 'pollCreationMessageV2':
     case 'pollCreationMessageV3':
       return 'poll';
-    // entra do WhatsApp quando alguém vota; manter distinto para debug
     case 'pollUpdateMessage':
     case 'pollUpdateMessageV2':
     case 'pollUpdateMessageV3':
@@ -336,12 +272,11 @@ function normalizeMessageType(rawType: string | null): string | null {
   }
 }
 
-function getOptionalString(source: unknown, key: string): string | null {
-  if (!source || typeof source !== 'object') return null;
-  const value = (source as Record<string, unknown>)[key];
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
+function getOptionalString(src: unknown, key: string): string | null {
+  if (!src || typeof src !== 'object') return null;
+  const v = (src as Record<string, unknown>)[key];
+  if (typeof v !== 'string') return null;
+  const t = v.trim(); return t ? t : null;
 }
 
 function buildInteractivePayloadFromMessage(message: WAMessage): InteractivePayload | null {
@@ -350,20 +285,12 @@ function buildInteractivePayloadFromMessage(message: WAMessage): InteractivePayl
 
   const buttonsResponse = content.buttonsResponseMessage;
   if (buttonsResponse) {
-    return {
-      type: 'buttons_response',
-      id: buttonsResponse.selectedButtonId ?? null,
-      title: buttonsResponse.selectedDisplayText ?? null,
-    };
+    return { type: 'buttons_response', id: buttonsResponse.selectedButtonId ?? null, title: buttonsResponse.selectedDisplayText ?? null };
   }
 
   const templateReply = content.templateButtonReplyMessage;
   if (templateReply) {
-    return {
-      type: 'buttons_response',
-      id: templateReply.selectedId ?? null,
-      title: templateReply.selectedDisplayText ?? null,
-    };
+    return { type: 'buttons_response', id: templateReply.selectedId ?? null, title: templateReply.selectedDisplayText ?? null };
   }
 
   const listResponse = content.listResponseMessage;
@@ -375,9 +302,7 @@ function buildInteractivePayloadFromMessage(message: WAMessage): InteractivePayl
     const title = listResponse.title ?? listResponse.singleSelectReply?.selectedRowId ?? null;
     if (title) interactive.title = title;
     if (listResponse.description) interactive.description = listResponse.description;
-    if (listResponse.singleSelectReply?.selectedRowId) {
-      interactive.rowId = listResponse.singleSelectReply.selectedRowId;
-    }
+    if (listResponse.singleSelectReply?.selectedRowId) interactive.rowId = listResponse.singleSelectReply.selectedRowId;
     return interactive;
   }
 
@@ -386,17 +311,11 @@ function buildInteractivePayloadFromMessage(message: WAMessage): InteractivePayl
     const interactive: InteractivePayload = { type: 'interactive_response' };
     const params = interactiveResponse.paramsJson;
     if (typeof params === 'string') {
-      try {
-        interactive.params = JSON.parse(params);
-      } catch {
-        interactive.params = params;
-      }
+      try { interactive.params = JSON.parse(params); } catch { interactive.params = params; }
     }
     if (interactiveResponse.name) interactive.name = interactiveResponse.name;
     const responseId = (interactiveResponse as { id?: string | null }).id;
-    if (typeof responseId === 'string' && responseId.trim()) {
-      interactive.id = responseId;
-    }
+    if (typeof responseId === 'string' && responseId.trim()) interactive.id = responseId;
     return interactive;
   }
 
@@ -485,18 +404,14 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
     };
     if (location.degreesLatitude != null) media.latitude = location.degreesLatitude;
     if (location.degreesLongitude != null) media.longitude = location.degreesLongitude;
-    if ('accuracyInMeters' in location && location.accuracyInMeters != null) {
-      media.accuracy = (location as any).accuracyInMeters;
-    }
+    if ('accuracyInMeters' in location && location.accuracyInMeters != null) media.accuracy = (location as any).accuracyInMeters;
     return media;
   }
 
   return null;
 }
 
-/* ========================================================================== */
-/* Serviço                                                                     */
-/* ========================================================================== */
+/* --------------------------------- serviço -------------------------------- */
 
 export class MessageService {
   private readonly eventStore?: BrokerEventStore;
@@ -512,57 +427,35 @@ export class MessageService {
     this.instanceId = options.instanceId;
   }
 
-  /* --------------------------------- envio -------------------------------- */
-
   async sendText(jid: string, text: string, options: SendTextOptions = {}): Promise<WAMessage> {
     const message = await this.sendMessageWithTimeout(jid, { text }, options);
     await this.emitOutboundMessage(message, { text, type: 'text' });
     return message;
   }
 
-  async sendButtons(
-    jid: string,
-    payload: SendButtonsPayload,
-    options: SendTextOptions = {},
-  ): Promise<WAMessage> {
-    const templateButtons = payload.buttons.map((button, index) => ({
-      index: index + 1,
-      quickReplyButton: {
-        id: button.id,
-        displayText: button.title,
-      },
+  async sendButtons(jid: string, payload: SendButtonsPayload, options: SendTextOptions = {}): Promise<WAMessage> {
+    const templateButtons = payload.buttons.map((button, i) => ({
+      index: i + 1,
+      quickReplyButton: { id: button.id, displayText: button.title },
     }));
 
-    const content = {
-      text: payload.text,
-      footer: payload.footer,
-      templateButtons,
-    } as const;
-
+    const content = { text: payload.text, footer: payload.footer, templateButtons } as const;
     const message = await this.sendMessageWithTimeout(jid, content, options);
 
     const interactive: InteractivePayload = {
       type: 'buttons',
-      buttons: payload.buttons.map((button) => ({ ...button })),
+      buttons: payload.buttons.map((b) => ({ ...b })),
+      ...(payload.footer ? { footer: payload.footer } : {}),
     };
-    if (payload.footer) interactive.footer = payload.footer;
 
     await this.emitOutboundMessage(message, { text: payload.text, interactive, type: 'buttons' });
     return message;
   }
 
-  async sendList(
-    jid: string,
-    payload: SendListPayload,
-    options: SendTextOptions = {},
-  ): Promise<WAMessage> {
+  async sendList(jid: string, payload: SendListPayload, options: SendTextOptions = {}): Promise<WAMessage> {
     const sections = payload.sections.map((section) => ({
       title: section.title,
-      rows: section.options.map((option) => ({
-        rowId: option.id,
-        title: option.title,
-        description: option.description,
-      })),
+      rows: section.options.map((o) => ({ rowId: o.id, title: o.title, description: o.description })),
     }));
 
     const content = {
@@ -582,28 +475,19 @@ export class MessageService {
     const interactive: InteractivePayload = {
       type: 'list',
       buttonText: payload.buttonText,
-      sections: payload.sections.map((section) => ({
-        ...(section.title ? { title: section.title } : {}),
-        options: section.options.map((option) => ({
-          id: option.id,
-          title: option.title,
-          ...(option.description ? { description: option.description } : {}),
-        })),
+      ...(payload.title ? { title: payload.title } : {}),
+      ...(payload.footer ? { footer: payload.footer } : {}),
+      sections: payload.sections.map((s) => ({
+        ...(s.title ? { title: s.title } : {}),
+        options: s.options.map((o) => ({ id: o.id, title: o.title, ...(o.description ? { description: o.description } : {}) })),
       })),
     };
-    if (payload.title) interactive.title = payload.title;
-    if (payload.footer) interactive.footer = payload.footer;
 
     await this.emitOutboundMessage(message, { text: payload.text, interactive, type: 'list' });
     return message;
   }
 
-  async sendMedia(
-    jid: string,
-    type: MediaMessageType,
-    media: MediaPayload,
-    options: SendMediaOptions = {},
-  ): Promise<WAMessage> {
+  async sendMedia(jid: string, type: MediaMessageType, media: MediaPayload, options: SendMediaOptions = {}): Promise<WAMessage> {
     const timeoutMs = options.timeoutMs ?? getSendTimeoutMs();
     const built = buildMediaMessageContent(type, media, options);
     const sendPromise = this.sock.sendMessage(jid, built.content, options.messageOptions);
@@ -612,9 +496,7 @@ export class MessageService {
     const message = await (timeoutMs
       ? (Promise.race([
           sendPromise,
-          new Promise<WAMessage>((_, reject) => {
-            timeoutHandle = setTimeout(() => reject(new Error('send timeout')), timeoutMs);
-          }),
+          new Promise<WAMessage>((_, reject) => { timeoutHandle = setTimeout(() => reject(new Error('send timeout')), timeoutMs); }),
         ]) as Promise<WAMessage>)
       : sendPromise);
 
@@ -624,45 +506,31 @@ export class MessageService {
     await this.emitOutboundMessage(message, {
       text: caption || null,
       type: 'media',
-      media: {
-        mediaType: type,
-        caption: caption || null,
-        mimetype: built.mimetype,
-        fileName: built.fileName,
-        size: built.size,
-      },
+      media: { mediaType: type, caption: caption || null, mimetype: built.mimetype, fileName: built.fileName, size: built.size },
     });
 
     return message;
   }
 
-  /* ------------------------------- processamento -------------------------- */
-
   async onMessagesUpsert(event: BaileysEventMap['messages.upsert']): Promise<void> {
     const inbound = filterClientMessages(event.messages);
-    if (inbound.length) {
-      await this.onInbound(inbound);
-    }
+    if (inbound.length) await this.onInbound(inbound);
   }
 
   async onInbound(messages: WAMessage[]): Promise<void> {
     const filtered = filterClientMessages(messages);
     for (const message of filtered) {
       try {
-        const eventPayload = await this.createStructuredPayload(message, 'inbound');
-
+        const eventPayload = this.createStructuredPayload(message, 'inbound');
         let queued: BrokerEvent | null = null;
+
         if (this.eventStore) {
           queued = this.eventStore.enqueue({
             instanceId: this.instanceId,
             direction: 'inbound',
             type: 'MESSAGE_INBOUND',
             payload: eventPayload,
-            delivery: {
-              state: 'pending',
-              attempts: 0,
-              lastAttemptAt: null,
-            },
+            delivery: { state: 'pending', attempts: 0, lastAttemptAt: null },
           });
         }
 
@@ -673,7 +541,7 @@ export class MessageService {
     }
   }
 
-  /* ------------------------------- internos -------------------------------- */
+  /* -------------------------------- internos -------------------------------- */
 
   private async sendMessageWithTimeout(
     jid: string,
@@ -687,9 +555,7 @@ export class MessageService {
     const message = await (timeoutMs
       ? (Promise.race([
           sendPromise,
-          new Promise<WAMessage>((_, reject) => {
-            timeoutHandle = setTimeout(() => reject(new Error('send timeout')), timeoutMs);
-          }),
+          new Promise<WAMessage>((_, reject) => { timeoutHandle = setTimeout(() => reject(new Error('send timeout')), timeoutMs); }),
         ]) as Promise<WAMessage>)
       : sendPromise);
 
@@ -697,12 +563,8 @@ export class MessageService {
     return message;
   }
 
-  private async emitOutboundMessage(
-    message: WAMessage,
-    extras: StructuredMessageOverrides = {},
-  ): Promise<void> {
+  private async emitOutboundMessage(message: WAMessage, extras: StructuredMessageOverrides = {}): Promise<void> {
     const overrides: StructuredMessageOverrides = {};
-
     if ('text' in extras) {
       const text = extras.text;
       overrides.text = typeof text === 'string' ? text : text == null ? null : String(text);
@@ -711,7 +573,7 @@ export class MessageService {
     if ('media' in extras) overrides.media = extras.media ?? null;
     if ('type' in extras) overrides.type = extras.type ?? null;
 
-    const eventPayload = await this.createStructuredPayload(message, 'outbound', overrides);
+    const eventPayload = this.createStructuredPayload(message, 'outbound', overrides);
 
     let queued: BrokerEvent | null = null;
     if (this.eventStore) {
@@ -720,84 +582,45 @@ export class MessageService {
         direction: 'outbound',
         type: 'MESSAGE_OUTBOUND',
         payload: eventPayload,
-        delivery: {
-          state: 'pending',
-          attempts: 0,
-          lastAttemptAt: null,
-        },
+        delivery: { state: 'pending', attempts: 0, lastAttemptAt: null },
       });
     }
 
     await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload, { eventId: queued?.id });
   }
 
-  /** Espera curta para o PollService gravar a seleção no cache quando o evento chega invertido. */
-  private async waitVoteSelection(
-    messageId: string | null,
-    graceMs = 400,
-    stepMs = 25,
-  ): Promise<ReturnType<typeof getVoteSelection>> {
-    if (!messageId) return null;
-    let sel = getVoteSelection(messageId);
-    if (sel) return sel;
-
-    const deadline = Date.now() + Math.max(0, graceMs);
-    while (!sel && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, stepMs));
-      sel = getVoteSelection(messageId);
-    }
-    return sel ?? null;
-  }
-
-  private async createStructuredPayload(
+  private createStructuredPayload(
     message: WAMessage,
     direction: BrokerEventDirection,
     messageOverrides: StructuredMessageOverrides = {},
-  ): Promise<StructuredMessageEventPayload> {
+  ): StructuredMessageEventPayload {
     const lead = mapLeadFromMessage(message);
     const contact = buildContactPayload(lead);
 
     const messageId = message.key?.id ?? null;
     const chatId = message.key?.remoteJid ?? null;
 
-    // Tipo bruto do Baileys e normalizado
-    const rawType = extractMessageType(message);
-    const normalizedType = normalizeMessageType(rawType);
-
-    // Em votos, pode haver corrida entre PollService e MessageService; aguardamos brevemente.
-    const shouldAwaitVote =
-      direction === 'inbound' &&
-      (rawType?.startsWith('pollUpdateMessage') || normalizedType === 'poll_update');
-
-    // Texto extraído do conteúdo bruto (legado)
     const extractedText = extractMessageText(message);
 
-    // Voto (se previamente cacheado pelo PollService)
-    let voteSelection = getVoteSelection(messageId);
-    if (!voteSelection && shouldAwaitVote) {
-      voteSelection = await this.waitVoteSelection(messageId);
-    }
-
+    // Voto decifrado pelo PollService (cache)
+    const voteSelection = getVoteSelection(messageId);
     let voteText: string | null = null;
     if (voteSelection?.selectedOptions?.length) {
       const parts = voteSelection.selectedOptions
-        .map(
-          (opt) =>
-            (typeof opt.text === 'string' && opt.text.trim()) ||
-            (typeof opt.id === 'string' && opt.id.trim()) ||
-            '',
+        .map((opt) =>
+          (typeof opt.text === 'string' && opt.text.trim()) ||
+          (typeof opt.id === 'string' && opt.id.trim()) ||
+          '',
         )
         .filter(Boolean);
       if (parts.length) voteText = parts.join(', ');
     }
 
-    // Decide o texto final: overrides > voto > texto bruto
     const text =
       Object.prototype.hasOwnProperty.call(messageOverrides, 'text')
         ? messageOverrides.text ?? null
         : voteText ?? extractedText ?? null;
 
-    // Se usamos texto do voto em inbound, limpamos o cache para não vazar em mensagens futuras
     const pickedTextFromVote =
       !Object.prototype.hasOwnProperty.call(messageOverrides, 'text') && !!voteText;
     if (pickedTextFromVote && direction === 'inbound' && messageId) {
@@ -818,36 +641,18 @@ export class MessageService {
     if (Object.prototype.hasOwnProperty.call(messageOverrides, 'type')) {
       type = messageOverrides.type ?? null;
     } else {
-      type = normalizedType;
+      type = normalizeMessageType(extractMessageType(message));
     }
 
     if (!type) {
-      if (media) {
-        type = media.mediaType ?? 'media';
-      } else if (interactive) {
-        type = typeof interactive.type === 'string' ? interactive.type : 'interactive';
-      } else if (text) {
-        type = 'text';
-      }
+      if (media) type = media.mediaType ?? 'media';
+      else if (interactive) type = typeof interactive.type === 'string' ? interactive.type : 'interactive';
+      else if (text) type = 'text';
     }
 
-    const structuredMessage: StructuredMessagePayload = {
-      id: messageId,
-      chatId,
-      type,
-      text,
-    };
-
+    const structuredMessage: StructuredMessagePayload = { id: messageId, chatId, type, text };
     if (interactive) structuredMessage.interactive = interactive;
     if (media) structuredMessage.media = media;
-
-    if (voteSelection?.selectedOptions?.length) {
-      structuredMessage.poll = {
-        pollId: voteSelection.pollId,
-        question: voteSelection.question,
-        selectedOptions: voteSelection.selectedOptions,
-      };
-    }
 
     const metadata: EventMetadata = {
       timestamp: toIsoDate(message.messageTimestamp),
@@ -855,10 +660,6 @@ export class MessageService {
       source: 'baileys-acessus',
     };
 
-    return {
-      contact,
-      message: structuredMessage,
-      metadata,
-    };
+    return { contact, message: structuredMessage, metadata };
   }
 }

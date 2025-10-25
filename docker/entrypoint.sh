@@ -1,21 +1,21 @@
 #!/usr/bin/env sh
-set -e
+set -eu
 
 echo "[entrypoint] preparando persistência..."
+
 mkdir -p /app/sessions
-
-# /app/data aponta para o mesmo disco de /app/sessions
-if [ -e /app/data ] && [ ! -L /app/data ]; then
-  rm -rf /app/data
+if [ ! -e /app/data ]; then
+  ln -s /app/sessions /app/data
 fi
-ln -sfn /app/sessions /app/data
-
-# tenta ajustar permissões; se rodar como root ok, senão ignora
-chown -R 1000:1000 /app/sessions 2>/dev/null || true
 
 echo "[entrypoint] verificação:"
-ls -ld /app/sessions /app/data || true
-test -w /app/sessions && echo "[entrypoint] /app/sessions é gravável" || echo "[entrypoint] /app/sessions NÃO é gravável"
+ls -ld /app/data || true
+ls -ld /app/sessions || true
 
-# passa o comando original adiante
-exec "$@"
+if [ -w /app/sessions ]; then
+  echo "[entrypoint] /app/sessions é gravável"
+else
+  echo "[entrypoint] /app/sessions NÃO é gravável" >&2
+fi
+
+exec node dist/src/server.js

@@ -16,79 +16,56 @@ import { filterClientMessages } from './baileys/messageUtils.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
-// Reconnect/backoff
 const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 
-// Status tracking
 const DEFAULT_STATUS_TTL_MS = 10 * 60_000;
 const DEFAULT_STATUS_SWEEP_INTERVAL_MS = 60_000;
 const FINAL_STATUS_THRESHOLD = 3;
 const FINAL_STATUS_CODES = new Set([0]);
 
-function decrementStatusCount(inst: Instance, status: number): void {
+function dec(inst: Instance, status: number): void {
   const key = String(status);
-  const current = inst.metrics.status_counts[key] || 0;
-  inst.metrics.status_counts[key] = current > 0 ? current - 1 : 0;
+  const cur = inst.metrics.status_counts[key] || 0;
+  inst.metrics.status_counts[key] = cur > 0 ? cur - 1 : 0;
 }
-
-function incrementStatusCount(inst: Instance, status: number): void {
+function inc(inst: Instance, status: number): void {
   const key = String(status);
   inst.metrics.status_counts[key] = (inst.metrics.status_counts[key] || 0) + 1;
 }
-
-function parsePositiveInt(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+function parsePosInt(v: string | undefined, fb: number): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : fb;
 }
+const STATUS_TTL_MS = parsePosInt(process.env.STATUS_TTL_MS, DEFAULT_STATUS_TTL_MS);
+const STATUS_SWEEP_INTERVAL_MS = parsePosInt(process.env.STATUS_SWEEP_INTERVAL_MS, DEFAULT_STATUS_SWEEP_INTERVAL_MS);
 
-const STATUS_TTL_MS = parsePositiveInt(process.env.STATUS_TTL_MS, DEFAULT_STATUS_TTL_MS);
-const STATUS_SWEEP_INTERVAL_MS = parsePositiveInt(
-  process.env.STATUS_SWEEP_INTERVAL_MS,
-  DEFAULT_STATUS_SWEEP_INTERVAL_MS,
-);
-
-function isFinalStatus(status: number): boolean {
+function isFinal(status: number): boolean {
   return status >= FINAL_STATUS_THRESHOLD || FINAL_STATUS_CODES.has(status);
 }
-
-function removeMessageStatus(
-  inst: Instance,
-  messageId: string,
-  { recordSnapshot = true }: { recordSnapshot?: boolean } = {},
-): void {
+function removeStatus(inst: Instance, messageId: string): void {
   if (!inst.statusMap.has(messageId)) return;
-
-  const previous = inst.statusMap.get(messageId);
-  if (recordSnapshot) recordMetricsSnapshot(inst);
-  if (previous != null) decrementStatusCount(inst, previous);
-
+  const prev = inst.statusMap.get(messageId);
+  recordMetricsSnapshot(inst);
+  if (prev != null) dec(inst, prev);
   inst.statusMap.delete(messageId);
   inst.statusTimestamps.delete(messageId);
   inst.ackSentAt.delete(messageId);
 }
-
-function pruneStaleStatuses(inst: Instance): void {
+function prune(inst: Instance): void {
   if (!inst.statusMap.size) return;
   const now = Date.now();
-
-  for (const [messageId, status] of inst.statusMap.entries()) {
-    const updatedAt = inst.statusTimestamps.get(messageId) ?? 0;
-    if (isFinalStatus(status) || now - updatedAt >= STATUS_TTL_MS) {
-      removeMessageStatus(inst, messageId);
-    }
+  for (const [mid, status] of inst.statusMap.entries()) {
+    const updatedAt = inst.statusTimestamps.get(mid) ?? 0;
+    if (isFinal(status) || now - updatedAt >= STATUS_TTL_MS) removeStatus(inst, mid);
   }
 }
-
-function ensureStatusCleanupTimer(inst: Instance): void {
+function ensureCleanup(inst: Instance): void {
   if (inst.statusCleanupTimer) return;
-  inst.statusCleanupTimer = setInterval(() => pruneStaleStatuses(inst), STATUS_SWEEP_INTERVAL_MS);
+  inst.statusCleanupTimer = setInterval(() => prune(inst), STATUS_SWEEP_INTERVAL_MS);
 }
 
-const API_KEYS = String(process.env.API_KEY || 'change-me')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
+const API_KEYS = String(process.env.API_KEY || 'change-me').split(',').map((s) => s.trim()).filter(Boolean);
 
 export interface InstanceContext {
   messageService: MessageService;
@@ -114,42 +91,27 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     eventStore: brokerEventStore,
   });
 
-  const messageService = new MessageService(sock, webhook, logger, {
-    eventStore: brokerEventStore,
-    instanceId: inst.id,
-  });
-
-  const pollService = new PollService(sock, webhook, logger, {
-    messageService,
-    eventStore: brokerEventStore,
-    instanceId: inst.id,
-  });
+  const messageService = new MessageService(sock, webhook, logger, { eventStore: brokerEventStore, instanceId: inst.id });
+  const pollService = new PollService(sock, webhook, logger, { messageService, eventStore: brokerEventStore, instanceId: inst.id });
 
   inst.context = { messageService, pollService, webhook };
   inst.stopping = false;
 
-  // Optional sanity for persisted-secrets
-  if (!process.env.SECRET_MASTER_KEY && !process.env.SECRET_MASTER_KEY_HEX) {
-    logger.warn(
-      { iid: inst.id },
-      'secret.masterKey.missing — persisted poll enc keys may not decrypt across restarts',
-    );
+  const hasEnc =
+    !!process.env.POLL_METADATA_ENCRYPTION_KEY ||
+    !!process.env.APP_ENCRYPTION_SECRET ||
+    !!process.env.APP_ENCRYPTION_KEY;
+
+  if (!hasEnc) {
+    logger.warn({ iid: inst.id }, 'secret.encryption.missing — poll enc keys may not decrypt across restarts');
   }
 
   sock.ev.on('connection.update', (update: any) => {
     const { connection, lastDisconnect, qr, receivedPendingNotifications } = update;
     const iid = inst.id;
 
-    if (qr) {
-      inst.lastQR = qr;
-      logger.info({ iid }, 'qr.updated');
-    }
-
-    if (connection === 'open') {
-      inst.lastQR = null;
-      inst.reconnectDelay = RECONNECT_MIN_DELAY_MS;
-      logger.info({ iid, receivedPendingNotifications }, 'whatsapp.connected');
-    }
+    if (qr) { inst.lastQR = qr; logger.info({ iid }, 'qr.updated'); }
+    if (connection === 'open') { inst.lastQR = null; inst.reconnectDelay = RECONNECT_MIN_DELAY_MS; logger.info({ iid, receivedPendingNotifications }, 'whatsapp.connected'); }
 
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -164,11 +126,9 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
         const currentSock = sock;
 
         inst.reconnectTimer = setTimeout(() => {
-          if (inst.sock !== currentSock) return; // someone else already reconnected
+          if (inst.sock !== currentSock) return;
           inst.reconnectDelay = Math.min(inst.reconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
-          startWhatsAppInstance(inst).catch((err) =>
-            logger.error({ iid, err }, 'whatsapp.reconnect.failed'),
-          );
+          startWhatsAppInstance(inst).catch((err) => logger.error({ iid, err }, 'whatsapp.reconnect.failed'));
         }, delay);
       } else if (isLoggedOut) {
         logger.error({ iid }, 'session.loggedOut');
@@ -176,187 +136,110 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     }
   });
 
-  // messages.upsert: PollService → MessageService → Webhook (mesmo evento normalizado)
+  // messages.upsert — PollService antes do MessageService
   sock.ev.on('messages.upsert', async (evt: BaileysEventMap['messages.upsert']) => {
-    const rawMessages = evt.messages || [];
-    const filteredMessages = filterClientMessages(rawMessages);
-    const normalizedEvent: BaileysEventMap['messages.upsert'] = { ...evt, messages: filteredMessages };
+    const raw = evt.messages || [];
+    const filtered = filterClientMessages(raw);
+    const normalized: BaileysEventMap['messages.upsert'] = { ...evt, messages: filtered };
 
-    const rawCount = rawMessages.length;
-    const count = filteredMessages.length;
+    const rawCount = raw.length;
+    const count = filtered.length;
     const iid = inst.id;
     logger.info({ iid, type: evt.type, count, rawCount }, 'messages.upsert');
 
     if (count) {
-      for (const message of filteredMessages) {
-        const from = message.key?.remoteJid;
-
-        const templateReply = message.message?.templateButtonReplyMessage;
-        const buttonsReply = message.message?.buttonsResponseMessage;
-        if (templateReply || buttonsReply) {
-          const selectedId = templateReply?.selectedId ?? buttonsReply?.selectedButtonId ?? null;
-          const selectedText =
-            templateReply?.selectedDisplayText ?? buttonsReply?.selectedDisplayText ?? null;
+      for (const m of filtered) {
+        const from = m.key?.remoteJid;
+        const t = m.message?.templateButtonReplyMessage;
+        const b = m.message?.buttonsResponseMessage;
+        if (t || b) {
+          const selectedId = t?.selectedId ?? b?.selectedButtonId ?? null;
+          const selectedText = t?.selectedDisplayText ?? b?.selectedDisplayText ?? null;
           logger.info({ iid, from, selectedId, selectedText }, 'button.reply');
         }
-
-        const list = message.message?.listResponseMessage;
+        const list = m.message?.listResponseMessage;
         if (list) {
-          logger.info(
-            {
-              iid,
-              from,
-              selectedId: list?.singleSelectReply?.selectedRowId,
-              selectedTitle: list?.title,
-            },
-            'list.reply',
-          );
+          logger.info({ iid, from, selectedId: list?.singleSelectReply?.selectedRowId, selectedTitle: list?.title }, 'list.reply');
         }
       }
     }
 
-    try {
-      // PollService primeiro para garantir decrypt/cache do voto antes do MessageService
-      await pollService.onMessageUpsert(normalizedEvent);
-    } catch (err: any) {
-      logger.warn({ iid, err: err?.message }, 'poll.service.messages.upsert.failed');
-    }
-
-    try {
-      await messageService.onMessagesUpsert(normalizedEvent);
-    } catch (err: any) {
-      logger.warn({ iid, err: err?.message }, 'message.service.messages.upsert.failed');
-    }
-
-    try {
-      await webhook.emit('WHATSAPP_MESSAGES_UPSERT', {
-        iid,
-        raw: evt,
-        normalized: normalizedEvent,
-        messages: filteredMessages,
-      });
-    } catch (err: any) {
-      logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.upsert.failed');
-    }
+    try { await pollService.onMessageUpsert(normalized); } catch (err: any) { logger.warn({ iid, err: err?.message }, 'poll.service.messages.upsert.failed'); }
+    try { await messageService.onMessagesUpsert(normalized); } catch (err: any) { logger.warn({ iid, err: err?.message }, 'message.service.messages.upsert.failed'); }
+    try { await webhook.emit('WHATSAPP_MESSAGES_UPSERT', { iid, raw: evt, normalized, messages: filtered }); }
+    catch (err: any) { logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.upsert.failed'); }
   });
 
-  // messages.update: processa primeiro (await), depois métrica/ack, por fim webhook
+  // messages.update — processa, atualiza métricas, emite webhook
   sock.ev.on('messages.update', async (updates: BaileysEventMap['messages.update']) => {
     const iid = inst.id;
 
-    try {
-      await pollService.onMessageUpdate(updates);
-    } catch (err: any) {
-      logger.warn({ iid, err: err?.message }, 'poll.service.messages.update.failed');
-    }
+    try { await pollService.onMessageUpdate(updates); } catch (err: any) { logger.warn({ iid, err: err?.message }, 'poll.service.messages.update.failed'); }
 
-    for (const update of updates) {
-      const messageId = update.key?.id;
-      const status = update.update?.status;
+    for (const u of updates) {
+      const mid = u.key?.id;
+      const status = u.update?.status;
+      if (mid && status != null) {
+        const prev = inst.statusMap.get(mid);
+        if (prev != null && prev !== status) dec(inst, prev);
 
-      if (messageId && status != null) {
-        const previousStatus = inst.statusMap.get(messageId);
-        if (previousStatus != null && previousStatus !== status) {
-          decrementStatusCount(inst, previousStatus);
-        }
+        inst.statusMap.set(mid, status);
+        inst.statusTimestamps.set(mid, Date.now());
+        ensureCleanup(inst);
+        inc(inst, status);
 
-        inst.statusMap.set(messageId, status);
-        inst.statusTimestamps.set(messageId, Date.now());
-        ensureStatusCleanupTimer(inst);
-        incrementStatusCount(inst, status);
-
-        inst.metrics.last.lastStatusId = messageId;
+        inst.metrics.last.lastStatusId = mid;
         inst.metrics.last.lastStatusCode = status;
 
-        let snapshotRecorded = false;
-        const ensureSnapshot = () => {
-          if (!snapshotRecorded) {
-            recordMetricsSnapshot(inst);
-            snapshotRecorded = true;
-          }
-        };
+        let snap = false;
+        const ensureSnap = () => { if (!snap) { recordMetricsSnapshot(inst); snap = true; } };
 
-        if (status >= 2 && inst.ackSentAt?.has(messageId)) {
-          const sentAt = inst.ackSentAt.get(messageId);
-          inst.ackSentAt.delete(messageId);
+        if (status >= 2 && inst.ackSentAt?.has(mid)) {
+          const sentAt = inst.ackSentAt.get(mid);
+          inst.ackSentAt.delete(mid);
           if (sentAt) {
             const delta = Math.max(0, Date.now() - sentAt);
             inst.metrics.ack.totalMs += delta;
             inst.metrics.ack.count += 1;
             inst.metrics.ack.lastMs = delta;
-            inst.metrics.ack.avgMs = Math.round(
-              inst.metrics.ack.totalMs / Math.max(inst.metrics.ack.count, 1),
-            );
+            inst.metrics.ack.avgMs = Math.round(inst.metrics.ack.totalMs / Math.max(inst.metrics.ack.count, 1));
           }
         }
 
-        ensureSnapshot();
+        ensureSnap();
 
-        const waiter = inst.ackWaiters.get(messageId);
+        const waiter = inst.ackWaiters.get(mid);
         if (waiter) {
           clearTimeout(waiter.timer);
-          inst.ackWaiters.delete(messageId);
+          inst.ackWaiters.delete(mid);
           waiter.resolve(status);
         }
 
-        if (isFinalStatus(status)) {
-          ensureSnapshot();
-          removeMessageStatus(inst, messageId, { recordSnapshot: false });
+        if (isFinal(status)) {
+          ensureSnap();
+          removeStatus(inst, mid);
         }
       }
 
-      logger.info({ iid, mid: messageId, status }, 'messages.status');
+      logger.info({ iid, mid, status }, 'messages.status');
     }
 
-    try {
-      await webhook.emit('WHATSAPP_MESSAGES_UPDATE', { iid, raw: { updates } });
-    } catch (err: any) {
-      logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.update.failed');
-    }
+    try { await webhook.emit('WHATSAPP_MESSAGES_UPDATE', { iid, raw: { updates } }); }
+    catch (err: any) { logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.update.failed'); }
   });
 
   recordMetricsSnapshot(inst, true);
   return inst;
 }
 
-export async function stopWhatsAppInstance(
-  inst: Instance | undefined,
-  { logout = false }: { logout?: boolean } = {},
-): Promise<void> {
+export async function stopWhatsAppInstance(inst: Instance | undefined, { logout = false }: { logout?: boolean } = {}): Promise<void> {
   if (!inst) return;
-
   inst.stopping = true;
   inst.context = null;
 
-  if (inst.reconnectTimer) {
-    try {
-      clearTimeout(inst.reconnectTimer);
-    } catch {
-      /* ignore */
-    }
-    inst.reconnectTimer = null;
-  }
+  if (inst.reconnectTimer) { try { clearTimeout(inst.reconnectTimer); } catch {} inst.reconnectTimer = null; }
+  if (inst.statusCleanupTimer) { try { clearInterval(inst.statusCleanupTimer); } catch {} inst.statusCleanupTimer = null; }
 
-  if (inst.statusCleanupTimer) {
-    try {
-      clearInterval(inst.statusCleanupTimer);
-    } catch {
-      /* ignore */
-    }
-    inst.statusCleanupTimer = null;
-  }
-
-  if (logout && inst.sock) {
-    try {
-      await inst.sock.logout().catch(() => undefined);
-    } catch {
-      /* ignore */
-    }
-  }
-
-  try {
-    inst.sock?.end?.(undefined);
-  } catch {
-    /* ignore */
-  }
+  if (logout && inst.sock) { try { await inst.sock.logout().catch(() => undefined); } catch {} }
+  try { inst.sock?.end?.(undefined); } catch {}
 }
