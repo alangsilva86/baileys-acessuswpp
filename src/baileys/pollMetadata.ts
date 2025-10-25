@@ -25,7 +25,44 @@ interface VoteSelection {
 }
 
 const pollMetadataCache = new Map<string, PollMetadata>();
+const pollIdToCacheKeys = new Map<string, Set<string>>();
 const voteSelections = new Map<string, VoteSelection>();
+
+export function normalizeJid(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const [base] = trimmed.split(':');
+  return base || null;
+}
+
+function buildPollKey(
+  pollId: string | null | undefined,
+  remoteJid: string | null | undefined,
+): string | null {
+  if (!pollId) return null;
+  const normalizedRemote = normalizeJid(remoteJid);
+  const prefix = normalizedRemote ?? '';
+  return `${prefix}#${pollId}`;
+}
+
+function registerCacheKey(pollId: string, pollKey: string): void {
+  let keys = pollIdToCacheKeys.get(pollId);
+  if (!keys) {
+    keys = new Set();
+    pollIdToCacheKeys.set(pollId, keys);
+  }
+  keys.add(pollKey);
+}
+
+function unregisterCacheKey(pollId: string, pollKey: string): void {
+  const keys = pollIdToCacheKeys.get(pollId);
+  if (!keys) return;
+  keys.delete(pollKey);
+  if (!keys.size) {
+    pollIdToCacheKeys.delete(pollId);
+  }
+}
 
 export function normalizeOptionText(value: unknown): string | null {
   if (typeof value !== 'string') return null;
@@ -204,8 +241,9 @@ export function mergePollMetadata(
     if (!question && source.question) {
       question = source.question;
     }
-    if (!remoteJid && source.remoteJid) {
-      remoteJid = source.remoteJid;
+    const normalizedRemote = normalizeJid(source.remoteJid);
+    if (!remoteJid && normalizedRemote) {
+      remoteJid = normalizedRemote;
     }
     if (!encKeyHex && source.encKeyHex) {
       encKeyHex = source.encKeyHex;
@@ -269,7 +307,7 @@ export function extractPollMetadataFromMessage(message: WAMessage): PollMetadata
     (pollCreation as { selectableOptionsCount?: number | null } | undefined)
       ?.selectableOptionsCount ?? null;
 
-  const remoteJid = message.key?.remoteJid ?? null;
+  const remoteJid = normalizeJid(message.key?.remoteJid);
 
   const secretCandidates: unknown[] = [];
   if (pollCreation) {
@@ -299,7 +337,53 @@ export function extractPollMetadataFromMessage(message: WAMessage): PollMetadata
 
 export async function rememberPollMetadata(
   metadata: PollMetadata | null | undefined,
+  options: { persist?: boolean } = {},
 ): Promise<void> {
+  if (!metadata?.pollId) return;
+
+  const { persist = true } = options;
+
+  const normalizedMetadata: PollMetadata = {
+    ...metadata,
+    remoteJid: normalizeJid(metadata.remoteJid),
+  };
+
+  const existing = getPollMetadataFromCache(
+    normalizedMetadata.pollId,
+    normalizedMetadata.remoteJid,
+  );
+
+  const merged = mergePollMetadata(existing, normalizedMetadata);
+  if (!merged) return;
+
+  const normalizedMerged: PollMetadata = {
+    ...merged,
+    remoteJid: normalizeJid(merged.remoteJid),
+  };
+
+  const pollKey = buildPollKey(normalizedMerged.pollId, normalizedMerged.remoteJid);
+  if (!pollKey) return;
+
+  pollMetadataCache.set(pollKey, normalizedMerged);
+  registerCacheKey(normalizedMerged.pollId, pollKey);
+
+  if (normalizedMerged.remoteJid) {
+    const fallbackKey = buildPollKey(normalizedMerged.pollId, null);
+    if (fallbackKey && fallbackKey !== pollKey) {
+      pollMetadataCache.delete(fallbackKey);
+      unregisterCacheKey(normalizedMerged.pollId, fallbackKey);
+    }
+  }
+
+  if (persist) {
+    await pollMetadataStore.put({
+      pollKey,
+      pollId: normalizedMerged.pollId,
+      remoteJid: normalizedMerged.remoteJid ?? null,
+      encKeyHex: normalizedMerged.encKeyHex ?? null,
+      question: normalizedMerged.question ?? null,
+      options: normalizedMerged.options.map((option) => option.text),
+      selectableCount: normalizedMerged.selectableCount ?? null,
   if (!metadata) return;
   const existing = pollMetadataCache.get(metadata.pollId);
   const merged = mergePollMetadata(existing, metadata);
@@ -335,6 +419,7 @@ export async function rememberPollMetadataFromMessage(
 
   let fallbackMetadata: PollMetadata | null = null;
   if (fallback) {
+    const messageRemoteJid = normalizeJid(message.key?.remoteJid);
     const question = typeof fallback.question === 'string' ? fallback.question.trim() : '';
     const options =
       fallback.options?.map((value) => normalizePollOption({ id: value, text: value })) ?? [];
@@ -342,7 +427,7 @@ export async function rememberPollMetadataFromMessage(
       (option): option is PollOptionMetadata => Boolean(option),
     );
     const encKeyHex = normalizeMessageSecret(fallback.messageSecret ?? null);
-    const remoteJid = fallback.remoteJid ?? null;
+    const remoteJid = normalizeJid(fallback.remoteJid ?? messageRemoteJid);
     const selectableCount =
       typeof fallback.selectableCount === 'number' ? fallback.selectableCount : null;
     if (question || normalizedOptions.length || encKeyHex || remoteJid || selectableCount != null) {
@@ -364,6 +449,7 @@ export async function addObservedPollMetadata(
   pollId: string,
   question: string,
   observed: Array<{ id: string | null; text: string | null; hash?: string | null }>,
+  remoteJid?: string | null | undefined,
 ): Promise<void> {
   const options = observed
     .map((option) =>
@@ -379,6 +465,7 @@ export async function addObservedPollMetadata(
     pollId,
     question,
     options,
+    remoteJid: normalizeJid(remoteJid),
   };
 
   await rememberPollMetadata(metadata);
@@ -386,24 +473,82 @@ export async function addObservedPollMetadata(
 
 export function getPollMetadataFromCache(
   pollId: string | null | undefined,
+  remoteJid?: string | null | undefined,
 ): PollMetadata | null {
   if (!pollId) return null;
-  return pollMetadataCache.get(pollId) ?? null;
+
+  const normalizedRemote = normalizeJid(remoteJid);
+
+  if (normalizedRemote != null) {
+    const pollKey = buildPollKey(pollId, normalizedRemote);
+    if (pollKey) {
+      const direct = pollMetadataCache.get(pollKey);
+      if (direct) return direct;
+    }
+  }
+
+  const fallbackKey = buildPollKey(pollId, null);
+  if (fallbackKey) {
+    const fallback = pollMetadataCache.get(fallbackKey);
+    if (fallback) return fallback;
+  }
+
+  if (normalizedRemote == null) {
+    const keys = pollIdToCacheKeys.get(pollId);
+    if (keys) {
+      for (const key of keys) {
+        const value = pollMetadataCache.get(key);
+        if (value) return value;
+      }
+    }
+  }
+
+  return null;
 }
 
 export async function getPollMetadata(
   pollId: string | null | undefined,
+  remoteJid?: string | null | undefined,
 ): Promise<PollMetadata | null> {
   if (!pollId) return null;
-  const cached = pollMetadataCache.get(pollId);
+
+  const normalizedRemote = normalizeJid(remoteJid);
+  const cached = getPollMetadataFromCache(pollId, normalizedRemote);
   if (cached) return cached;
 
-  const stored = await pollMetadataStore.get(pollId);
-  if (!stored) return null;
+  const candidateKeys = new Set<string>();
+  if (normalizedRemote != null) {
+    const directKey = buildPollKey(pollId, normalizedRemote);
+    if (directKey) candidateKeys.add(directKey);
+  }
 
-  const normalized = pollMetadataRecordToMetadata(stored);
-  await rememberPollMetadata(normalized);
-  return pollMetadataCache.get(pollId) ?? null;
+  const fallbackKey = buildPollKey(pollId, null);
+  if (fallbackKey) candidateKeys.add(fallbackKey);
+
+  if (normalizedRemote == null) {
+    const indexedKeys = pollIdToCacheKeys.get(pollId);
+    if (indexedKeys) {
+      for (const key of indexedKeys) {
+        candidateKeys.add(key);
+      }
+    }
+  }
+
+  for (const key of candidateKeys) {
+    const stored = await pollMetadataStore.get(key);
+    if (!stored) continue;
+
+    const normalized = pollMetadataRecordToMetadata(stored);
+    await rememberPollMetadata(normalized, { persist: false });
+
+    const refreshed = getPollMetadataFromCache(
+      pollId,
+      normalizedRemote ?? normalized.remoteJid,
+    );
+    if (refreshed) return refreshed;
+  }
+
+  return null;
 }
 
 export function recordVoteSelection(
@@ -434,6 +579,8 @@ function pollMetadataRecordToMetadata(record: PollMetadataRecord): PollMetadata 
     pollId: record.pollId,
     question: record.question ?? '',
     options,
+    remoteJid: normalizeJid(record.remoteJid),
+    encKeyHex: record.encKeyHex ?? null,
     remoteJid: record.remoteJid ?? null,
     encKeyHex: decryptSecret(record.encKeyHex ?? null),
     selectableCount: record.selectableCount ?? null,
