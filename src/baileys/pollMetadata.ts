@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import type { WAMessage } from '@whiskeysockets/baileys';
 import { pollMetadataStore, type PollMetadataRecord } from './pollMetadataStore.js';
+import { decryptSecret, encryptSecret } from './secretEncryption.js';
 
 export interface PollOptionMetadata {
   id: string;
@@ -383,6 +384,19 @@ export async function rememberPollMetadata(
       question: normalizedMerged.question ?? null,
       options: normalizedMerged.options.map((option) => option.text),
       selectableCount: normalizedMerged.selectableCount ?? null,
+  if (!metadata) return;
+  const existing = pollMetadataCache.get(metadata.pollId);
+  const merged = mergePollMetadata(existing, metadata);
+  if (merged) {
+    pollMetadataCache.set(metadata.pollId, merged);
+    const storedEncKeyHex = encryptSecret(merged.encKeyHex ?? null);
+    await pollMetadataStore.put({
+      pollId: merged.pollId,
+      remoteJid: merged.remoteJid ?? null,
+      encKeyHex: storedEncKeyHex ?? null,
+      question: merged.question ?? null,
+      options: merged.options.map((option) => option.text),
+      selectableCount: merged.selectableCount ?? null,
       updatedAt: Date.now(),
     });
   }
@@ -567,6 +581,8 @@ function pollMetadataRecordToMetadata(record: PollMetadataRecord): PollMetadata 
     options,
     remoteJid: normalizeJid(record.remoteJid),
     encKeyHex: record.encKeyHex ?? null,
+    remoteJid: record.remoteJid ?? null,
+    encKeyHex: decryptSecret(record.encKeyHex ?? null),
     selectableCount: record.selectableCount ?? null,
   };
 }
