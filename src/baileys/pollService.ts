@@ -23,6 +23,7 @@ import {
   addObservedPollMetadata,
   buildOptionHashMaps,
   computeOptionHash,
+  extractPollMetadataFromMessage,
   getPollMetadata,
   getPollMetadataFromCache,
   normalizeOptionHash,
@@ -506,7 +507,106 @@ export class PollService {
       }
     }
 
-    const selectedOptions = Array.from(selectedOptionsMap.values());
+    const messageMetadata = pollMetadata?.options.length
+      ? null
+      : extractPollMetadataFromMessage(pollMessage);
+    const canonicalOptionSources = pollMetadata?.options.length
+      ? pollMetadata.options
+      : messageMetadata?.options ?? [];
+    const canonicalOptionsOrdered: Array<{
+      hash: string | null;
+      text: string | null;
+      id: string | null;
+    }> = [];
+
+    for (const option of canonicalOptionSources) {
+      const normalized = normalizePollOption(option);
+      if (!normalized) continue;
+      const mapped =
+        optionHashMap.get(normalized.hash) ?? {
+          id: normalized.id ?? normalized.text ?? null,
+          text: normalized.text ?? normalized.id ?? null,
+        };
+      canonicalOptionsOrdered.push({
+        hash: normalized.hash,
+        text: mapped.text ?? normalized.text ?? null,
+        id: mapped.id ?? normalized.id ?? null,
+      });
+    }
+
+    if (!canonicalOptionsOrdered.length) {
+      for (const [hash, option] of optionHashMap.entries()) {
+        canonicalOptionsOrdered.push({
+          hash,
+          text: option.text ?? option.id ?? null,
+          id: option.id ?? option.text ?? null,
+        });
+      }
+    }
+
+    const remainingSelectedOptions = new Map(selectedOptionsMap);
+    const orderedSelectedOptions: Array<{ id: string | null; text: string | null }> = [];
+
+    const takeSelectedOption = (
+      hash: string | null | undefined,
+      textCandidates: Array<string | null | undefined>,
+    ): { id: string | null; text: string | null } | null => {
+      if (hash) {
+        const value = remainingSelectedOptions.get(hash);
+        if (value) {
+          remainingSelectedOptions.delete(hash);
+          return value;
+        }
+      }
+
+      for (const candidate of textCandidates) {
+        if (typeof candidate !== 'string' || !candidate) continue;
+        if (remainingSelectedOptions.has(candidate)) {
+          const value = remainingSelectedOptions.get(candidate);
+          if (value) {
+            remainingSelectedOptions.delete(candidate);
+            return value;
+          }
+        }
+      }
+
+      const normalizedTargets = new Set(
+        textCandidates
+          .map((value) => normalizeOptionText(value))
+          .filter((value): value is string => Boolean(value)),
+      );
+      if (normalizedTargets.size) {
+        for (const [key, value] of remainingSelectedOptions) {
+          const normalizedValue = normalizeOptionText(value.text ?? value.id ?? null);
+          if (normalizedValue && normalizedTargets.has(normalizedValue)) {
+            remainingSelectedOptions.delete(key);
+            return value;
+          }
+        }
+      }
+
+      return null;
+    };
+
+    for (const canonicalOption of canonicalOptionsOrdered) {
+      const normalizedText = normalizeOptionText(canonicalOption.text ?? canonicalOption.id ?? null);
+      const canonicalHash =
+        canonicalOption.hash ??
+        (normalizedText ? textToHash.get(normalizedText) ?? computeOptionHash(normalizedText) : null);
+      const selection = takeSelectedOption(canonicalHash, [
+        canonicalOption.text ?? null,
+        canonicalOption.id ?? null,
+        normalizedText ?? null,
+      ]);
+      if (selection) {
+        orderedSelectedOptions.push(selection);
+      }
+    }
+
+    const selectedOptions = [
+      ...orderedSelectedOptions,
+      ...Array.from(remainingSelectedOptions.values()),
+    ];
 
     const question = extractPollQuestion(pollMessage) || pollMetadata?.question || '';
 
@@ -515,20 +615,129 @@ export class PollService {
       pollMetadata = (await getPollMetadata(pollId)) ?? pollMetadata;
     }
 
+    const aggregateEntries: Array<{
+      index: number;
+      hash: string | null;
+      normalizedText: string | null;
+      total: { id: string | null; text: string | null; votes: number };
+    }> = [];
     const uniqueVoters = new Set<string>();
-    const optionTotals = aggregate.map((opt) => {
+
+    aggregate.forEach((opt, index) => {
       const votes = Array.isArray(opt.voters) ? opt.voters.length : 0;
       if (Array.isArray(opt.voters)) {
         for (const voter of opt.voters) {
           if (typeof voter === 'string' && voter) uniqueVoters.add(voter);
         }
       }
-      return {
-        id: opt.name || null,
-        text: opt.name || null,
-        votes,
-      };
+
+      const rawText = typeof opt.name === 'string' ? opt.name : null;
+      const normalizedText = normalizeOptionText(rawText);
+      const hashKey =
+        normalizedText ? textToHash.get(normalizedText) ?? computeOptionHash(normalizedText) : null;
+
+      aggregateEntries.push({
+        index,
+        hash: hashKey,
+        normalizedText,
+        total: {
+          id: rawText ?? normalizedText ?? null,
+          text: rawText ?? normalizedText ?? null,
+          votes,
+        },
+      });
     });
+
+    const usedAggregateIndices = new Set<number>();
+    const takeAggregateOption = (
+      hash: string | null | undefined,
+      textCandidates: Array<string | null | undefined>,
+    ): { id: string | null; text: string | null; votes: number } | null => {
+      if (hash) {
+        for (const entry of aggregateEntries) {
+          if (!usedAggregateIndices.has(entry.index) && entry.hash === hash) {
+            usedAggregateIndices.add(entry.index);
+            return entry.total;
+          }
+        }
+      }
+
+      for (const candidate of textCandidates) {
+        if (typeof candidate !== 'string' || !candidate) continue;
+        for (const entry of aggregateEntries) {
+          if (!usedAggregateIndices.has(entry.index) && entry.total.text === candidate) {
+            usedAggregateIndices.add(entry.index);
+            return entry.total;
+          }
+        }
+      }
+
+      const normalizedTargets = new Set(
+        textCandidates
+          .map((value) => normalizeOptionText(value))
+          .filter((value): value is string => Boolean(value)),
+      );
+      if (normalizedTargets.size) {
+        for (const entry of aggregateEntries) {
+          if (
+            !usedAggregateIndices.has(entry.index) &&
+            entry.normalizedText &&
+            normalizedTargets.has(entry.normalizedText)
+          ) {
+            usedAggregateIndices.add(entry.index);
+            return entry.total;
+          }
+        }
+      }
+
+      return null;
+    };
+
+    const orderedOptionTotals: Array<{ id: string | null; text: string | null; votes: number }> = [];
+
+    for (const canonicalOption of canonicalOptionsOrdered) {
+      const normalizedText = normalizeOptionText(canonicalOption.text ?? canonicalOption.id ?? null);
+      const canonicalHash =
+        canonicalOption.hash ??
+        (normalizedText ? textToHash.get(normalizedText) ?? computeOptionHash(normalizedText) : null);
+      const aggregateTotal = takeAggregateOption(canonicalHash, [
+        canonicalOption.text ?? null,
+        canonicalOption.id ?? null,
+        normalizedText ?? null,
+      ]);
+      let mappedOption: { id: string | null; text: string | null } | null = null;
+      if (canonicalHash) {
+        const candidate = optionHashMap.get(canonicalHash);
+        if (candidate) {
+          mappedOption = candidate;
+        }
+      }
+      orderedOptionTotals.push({
+        id:
+          mappedOption?.id ??
+          canonicalOption.id ??
+          canonicalOption.text ??
+          aggregateTotal?.id ??
+          aggregateTotal?.text ??
+          null,
+        text:
+          mappedOption?.text ??
+          canonicalOption.text ??
+          canonicalOption.id ??
+          aggregateTotal?.text ??
+          aggregateTotal?.id ??
+          null,
+        votes: aggregateTotal?.votes ?? 0,
+      });
+    }
+
+    for (const entry of aggregateEntries) {
+      if (!usedAggregateIndices.has(entry.index)) {
+        orderedOptionTotals.push(entry.total);
+      }
+    }
+
+    const optionTotals = orderedOptionTotals;
 
     const totalVotes = optionTotals.reduce((sum, option) => sum + option.votes, 0);
     const totalVoters = uniqueVoters.size;
