@@ -164,7 +164,7 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       }
     }
 
-    try { await pollService.onMessageUpsert(normalized); } catch (err: any) { logger.warn({ iid, err: err?.message }, 'poll.service.messages.upsert.failed'); }
+    try { await pollService.onMessageUpsert(evt); } catch (err: any) { logger.warn({ iid, err: err?.message }, 'poll.service.messages.upsert.failed'); }
     try { await messageService.onMessagesUpsert(normalized); } catch (err: any) { logger.warn({ iid, err: err?.message }, 'message.service.messages.upsert.failed'); }
     try { await webhook.emit('WHATSAPP_MESSAGES_UPSERT', { iid, raw: evt, normalized, messages: filtered }); }
     catch (err: any) { logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.upsert.failed'); }
