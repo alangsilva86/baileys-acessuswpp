@@ -649,6 +649,18 @@ export class MessageService {
           return new Uint8Array(Buffer.from(value, 'base64'));
         };
 
+        if (!pollId || !metadata) {
+          this.logger.info(
+            {
+              messageId,
+              pollId,
+              hasMetadata: Boolean(metadata),
+              clue: 'sem metadados, estamos sem mapa do tesouro — talvez a criação não tenha sido vista',
+            },
+            'poll.vote.metadata.missing',
+          );
+        }
+
         if (
           pollId &&
           pollCreatorJid &&
@@ -682,14 +694,32 @@ export class MessageService {
               .filter((text): text is string => Boolean(text));
             if (decoded.length) {
               voteText = decoded.join(', ');
+              this.logger.info(
+                {
+                  messageId,
+                  pollId,
+                  decoded,
+                  clue: 'sucesso! o voto falou e nós entendemos',
+                },
+                'poll.vote.decrypt.success',
+              );
               recordVoteSelection(pollUpdate.pollUpdateMessageKey?.id ?? messageId, {
                 pollId,
                 question: metadata?.question ?? '',
                 selectedOptions: decoded.map((text) => ({ id: text, text })),
               });
             }
-          } catch {
-            // ignore decrypt errors, fallback below
+          } catch (err) {
+            this.logger.warn(
+              {
+                messageId,
+                pollId,
+                err: (err as Error)?.message ?? String(err),
+                clue: 'tentamos decifrar aqui mesmo e apanhamos; fallback continua valendo',
+              },
+              'poll.vote.decrypt.inline_failed',
+            );
+            // ignore decrypt errors, fallback abaixo
           }
         }
 
@@ -705,6 +735,14 @@ export class MessageService {
           const encPayload = format(pollUpdate.vote.encPayload);
           const pollIdLabel = pollId ?? 'unknown';
           voteText = `[POLL_VOTE_PENDING] pollId=${pollIdLabel} encIv=${encIv} encPayload=${encPayload}`;
+          this.logger.warn(
+            {
+              messageId,
+              pollId: pollId ?? null,
+              hint: 'fallback entrou em ação — veja encIv/encPayload e os logs de decrypt para a trilha completa',
+            },
+            'poll.vote.fallback.emitted',
+          );
         }
       }
     }

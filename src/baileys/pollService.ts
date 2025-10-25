@@ -200,6 +200,28 @@ export class PollService {
       ) {
         this.store.remember(message);
         await rememberPollMetadataFromMessage(message);
+        const pollId = message.key?.id ?? 'unknown';
+        const secret =
+          message.message?.pollCreationMessage?.encKey ??
+          (message.message?.pollCreationMessage as { contextInfo?: { messageSecret?: unknown } | null })
+            ?.contextInfo?.messageSecret ??
+          message.message?.messageContextInfo?.messageSecret ??
+          null;
+        const options =
+          message.message?.pollCreationMessage?.options ??
+          (message.message?.pollCreationMessageV2 as { options?: unknown[] } | undefined)?.options ??
+          (message.message?.pollCreationMessageV3 as { options?: unknown[] } | undefined)?.options ??
+          [];
+        this.logger.info(
+          {
+            pollId,
+            remoteJid: message.key?.remoteJid ?? null,
+            hasSecret: Boolean(secret),
+            optionsCount: Array.isArray(options) ? options.length : 0,
+            note: 'estivemos com a criação da enquete em mãos',
+          },
+          'poll.detected.creation',
+        );
       }
 
       // voto
@@ -793,8 +815,26 @@ export class PollService {
 
     if (selectedOptions.length) {
       recordVoteSelection(messageId, { pollId, question, selectedOptions });
+      this.logger.info(
+        {
+          messageId,
+          pollId,
+          voterJid,
+          selected: selectedOptions.map((opt) => opt.text ?? opt.id ?? 'misterioso'),
+          clue: 'registramos o voto e avisamos o MessageService — hora do webhook sorrir',
+        },
+        'poll.vote.selection.recorded',
+      );
     } else {
       recordVoteSelection(messageId, null);
+      this.logger.warn(
+        {
+          messageId,
+          pollId,
+          hint: 'nenhuma opção confirmada — talvez voto em branco ou decrypt falhou antes',
+        },
+        'poll.vote.selection.empty',
+      );
     }
   }
 
@@ -938,7 +978,13 @@ export class PollService {
     const pollEncKey = this.extractPollEncKey(pollMessage);
     const pollEncKeyHash = fingerprintSecret(pollEncKey);
     if (!pollEncKey) {
-      this.logger.warn({ pollId: pollMsgId }, 'poll.vote.decrypt.missingKey');
+      this.logger.warn(
+        {
+          pollId: pollMsgId,
+          hint: 'precisamos da criação antes do voto; nenhum segredo encontrado',
+        },
+        'poll.vote.decrypt.missingKey',
+      );
       return null;
     }
 
@@ -961,11 +1007,22 @@ export class PollService {
     if (!pollCreatorJid || !resolvedVoterJid) {
       const logContext: Record<string, unknown> = { pollId: pollMsgId };
       if (pollEncKeyHash) logContext.pollEncKeyHash = pollEncKeyHash;
+      logContext.hint = 'pollCreatorJid ou voterJid ficaram nulos — jids exatos são obrigatórios';
       this.logger.warn(logContext, 'poll.vote.decrypt.missingParticipants');
       return null;
     }
 
     try {
+      this.logger.info(
+        {
+          pollId: pollMsgId,
+          pollCreatorJid,
+          voterJid: resolvedVoterJid,
+          pollEncKeyHash,
+          clue: 'tudo pronto para abrir o voto — respirando fundo e decifrando',
+        },
+        'poll.vote.decrypt.start',
+      );
       const vote = this.decryptPollVote(encVote, {
         pollCreatorJid, // mantém sufixo :device se existir
         pollMsgId,
@@ -985,6 +1042,8 @@ export class PollService {
         pollId: pollMsgId,
       };
       if (pollEncKeyHash) logContext.pollEncKeyHash = pollEncKeyHash;
+      logContext.tip =
+        'se continuar falhando, confira se o messageSecret foi salvo ou se o voto veio de outro dispositivo';
       this.logger.warn(logContext, 'poll.vote.decrypt.failed');
       return null;
     }
