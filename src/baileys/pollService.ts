@@ -145,6 +145,7 @@ export class PollService {
   private readonly instanceId: string;
   private readonly aggregateVotes: typeof getAggregateVotesInPollMessage;
   private readonly decryptPollVote: typeof defaultDecryptPollVote;
+  private readonly receiptHints = new Map<string, Set<string>>();
 
   constructor(
     private readonly sock: WASocket,
@@ -159,6 +160,37 @@ export class PollService {
     this.instanceId = options.instanceId ?? 'default';
     this.aggregateVotes = options.aggregateVotesFn ?? getAggregateVotesInPollMessage;
     this.decryptPollVote = options.decryptPollVoteFn ?? defaultDecryptPollVote;
+
+    this.sock.ev.on('message-receipt.update', (updates) => {
+      for (const update of updates) {
+        const messageId = update?.key?.id ?? null;
+        if (!messageId) continue;
+        const bucket = this.ensureReceiptBucket(messageId);
+
+        const rawReceipt = update.receipt as Partial<{
+          userJid?: string | null;
+          jid?: string | null;
+          participant?: string | null;
+          lid?: string | null;
+          senderLid?: string | null;
+          device?: number | null;
+        }>;
+
+        const hintSources: Array<{ label: string; value: string | null | undefined }> = [
+          { label: 'receipt.userJid', value: rawReceipt?.userJid },
+          { label: 'receipt.jid', value: rawReceipt?.jid },
+          { label: 'receipt.participant', value: rawReceipt?.participant },
+          { label: 'receipt.lid', value: rawReceipt?.lid },
+          { label: 'receipt.specific.senderLid', value: rawReceipt?.senderLid },
+          { label: 'receipt.key.remote', value: update.key?.remoteJid ?? null },
+          { label: 'receipt.key.participant', value: update.key?.participant ?? null },
+        ];
+
+        for (const source of hintSources) {
+          this.noteReceiptHint(bucket, messageId, source.label, source.value);
+        }
+      }
+    });
   }
 
   async sendPoll(
@@ -1062,7 +1094,7 @@ export class PollService {
 
     const pollUpdateKey =
       (pollUpdateMessage as { pollUpdateMessageKey?: proto.IMessageKey | null })
-        ?.pollUpdateMessageKey ?? null;
+        ?.pollUpdateMessageKey ?? message.key ?? null;
 
     const rawSenderLid =
       ((message.key as unknown as { senderLid?: string | null }).senderLid ??
@@ -1124,24 +1156,45 @@ export class PollService {
       });
     };
 
-    const baseCreatorCandidates = collectCandidates([
-      { label: 'creator.exact', value: pollCreatorJid },
-      { label: 'creator.normalized', value: normalizeJid(pollCreatorJid) },
-      { label: 'creator.creationKey.participant', value: creationKeyParticipant },
-      {
-        label: 'creator.creationKey.participant.normalized',
-        value: normalizeJid(creationKeyParticipant),
-      },
-      { label: 'creator.creationKey.remote', value: creationKeyRemote },
-      { label: 'creator.pollMessage.participant', value: pollMessageKeyParticipant },
-      {
-        label: 'creator.pollMessage.participant.normalized',
-        value: normalizeJid(pollMessageKeyParticipant),
-      },
-      { label: 'creator.pollMessage.remote', value: pollMessageKeyRemote },
-      { label: 'creator.self', value: selfId },
-      { label: 'creator.self.normalized', value: normalizeJid(selfId) },
-    ]);
+    const addVariants = (
+      list: Array<{ label: string; value: string }>,
+      label: string,
+      value: string | null | undefined,
+    ) => {
+      if (typeof value !== 'string') return;
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      list.push({ label, value: trimmed });
+      const normalized = jidNormalizedUser(trimmed);
+      if (normalized && normalized !== trimmed) {
+        list.push({ label: `${label}.jidNormalized`, value: normalized });
+      }
+      if (trimmed.includes(':')) {
+        const decoded = jidDecode(trimmed);
+        if (decoded?.user) {
+          const noDevice = jidEncode(decoded.user, decoded.server);
+          if (noDevice !== trimmed) {
+            list.push({ label: `${label}.noDevice`, value: noDevice });
+          }
+        }
+      } else {
+        const decoded = jidDecode(trimmed);
+        if (decoded?.user && decoded?.device != null) {
+          const withDevice = jidEncode(decoded.user, decoded.server, decoded.device);
+          if (withDevice !== trimmed) {
+            list.push({ label: `${label}.withDevice`, value: withDevice });
+          }
+        }
+      }
+    };
+
+    const baseCreatorCandidates: Array<{ label: string; value: string }> = [];
+    addVariants(baseCreatorCandidates, 'creator.exact', pollCreatorJid);
+    addVariants(baseCreatorCandidates, 'creator.creationKey.participant', creationKeyParticipant);
+    addVariants(baseCreatorCandidates, 'creator.creationKey.remote', creationKeyRemote);
+    addVariants(baseCreatorCandidates, 'creator.pollMessage.participant', pollMessageKeyParticipant);
+    addVariants(baseCreatorCandidates, 'creator.pollMessage.remote', pollMessageKeyRemote);
+    addVariants(baseCreatorCandidates, 'creator.self', selfId);
 
     const creatorCandidates: Array<{ label: string; value: string }> = [];
     for (const candidate of baseCreatorCandidates) {
@@ -1154,38 +1207,31 @@ export class PollService {
       }
     }
 
-    const baseVoterCandidates = collectCandidates([
-      { label: 'voter.exact', value: resolvedVoterJid },
-      { label: 'voter.normalized', value: normalizeJid(resolvedVoterJid) },
-      { label: 'voter.key.participant', value: message.key?.participant ?? null },
-      {
-        label: 'voter.key.participant.normalized',
-        value: normalizeJid(message.key?.participant ?? null),
-      },
-      { label: 'voter.key.remote', value: message.key?.remoteJid ?? null },
-      { label: 'voter.pollUpdateKey.participant', value: pollUpdateParticipant },
-      {
-        label: 'voter.pollUpdateKey.participant.normalized',
-        value: normalizeJid(pollUpdateParticipant),
-      },
-      { label: 'voter.pollUpdateKey.remote', value: pollUpdateRemote },
-      { label: 'voter.creationKey.remote', value: creationKeyRemote },
-      { label: 'voter.creationKey.participant', value: creationKeyParticipant },
-      { label: 'voter.pollMessage.participant', value: pollMessageKeyParticipant },
-      { label: 'voter.pollMessage.remote', value: pollMessageKeyRemote },
-      { label: 'voter.hint', value: voterJidHint },
-    ]);
+    const baseVoterCandidates: Array<{ label: string; value: string }> = [];
+    addVariants(baseVoterCandidates, 'voter.exact', resolvedVoterJid);
+    addVariants(baseVoterCandidates, 'voter.key.participant', message.key?.participant ?? null);
+    addVariants(baseVoterCandidates, 'voter.key.remote', message.key?.remoteJid ?? null);
+    addVariants(baseVoterCandidates, 'voter.pollUpdateKey.participant', pollUpdateParticipant);
+    addVariants(baseVoterCandidates, 'voter.pollUpdateKey.remote', pollUpdateRemote);
+    addVariants(baseVoterCandidates, 'voter.creationKey.remote', creationKeyRemote);
+    addVariants(baseVoterCandidates, 'voter.creationKey.participant', creationKeyParticipant);
+    addVariants(baseVoterCandidates, 'voter.pollMessage.participant', pollMessageKeyParticipant);
+    addVariants(baseVoterCandidates, 'voter.pollMessage.remote', pollMessageKeyRemote);
+    addVariants(baseVoterCandidates, 'voter.hint', voterJidHint);
 
     const rawSenderLidCandidates = maybeLidVariants(rawSenderLid);
     for (const entry of rawSenderLidCandidates) {
-      baseVoterCandidates.push({
-        label: `voter.senderLid.${entry.label}`,
-        value: entry.value,
-      });
-      baseVoterCandidates.push({
-        label: `voter.senderLid.normalized.${entry.label}`,
-        value: jidNormalizedUser(entry.value),
-      });
+      addVariants(baseVoterCandidates, `voter.senderLid.${entry.label}`, entry.value);
+    }
+
+    const receiptHintsForVote = this.receiptHints.get(message.key?.id ?? '') ?? new Set<string>();
+    for (const hint of receiptHintsForVote) {
+      addVariants(baseVoterCandidates, 'voter.receiptHint', hint);
+    }
+
+    const receiptHintsForPoll = this.receiptHints.get(pollMsgId) ?? new Set<string>();
+    for (const hint of receiptHintsForPoll) {
+      addVariants(baseCreatorCandidates, 'creator.receiptHint', hint);
     }
 
     const voterCandidates: Array<{ label: string; value: string }> = [];
@@ -1304,6 +1350,8 @@ export class PollService {
       {
         pollId: pollMsgId,
         pollEncKeyHash,
+        receiptHintsVote: Array.from(receiptHintsForVote),
+        receiptHintsPoll: Array.from(receiptHintsForPoll),
         attempts: errors,
         pollUpdateMessageKey: {
           id: pollUpdateKey?.id ?? null,
@@ -1315,6 +1363,41 @@ export class PollService {
       'poll.vote.decrypt.failed',
     );
     return null;
+  }
+
+  private ensureReceiptBucket(messageId: string): Set<string> {
+    let bucket = this.receiptHints.get(messageId);
+    if (!bucket) {
+      bucket = new Set();
+      this.receiptHints.set(messageId, bucket);
+    }
+    return bucket;
+  }
+
+  private noteReceiptHint(
+    bucket: Set<string>,
+    messageId: string,
+    label: string,
+    value: string | null | undefined,
+  ): void {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    if (bucket.has(trimmed)) return;
+    bucket.add(trimmed);
+    const normalized = jidNormalizedUser(trimmed);
+    if (normalized && normalized !== trimmed && !bucket.has(normalized)) {
+      bucket.add(normalized);
+    }
+    this.logger.info(
+      {
+        messageId,
+        label,
+        hint: trimmed,
+        normalizedHint: normalized && normalized !== trimmed ? normalized : null,
+      },
+      'poll.vote.hint.receipt',
+    );
   }
 
   /** Busca encKey: payload → contextInfo → message.messageContextInfo → cache persistido (hex). */
