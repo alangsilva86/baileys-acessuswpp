@@ -26,13 +26,11 @@ import type {
 } from '../broker/eventStore.js';
 import { toIsoDate } from './time.js';
 import {
-  computeOptionHash,
   getPollMetadataFromCache,
   getVoteSelection,
   normalizeJid,
   recordVoteSelection,
 } from './pollMetadata.js';
-import { decryptPollVote } from '@whiskeysockets/baileys/lib/Utils/process-message.js';
 
 export interface SendTextOptions {
   timeoutMs?: number;
@@ -633,31 +631,14 @@ export class MessageService {
         const metadata =
           (pollId ? getPollMetadataFromCache(pollId, normalizedRemote) : null) ?? null;
 
-        const pollEncKeyHex = metadata?.encKeyHex ?? null;
-        const pollCreatorJid =
-          pollUpdate.pollCreationMessageKey?.participant ??
-          pollUpdate.pollCreationMessageKey?.remoteJid ??
-          message.key?.participant ??
-          message.key?.remoteJid ??
-          null;
-        const voterJid =
-          message.key?.participant ?? message.key?.remoteJid ?? pollRemoteRaw ?? null;
-
-        const convertToUint8 = (value: Uint8Array | Buffer | string): Uint8Array => {
-          if (value instanceof Uint8Array) return value;
-          if (Buffer.isBuffer(value)) return new Uint8Array(value);
-          return new Uint8Array(Buffer.from(value, 'base64'));
-        };
-
-        if (!pollId || !metadata) {
+        if (!metadata) {
           this.logger.info(
             {
               messageId,
               pollId,
               pollUpdateMessageId: pollUpdate.pollUpdateMessageKey?.id ?? null,
-              hasMetadata: Boolean(metadata),
-              clue: 'sem metadados, estamos sem mapa do tesouro — talvez a criação não tenha sido vista',
               remoteJid: pollRemoteRaw ?? null,
+              clue: 'sem metadados, estamos sem mapa do tesouro — talvez a criação não tenha sido vista',
             },
             'poll.vote.metadata.missing',
           );
@@ -676,90 +657,16 @@ export class MessageService {
             'poll.vote.metadata.ready',
           );
         }
+      }
 
-        if (
-          pollId &&
-          pollCreatorJid &&
-          voterJid &&
-          pollEncKeyHex &&
-          pollEncKeyHex.length % 2 === 0
-        ) {
-          try {
-            const pollEncKey = new Uint8Array(Buffer.from(pollEncKeyHex, 'hex'));
-            const votePayload = {
-              ...pollUpdate.vote,
-              encPayload: convertToUint8(pollUpdate.vote.encPayload),
-              encIv: convertToUint8(pollUpdate.vote.encIv),
-            };
-            const voteMessage = decryptPollVote(votePayload, {
-              pollCreatorJid,
-              pollMsgId: pollId,
-              pollEncKey,
-              voterJid,
-            });
-            const selected = voteMessage?.selectedOptions ?? [];
-            const options = metadata?.options ?? [];
-            const decoded = selected
-              .map((entry) => {
-                const hash = Buffer.from(entry).toString('hex');
-                const match =
-                  options.find((opt) => opt.hash === hash) ??
-                  options.find((opt) => computeOptionHash(opt.text) === hash);
-                return match?.text ?? match?.id ?? `hash:${hash}`;
-              })
-              .filter((text): text is string => Boolean(text));
-            if (decoded.length) {
-              voteText = decoded.join(', ');
-              this.logger.info(
-                {
-                  messageId,
-                  pollId,
-                  decoded,
-                  clue: 'sucesso! o voto falou e nós entendemos',
-                },
-                'poll.vote.decrypt.success',
-              );
-              recordVoteSelection(pollUpdate.pollUpdateMessageKey?.id ?? messageId, {
-                pollId,
-                question: metadata?.question ?? '',
-                selectedOptions: decoded.map((text) => ({ id: text, text })),
-              });
-            }
-          } catch (err) {
-            this.logger.warn(
-              {
-                messageId,
-                pollId,
-                err: (err as Error)?.message ?? String(err),
-                clue: 'tentamos decifrar aqui mesmo e apanhamos; fallback continua valendo',
-              },
-              'poll.vote.decrypt.inline_failed',
-            );
-            // ignore decrypt errors, fallback abaixo
-          }
-        }
-
-        if (!voteText) {
-          const format = (value: unknown): string => {
-            if (!value) return 'missing';
-            if (typeof value === 'string') return value;
-            if (value instanceof Uint8Array) return Buffer.from(value).toString('base64');
-            if (Buffer.isBuffer(value)) return value.toString('base64');
-            return String(value);
-          };
-          const encIv = format(pollUpdate.vote.encIv);
-          const encPayload = format(pollUpdate.vote.encPayload);
-          const pollIdLabel = pollId ?? 'unknown';
-          voteText = `[POLL_VOTE_PENDING] pollId=${pollIdLabel} encIv=${encIv} encPayload=${encPayload}`;
-          this.logger.warn(
-            {
-              messageId,
-              pollId: pollId ?? null,
-              hint: 'fallback entrou em ação — veja encIv/encPayload e os logs de decrypt para a trilha completa',
-            },
-            'poll.vote.fallback.emitted',
-          );
-        }
+      if (!voteText) {
+        this.logger.warn(
+          {
+            messageId,
+            clue: 'voto recebido mas nenhum texto decifrado — confira logs do PollService',
+          },
+          'poll.vote.text.missing',
+        );
       }
     }
 

@@ -1195,6 +1195,11 @@ export class PollService {
     addVariants(baseCreatorCandidates, 'creator.pollMessage.participant', pollMessageKeyParticipant);
     addVariants(baseCreatorCandidates, 'creator.pollMessage.remote', pollMessageKeyRemote);
     addVariants(baseCreatorCandidates, 'creator.self', selfId);
+    addVariants(
+      baseCreatorCandidates,
+      'creator.creation.author',
+      getKeyAuthor(creationKey ?? undefined, this.sock.user?.id),
+    );
 
     const creatorCandidates: Array<{ label: string; value: string }> = [];
     for (const candidate of baseCreatorCandidates) {
@@ -1218,6 +1223,11 @@ export class PollService {
     addVariants(baseVoterCandidates, 'voter.pollMessage.participant', pollMessageKeyParticipant);
     addVariants(baseVoterCandidates, 'voter.pollMessage.remote', pollMessageKeyRemote);
     addVariants(baseVoterCandidates, 'voter.hint', voterJidHint);
+    addVariants(
+      baseVoterCandidates,
+      'voter.update.author',
+      getKeyAuthor(pollUpdateKey ?? undefined, this.sock.user?.id),
+    );
 
     const rawSenderLidCandidates = maybeLidVariants(rawSenderLid);
     for (const entry of rawSenderLidCandidates) {
