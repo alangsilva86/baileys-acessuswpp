@@ -1,15 +1,22 @@
 import { promises as fs } from 'fs';
 import { basename, dirname, join } from 'path';
 
+/* ========================================================================== */
+/* Tipos públicos                                                             */
+/* ========================================================================== */
+
 export interface PollMetadataRecord {
-  pollKey: string;                // chave composta <jid>#<pollId> ou #<pollId> se jid ausente
+  /** chave composta <jid>#<pollId> (ou #<pollId> se jid ausente) */
+  pollKey: string;
   pollId: string;
   remoteJid: string | null;
-  encKeyHex: string | null;       // valor já cifrado em disco por quem chamou (secretEncryption)
+  /** já armazenado cifrado por quem chamou (secretEncryption) */
+  encKeyHex: string | null;
   question: string | null;
   options: string[];
   selectableCount: number | null;
-  updatedAt: number;              // epoch ms
+  /** epoch ms de última atualização */
+  updatedAt: number;
 }
 
 export interface PollMetadataStore {
@@ -17,89 +24,97 @@ export interface PollMetadataStore {
   put(record: PollMetadataRecord): Promise<void>;
 }
 
-/* ------------------------- utils de FS ------------------------- */
-
-async function ensureDirectory(filePath: string): Promise<void> {
-  const dir = dirname(filePath);
-  await fs.mkdir(dir, { recursive: true });
-}
-
-function resolveDefaultPath(): string {
-  const cwd = process.cwd();
-  return join(cwd, 'data', 'poll-metadata.json');
-}
-
-/* --------------------- opções e defaults ---------------------- */
+/* ========================================================================== */
+/* Config/constantes                                                          */
+/* ========================================================================== */
 
 interface FilePollMetadataStoreOptions {
   filePath?: string;
-  ttlMs?: number;               // tempo de vida de um registro
-  compactionInterval?: number;  // quantas escritas disparam compactação
+  /** TTL de um registro em ms. Se <= 0, desabilita expiração. */
+  ttlMs?: number;
+  /** Após quantas escritas rodar compactação automática. Mínimo 1. */
+  compactionInterval?: number;
 }
 
 const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 dias
 const DEFAULT_COMPACTION_INTERVAL = 50;
 
-/* ------------------ implementação baseada em arquivo ------------------ */
+function resolveDefaultPath(): string {
+  return join(process.cwd(), 'data', 'poll-metadata.json');
+}
+
+async function ensureDirectory(filePath: string): Promise<void> {
+  await fs.mkdir(dirname(filePath), { recursive: true });
+}
+
+/* ========================================================================== */
+/* Implementação baseada em arquivo                                           */
+/* ========================================================================== */
 
 class FilePollMetadataStore implements PollMetadataStore {
   private readonly filePath: string;
   private readonly ttlMs: number;
   private readonly compactionInterval: number;
 
-  // serialize writes dentro do processo
+  /** Serializa escritas dentro do processo para evitar interleaving. */
   private writeQueue: Promise<void> = Promise.resolve();
   private writesSinceCompaction = 0;
 
   constructor(options: FilePollMetadataStoreOptions = {}) {
     this.filePath = options.filePath ?? resolveDefaultPath();
-    this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
+    this.ttlMs = Number.isFinite(options.ttlMs ?? DEFAULT_TTL_MS)
+      ? (options.ttlMs as number)
+      : DEFAULT_TTL_MS;
     this.compactionInterval = Math.max(1, options.compactionInterval ?? DEFAULT_COMPACTION_INTERVAL);
 
-    // Compacta na inicialização para já podar lixo antigo
+    // Compacta no boot para já podar lixo antigo e normalizar o arquivo.
     this.writeQueue = this.writeQueue
       .then(() => this.compact())
       .catch((err) => {
-        // não bloqueia futuras escritas
-        console.warn('Failed to compact poll metadata store on start-up:', err);
+        console.warn('poll metadata store: compact on start failed:', err);
       });
   }
 
-  /* ------------------------ API pública ------------------------ */
+  /* --------------------------------- API ---------------------------------- */
 
   async get(pollKey: string): Promise<PollMetadataRecord | null> {
     const { data } = await this.loadData();
-    return data.get(pollKey) ?? null;
+    const record = data.get(pollKey) ?? null;
+
+    if (!record) return null;
+
+    // TTL estrito no read: se expirado, remove e retorna null.
+    if (this.isExpired(record)) {
+      // agenda remoção persistente sem bloquear o GET
+      this.writeQueue = this.writeQueue
+        .then(async () => {
+          data.delete(pollKey);
+          await this.writeAll(data);
+        })
+        .catch((err) => console.warn('poll metadata store: prune on get failed:', err));
+      return null;
+    }
+
+    return record;
   }
 
   async put(record: PollMetadataRecord): Promise<void> {
-    // encadeia na fila para evitar interleaving no processo
+    // encadeia na fila para manter ordem
     this.writeQueue = this.writeQueue
       .then(async () => {
         const { data } = await this.loadData();
 
-        const normalized: PollMetadataRecord = {
-          pollKey: record.pollKey,
-          pollId: record.pollId,
-          remoteJid: record.remoteJid ?? null,
-          encKeyHex: record.encKeyHex ?? null,
-          question: record.question ?? null,
-          options: Array.isArray(record.options) ? record.options.slice() : [],
-          selectableCount: record.selectableCount ?? null,
-          updatedAt: record.updatedAt ?? Date.now(),
-        };
+        const normalized = this.normalizeRecord(record);
 
+        // upsert
         data.set(normalized.pollKey, normalized);
 
         // se temos JID, remova o fallback "#<pollId>"
         if (normalized.remoteJid) {
           const fallbackKey = `#${normalized.pollId}`;
-          if (fallbackKey !== normalized.pollKey) {
-            data.delete(fallbackKey);
-          }
+          if (fallbackKey !== normalized.pollKey) data.delete(fallbackKey);
         }
 
-        // grava de forma atômica
         await this.writeAll(data);
 
         this.writesSinceCompaction += 1;
@@ -108,34 +123,42 @@ class FilePollMetadataStore implements PollMetadataStore {
         }
       })
       .catch((err) => {
-        // Não deixa a queue quebrar para as próximas operações
-        console.warn('poll metadata write failed:', err);
+        console.warn('poll metadata store: write failed:', err);
       });
 
+    // garante conclusão para o chamador
     await this.writeQueue;
   }
 
-  /* -------------------- helpers privados ---------------------- */
+  /* ------------------------------- helpers -------------------------------- */
 
-  private pruneExpiredEntries(data: Map<string, PollMetadataRecord>): boolean {
+  private isExpired(rec: PollMetadataRecord): boolean {
     if (this.ttlMs <= 0 || !Number.isFinite(this.ttlMs)) return false;
+    const updated = typeof rec.updatedAt === 'number' ? rec.updatedAt : 0;
+    return Date.now() - updated > this.ttlMs;
+  }
 
-    const now = Date.now();
-    let changed = false;
-
-    for (const [key, value] of data.entries()) {
-      const updatedAt = value.updatedAt ?? 0;
-      if (now - updatedAt > this.ttlMs) {
-        data.delete(key);
-        changed = true;
-      }
-    }
-
-    return changed;
+  private normalizeRecord(input: PollMetadataRecord): PollMetadataRecord {
+    const options = Array.isArray(input.options) ? input.options.slice() : [];
+    return {
+      pollKey: String(input.pollKey || '').trim(),
+      pollId: String(input.pollId || '').trim(),
+      remoteJid: input.remoteJid ?? null,
+      encKeyHex: input.encKeyHex ?? null,
+      question: input.question ?? null,
+      options,
+      selectableCount:
+        typeof input.selectableCount === 'number' && Number.isFinite(input.selectableCount)
+          ? input.selectableCount
+          : null,
+      updatedAt: typeof input.updatedAt === 'number' && Number.isFinite(input.updatedAt)
+          ? input.updatedAt
+          : Date.now(),
+    };
   }
 
   /**
-   * Lê todo o arquivo.
+   * Lê e normaliza todo o arquivo.
    * Tolera esquemas antigos (index por pollId) e reconstrói pollKey/jid quando possível.
    */
   private async loadData(): Promise<{ data: Map<string, PollMetadataRecord>; pruned: boolean }> {
@@ -145,29 +168,32 @@ class FilePollMetadataStore implements PollMetadataStore {
 
       const data = new Map<string, PollMetadataRecord>();
 
-      for (const [storedKey, value] of Object.entries(json)) {
+      for (const [storedKey, value] of Object.entries(json || {})) {
         // Deriva pollKey e pollId de forma resiliente
-        const rawPollKey = value.pollKey ?? storedKey;
+        const rawPollKey = (value.pollKey ?? storedKey) || '';
         const hasHash = rawPollKey.includes('#');
 
         const pollIdFromKey = hasHash ? rawPollKey.split('#')[1] : rawPollKey;
-        const pollId = value.pollId ?? pollIdFromKey ?? storedKey;
+        const pollId = (value.pollId ?? pollIdFromKey ?? storedKey) || '';
 
         const remoteFromKey = hasHash ? rawPollKey.split('#')[0] : '';
         const remoteJid = value.remoteJid ?? (remoteFromKey ? remoteFromKey : null);
 
-        const pollKey = hasHash ? rawPollKey : `${remoteJid ?? ''}#${pollId}`;
+        const pollKey = hasHash ? rawPollKey : `${remoteJid ?? ''}#${pollId}`.trim();
 
-        data.set(pollKey, {
+        const rec: PollMetadataRecord = this.normalizeRecord({
           pollKey,
           pollId,
           remoteJid,
           encKeyHex: value.encKeyHex ?? null,
           question: value.question ?? null,
           options: Array.isArray(value.options) ? value.options.slice() : [],
-          selectableCount: value.selectableCount ?? null,
+          selectableCount:
+            typeof value.selectableCount === 'number' ? value.selectableCount : null,
           updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : Date.now(),
         });
+
+        data.set(pollKey, rec);
       }
 
       const pruned = this.pruneExpiredEntries(data);
@@ -180,9 +206,23 @@ class FilePollMetadataStore implements PollMetadataStore {
     }
   }
 
+  /** Remove entradas expiradas conforme TTL. */
+  private pruneExpiredEntries(data: Map<string, PollMetadataRecord>): boolean {
+    if (this.ttlMs <= 0 || !Number.isFinite(this.ttlMs)) return false;
+
+    let changed = false;
+    for (const [key, value] of data.entries()) {
+      if (this.isExpired(value)) {
+        data.delete(key);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   /**
-   * Escreve todo o mapa para disco, com rename atômico.
-   * Sempre inclui a chave composta no valor.
+   * Escreve todo o mapa para disco com rename atômico
+   * e permissões restritas (0600).
    */
   private async writeAll(data: Map<string, PollMetadataRecord>): Promise<void> {
     await ensureDirectory(this.filePath);
@@ -190,34 +230,35 @@ class FilePollMetadataStore implements PollMetadataStore {
     // Garante poda antes da escrita
     this.pruneExpiredEntries(data);
 
-    // objeto plano para JSON
+    // Objeto plano para JSON
     const plain: Record<string, PollMetadataRecord> = {};
     for (const [pollKey, value] of data.entries()) {
+      // garante que a chave composta esteja persistida dentro do value
       plain[pollKey] = { ...value, pollKey };
     }
 
     const dir = dirname(this.filePath);
     const fileName = basename(this.filePath);
     const tempPath = join(dir, `.${fileName}.${process.pid}.${Date.now()}.tmp`);
-    const json = JSON.stringify(plain, null, 2);
+    const json = JSON.stringify(plain, null, 2) + '\n';
 
     try {
       await fs.writeFile(tempPath, json, { encoding: 'utf-8', mode: 0o600 });
       await fs.rename(tempPath, this.filePath);
     } finally {
+      // melhor esforço para limpar o tmp
       try {
         await fs.unlink(tempPath);
       } catch (err: any) {
         if (!err || err.code !== 'ENOENT') {
+          // se falhar por outro motivo, propaga
           throw err;
         }
       }
     }
   }
 
-  /**
-   * Recarrega, poda e regrava se necessário.
-   */
+  /** Recarrega, poda e regrava se necessário. */
   private async compact(): Promise<void> {
     const { data, pruned } = await this.loadData();
     if (pruned) {
@@ -227,6 +268,8 @@ class FilePollMetadataStore implements PollMetadataStore {
   }
 }
 
-/* -------------------- instância exportada --------------------- */
+/* ========================================================================== */
+/* Instância exportada                                                        */
+/* ========================================================================== */
 
 export const pollMetadataStore: PollMetadataStore = new FilePollMetadataStore();

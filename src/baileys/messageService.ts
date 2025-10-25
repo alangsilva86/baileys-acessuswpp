@@ -112,6 +112,12 @@ interface MediaMetadataPayload {
   [key: string]: unknown;
 }
 
+interface PollChoicePayload {
+  pollId: string | null | undefined;
+  question: string | null | undefined;
+  selectedOptions: Array<{ id: string | null; text: string | null }>;
+}
+
 interface StructuredMessagePayload {
   id: string | null;
   chatId: string | null;
@@ -119,6 +125,7 @@ interface StructuredMessagePayload {
   text: string | null;
   interactive?: InteractivePayload | null;
   media?: MediaMetadataPayload | null;
+  poll?: PollChoicePayload | null;
 }
 
 type StructuredMessageOverrides = Partial<Omit<StructuredMessagePayload, 'id' | 'chatId'>>;
@@ -319,6 +326,11 @@ function normalizeMessageType(rawType: string | null): string | null {
     case 'pollCreationMessageV2':
     case 'pollCreationMessageV3':
       return 'poll';
+    // entra do WhatsApp quando alguém vota; manter distinto para debug
+    case 'pollUpdateMessage':
+    case 'pollUpdateMessageV2':
+    case 'pollUpdateMessageV3':
+      return 'poll_update';
     default:
       return rawType;
   }
@@ -637,7 +649,7 @@ export class MessageService {
     const filtered = filterClientMessages(messages);
     for (const message of filtered) {
       try {
-        const eventPayload = this.createStructuredPayload(message, 'inbound');
+        const eventPayload = await this.createStructuredPayload(message, 'inbound');
 
         let queued: BrokerEvent | null = null;
         if (this.eventStore) {
@@ -699,7 +711,7 @@ export class MessageService {
     if ('media' in extras) overrides.media = extras.media ?? null;
     if ('type' in extras) overrides.type = extras.type ?? null;
 
-    const eventPayload = this.createStructuredPayload(message, 'outbound', overrides);
+    const eventPayload = await this.createStructuredPayload(message, 'outbound', overrides);
 
     let queued: BrokerEvent | null = null;
     if (this.eventStore) {
@@ -719,26 +731,62 @@ export class MessageService {
     await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload, { eventId: queued?.id });
   }
 
-  private createStructuredPayload(
+  /** Espera curta para o PollService gravar a seleção no cache quando o evento chega invertido. */
+  private async waitVoteSelection(
+    messageId: string | null,
+    graceMs = 400,
+    stepMs = 25,
+  ): Promise<ReturnType<typeof getVoteSelection>> {
+    if (!messageId) return null;
+    let sel = getVoteSelection(messageId);
+    if (sel) return sel;
+
+    const deadline = Date.now() + Math.max(0, graceMs);
+    while (!sel && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, stepMs));
+      sel = getVoteSelection(messageId);
+    }
+    return sel ?? null;
+  }
+
+  private async createStructuredPayload(
     message: WAMessage,
     direction: BrokerEventDirection,
     messageOverrides: StructuredMessageOverrides = {},
-  ): StructuredMessageEventPayload {
+  ): Promise<StructuredMessageEventPayload> {
     const lead = mapLeadFromMessage(message);
     const contact = buildContactPayload(lead);
 
     const messageId = message.key?.id ?? null;
     const chatId = message.key?.remoteJid ?? null;
 
-    // Texto extraído do conteúdo bruto
+    // Tipo bruto do Baileys e normalizado
+    const rawType = extractMessageType(message);
+    const normalizedType = normalizeMessageType(rawType);
+
+    // Em votos, pode haver corrida entre PollService e MessageService; aguardamos brevemente.
+    const shouldAwaitVote =
+      direction === 'inbound' &&
+      (rawType?.startsWith('pollUpdateMessage') || normalizedType === 'poll_update');
+
+    // Texto extraído do conteúdo bruto (legado)
     const extractedText = extractMessageText(message);
 
-    // Texto derivado do voto (se previamente cacheado pelo PollService)
-    const voteSelection = getVoteSelection(messageId);
+    // Voto (se previamente cacheado pelo PollService)
+    let voteSelection = getVoteSelection(messageId);
+    if (!voteSelection && shouldAwaitVote) {
+      voteSelection = await this.waitVoteSelection(messageId);
+    }
+
     let voteText: string | null = null;
     if (voteSelection?.selectedOptions?.length) {
       const parts = voteSelection.selectedOptions
-        .map(opt => (typeof opt.text === 'string' && opt.text.trim()) || (typeof opt.id === 'string' && opt.id.trim()) || '')
+        .map(
+          (opt) =>
+            (typeof opt.text === 'string' && opt.text.trim()) ||
+            (typeof opt.id === 'string' && opt.id.trim()) ||
+            '',
+        )
         .filter(Boolean);
       if (parts.length) voteText = parts.join(', ');
     }
@@ -770,7 +818,7 @@ export class MessageService {
     if (Object.prototype.hasOwnProperty.call(messageOverrides, 'type')) {
       type = messageOverrides.type ?? null;
     } else {
-      type = normalizeMessageType(extractMessageType(message));
+      type = normalizedType;
     }
 
     if (!type) {
@@ -792,6 +840,14 @@ export class MessageService {
 
     if (interactive) structuredMessage.interactive = interactive;
     if (media) structuredMessage.media = media;
+
+    if (voteSelection?.selectedOptions?.length) {
+      structuredMessage.poll = {
+        pollId: voteSelection.pollId,
+        question: voteSelection.question,
+        selectedOptions: voteSelection.selectedOptions,
+      };
+    }
 
     const metadata: EventMetadata = {
       timestamp: toIsoDate(message.messageTimestamp),
