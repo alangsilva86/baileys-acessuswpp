@@ -3,6 +3,8 @@ import type { WAMessage } from '@whiskeysockets/baileys';
 import { pollMetadataStore, type PollMetadataRecord } from './pollMetadataStore.js';
 import { decryptSecret, encryptSecret } from './secretEncryption.js';
 
+/* ---------- Tipos públicos ---------- */
+
 export interface PollOptionMetadata {
   id: string;
   text: string;
@@ -24,15 +26,19 @@ interface VoteSelection {
   selectedOptions: Array<{ id: string | null; text: string | null }>;
 }
 
-const pollMetadataCache = new Map<string, PollMetadata>();
-const pollIdToCacheKeys = new Map<string, Set<string>>();
-const voteSelections = new Map<string, VoteSelection>();
+/* ---------- Estado em memória ---------- */
+
+const pollMetadataCache = new Map<string, PollMetadata>();        // chave: <jid>#<pollId> (ou #<pollId> se jid ausente)
+const pollIdToCacheKeys = new Map<string, Set<string>>();         // índice auxiliar: pollId -> conjunto de chaves compostas
+const voteSelections = new Map<string, VoteSelection>();          // messageId -> última seleção legível
+
+/* ---------- Normalização utilitária ---------- */
 
 export function normalizeJid(value: string | null | undefined): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
-  const [base] = trimmed.split(':');
+  const [base] = trimmed.split(':'); // remove sufixo :device
   return base || null;
 }
 
@@ -81,33 +87,30 @@ export function normalizeOptionHash(value: unknown): string | null {
     const trimmed = value.trim();
     if (!trimmed) return null;
 
+    // hex puro
     if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0) {
       return trimmed.toLowerCase();
     }
 
-    const base64Pattern = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
+    // base64
+    const base64Pattern =
+      /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
     if (base64Pattern.test(trimmed)) {
       try {
         const buffer = Buffer.from(trimmed, 'base64');
-        if (buffer.length > 0) {
-          return buffer.toString('hex');
-        }
+        if (buffer.length > 0) return buffer.toString('hex');
       } catch {
         // ignore
       }
     }
 
+    // utf-8 para hex (fallback)
     const utf8Buffer = Buffer.from(trimmed, 'utf-8');
     return utf8Buffer.length > 0 ? utf8Buffer.toString('hex') : null;
   }
 
-  if (Buffer.isBuffer(value)) {
-    return value.length > 0 ? value.toString('hex') : null;
-  }
-
-  if (value instanceof Uint8Array) {
-    return value.length > 0 ? Buffer.from(value).toString('hex') : null;
-  }
+  if (Buffer.isBuffer(value)) return value.length > 0 ? value.toString('hex') : null;
+  if (value instanceof Uint8Array) return value.length > 0 ? Buffer.from(value).toString('hex') : null;
 
   if (Array.isArray(value)) {
     if (!value.length) return null;
@@ -121,12 +124,11 @@ function normalizeMessageSecret(value: unknown): string | null {
   return normalizeOptionHash(value);
 }
 
+/* ---------- Extração de opções do WAMessage ---------- */
+
 function extractOptionText(option: unknown): string | null {
   if (!option || typeof option !== 'object') return null;
-  const withName = option as {
-    optionName?: unknown;
-    name?: unknown;
-  };
+  const withName = option as { optionName?: unknown; name?: unknown };
 
   const optionName = withName.optionName;
   if (typeof optionName === 'string') {
@@ -187,6 +189,8 @@ export function buildOptionHashMaps(
   return { hashMap, textToHash };
 }
 
+/* ---------- Normalização e merge de metadados ---------- */
+
 export function normalizePollOption(
   option: { id?: string | null; text?: string | null; hash?: string | null },
 ): PollOptionMetadata | null {
@@ -206,11 +210,7 @@ export function normalizePollOption(
     if (trimmedId) {
       hash = computeOptionHash(trimmedId);
       if (!normalizedText) {
-        return {
-          id: trimmedId,
-          text: trimmedId,
-          hash,
-        };
+        return { id: trimmedId, text: trimmedId, hash };
       }
     }
   }
@@ -235,19 +235,13 @@ export function mergePollMetadata(
 
   for (const source of sources) {
     if (!source) continue;
-    if (!pollId) {
-      pollId = source.pollId;
-    }
-    if (!question && source.question) {
-      question = source.question;
-    }
+    if (!pollId) pollId = source.pollId;
+    if (!question && source.question) question = source.question;
+
     const normalizedRemote = normalizeJid(source.remoteJid);
-    if (!remoteJid && normalizedRemote) {
-      remoteJid = normalizedRemote;
-    }
-    if (!encKeyHex && source.encKeyHex) {
-      encKeyHex = source.encKeyHex;
-    }
+    if (!remoteJid && normalizedRemote) remoteJid = normalizedRemote;
+
+    if (!encKeyHex && source.encKeyHex) encKeyHex = source.encKeyHex;
     if (selectableCount == null && source.selectableCount != null) {
       selectableCount = source.selectableCount;
     }
@@ -258,11 +252,9 @@ export function mergePollMetadata(
       if (!optionMap.has(normalized.hash)) {
         optionMap.set(normalized.hash, normalized);
       } else {
-        const existing = optionMap.get(normalized.hash);
-        if (existing) {
-          if (!existing.text && normalized.text) existing.text = normalized.text;
-          if (!existing.id && normalized.id) existing.id = normalized.id;
-        }
+        const existing = optionMap.get(normalized.hash)!;
+        if (!existing.text && normalized.text) existing.text = normalized.text;
+        if (!existing.id && normalized.id) existing.id = normalized.id;
       }
     }
   }
@@ -278,6 +270,8 @@ export function mergePollMetadata(
     selectableCount,
   };
 }
+
+/* ---------- Extração do WAMessage ---------- */
 
 export function extractPollMetadataFromMessage(message: WAMessage): PollMetadata | null {
   const pollId = message.key?.id;
@@ -299,8 +293,7 @@ export function extractPollMetadataFromMessage(message: WAMessage): PollMetadata
   const options: PollOptionMetadata[] = [];
   for (const [hash, option] of hashMap.entries()) {
     const normalized = normalizePollOption({ id: option.id, text: option.text, hash });
-    if (!normalized) continue;
-    options.push(normalized);
+    if (normalized) options.push(normalized);
   }
 
   const selectableCount =
@@ -312,7 +305,10 @@ export function extractPollMetadataFromMessage(message: WAMessage): PollMetadata
   const secretCandidates: unknown[] = [];
   if (pollCreation) {
     secretCandidates.push((pollCreation as { encKey?: unknown })?.encKey ?? null);
-    secretCandidates.push((pollCreation as { contextInfo?: { messageSecret?: unknown } | null })?.contextInfo?.messageSecret ?? null);
+    secretCandidates.push(
+      (pollCreation as { contextInfo?: { messageSecret?: unknown } | null })?.contextInfo
+        ?.messageSecret ?? null,
+    );
   }
   secretCandidates.push(message.message?.messageContextInfo?.messageSecret ?? null);
 
@@ -335,6 +331,8 @@ export function extractPollMetadataFromMessage(message: WAMessage): PollMetadata
   };
 }
 
+/* ---------- Persistência e cache ---------- */
+
 export async function rememberPollMetadata(
   metadata: PollMetadata | null | undefined,
   options: { persist?: boolean } = {},
@@ -352,7 +350,6 @@ export async function rememberPollMetadata(
     normalizedMetadata.pollId,
     normalizedMetadata.remoteJid,
   );
-
   const merged = mergePollMetadata(existing, normalizedMetadata);
   if (!merged) return;
 
@@ -364,9 +361,11 @@ export async function rememberPollMetadata(
   const pollKey = buildPollKey(normalizedMerged.pollId, normalizedMerged.remoteJid);
   if (!pollKey) return;
 
+  // cache em memória
   pollMetadataCache.set(pollKey, normalizedMerged);
   registerCacheKey(normalizedMerged.pollId, pollKey);
 
+  // limpa fallback sem jid se agora temos jid
   if (normalizedMerged.remoteJid) {
     const fallbackKey = buildPollKey(normalizedMerged.pollId, null);
     if (fallbackKey && fallbackKey !== pollKey) {
@@ -380,23 +379,10 @@ export async function rememberPollMetadata(
       pollKey,
       pollId: normalizedMerged.pollId,
       remoteJid: normalizedMerged.remoteJid ?? null,
-      encKeyHex: normalizedMerged.encKeyHex ?? null,
+      encKeyHex: encryptSecret(normalizedMerged.encKeyHex ?? null) ?? null,
       question: normalizedMerged.question ?? null,
-      options: normalizedMerged.options.map((option) => option.text),
+      options: normalizedMerged.options.map(o => o.text),
       selectableCount: normalizedMerged.selectableCount ?? null,
-  if (!metadata) return;
-  const existing = pollMetadataCache.get(metadata.pollId);
-  const merged = mergePollMetadata(existing, metadata);
-  if (merged) {
-    pollMetadataCache.set(metadata.pollId, merged);
-    const storedEncKeyHex = encryptSecret(merged.encKeyHex ?? null);
-    await pollMetadataStore.put({
-      pollId: merged.pollId,
-      remoteJid: merged.remoteJid ?? null,
-      encKeyHex: storedEncKeyHex ?? null,
-      question: merged.question ?? null,
-      options: merged.options.map((option) => option.text),
-      selectableCount: merged.selectableCount ?? null,
       updatedAt: Date.now(),
     });
   }
@@ -430,6 +416,7 @@ export async function rememberPollMetadataFromMessage(
     const remoteJid = normalizeJid(fallback.remoteJid ?? messageRemoteJid);
     const selectableCount =
       typeof fallback.selectableCount === 'number' ? fallback.selectableCount : null;
+
     if (question || normalizedOptions.length || encKeyHex || remoteJid || selectableCount != null) {
       fallbackMetadata = {
         pollId,
@@ -527,11 +514,7 @@ export async function getPollMetadata(
 
   if (normalizedRemote == null) {
     const indexedKeys = pollIdToCacheKeys.get(pollId);
-    if (indexedKeys) {
-      for (const key of indexedKeys) {
-        candidateKeys.add(key);
-      }
-    }
+    if (indexedKeys) for (const key of indexedKeys) candidateKeys.add(key);
   }
 
   for (const key of candidateKeys) {
@@ -541,15 +524,14 @@ export async function getPollMetadata(
     const normalized = pollMetadataRecordToMetadata(stored);
     await rememberPollMetadata(normalized, { persist: false });
 
-    const refreshed = getPollMetadataFromCache(
-      pollId,
-      normalizedRemote ?? normalized.remoteJid,
-    );
+    const refreshed = getPollMetadataFromCache(pollId, normalizedRemote ?? normalized.remoteJid);
     if (refreshed) return refreshed;
   }
 
   return null;
 }
+
+/* ---------- Seleção legível por messageId ---------- */
 
 export function recordVoteSelection(
   messageId: string | null | undefined,
@@ -563,15 +545,15 @@ export function recordVoteSelection(
   voteSelections.set(messageId, data);
 }
 
-export function getVoteSelection(
-  messageId: string | null | undefined,
-): VoteSelection | null {
+export function getVoteSelection(messageId: string | null | undefined): VoteSelection | null {
   if (!messageId) return null;
   return voteSelections.get(messageId) ?? null;
 }
 
+/* ---------- Conversão record -> metadata ---------- */
+
 function pollMetadataRecordToMetadata(record: PollMetadataRecord): PollMetadata {
-  const options = record.options
+  const options = (record.options ?? [])
     .map((text) => normalizePollOption({ id: text, text }))
     .filter((value): value is PollOptionMetadata => Boolean(value));
 
@@ -580,8 +562,6 @@ function pollMetadataRecordToMetadata(record: PollMetadataRecord): PollMetadata 
     question: record.question ?? '',
     options,
     remoteJid: normalizeJid(record.remoteJid),
-    encKeyHex: record.encKeyHex ?? null,
-    remoteJid: record.remoteJid ?? null,
     encKeyHex: decryptSecret(record.encKeyHex ?? null),
     selectableCount: record.selectableCount ?? null,
   };

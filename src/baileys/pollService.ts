@@ -33,7 +33,7 @@ import {
   recordVoteSelection,
   rememberPollMetadataFromMessage,
 } from './pollMetadata.js';
-import { decryptSecret, fingerprintSecret } from './secretEncryption.js';
+import { fingerprintSecret } from './secretEncryption.js';
 
 export interface SendPollOptions {
   selectableCount?: number;
@@ -179,7 +179,7 @@ export class PollService {
   }
 
   async onMessageUpsert(event: BaileysEventMap['messages.upsert']): Promise<void> {
-    if (!event.messages?.length) return;
+    if (!event?.messages?.length) return;
 
     for (const message of event.messages) {
       const content = extractMessageContent(message.message);
@@ -511,6 +511,7 @@ export class PollService {
       }
     }
 
+    // Ordem canônica
     const messageMetadata = pollMetadata?.options.length
       ? null
       : extractPollMetadataFromMessage(pollMessage);
@@ -548,6 +549,7 @@ export class PollService {
       }
     }
 
+    // Selecionadas na ordem canônica
     const remainingSelectedOptions = new Map(selectedOptionsMap);
     const orderedSelectedOptions: Array<{ id: string | null; text: string | null }> = [];
 
@@ -619,6 +621,7 @@ export class PollService {
       pollMetadata = (await getPollMetadata(pollId, pollRemoteJid)) ?? pollMetadata;
     }
 
+    // Agregados na ordem canônica
     const aggregateEntries: Array<{
       index: number;
       hash: string | null;
@@ -801,11 +804,13 @@ export class PollService {
     if (!pollId) return null;
     const metadata = await getPollMetadata(pollId, remoteJid ?? null);
     if (!metadata) return null;
-    const decryptedEncKeyHex = decryptSecret(metadata.encKeyHex ?? null);
+
+    // encKeyHex já vem descriptografado do store helper
+    const encKeyHex = metadata.encKeyHex ?? null;
     let secretBuffer: Buffer | null = null;
-    if (decryptedEncKeyHex) {
+    if (encKeyHex) {
       try {
-        const candidate = Buffer.from(decryptedEncKeyHex, 'hex');
+        const candidate = Buffer.from(encKeyHex, 'hex');
         if (candidate.length > 0) {
           secretBuffer = candidate;
         }
@@ -813,6 +818,7 @@ export class PollService {
         secretBuffer = null;
       }
     }
+
     const selectableCount = metadata.selectableCount ?? DEFAULT_SELECTABLE_COUNT;
     const optionsArray = metadata.options.map((option) => ({ optionName: option.text }));
 
@@ -918,7 +924,6 @@ export class PollService {
 
   private normalizePollUpdates(pollUpdates: proto.IPollUpdate[] | null | undefined): proto.IPollUpdate[] {
     if (!Array.isArray(pollUpdates)) return [];
-
     return pollUpdates.filter((update) => update?.vote?.selectedOptions?.length);
   }
 
@@ -989,6 +994,7 @@ export class PollService {
         ?.pollCreationMessageV3 ?? undefined,
     ];
 
+    // 1) tenta encKey/contextInfo do payload
     for (const creation of pollCreations) {
       const encKey = this.toUint8Array(
         (creation as { encKey?: Uint8Array | string | null })?.encKey,
@@ -1006,29 +1012,28 @@ export class PollService {
       if (secret) return secret;
     }
 
+    // 2) tenta messageContextInfo
     const messageContextSecret = this.toUint8Array(
       (pollMessage as {
         messageContextInfo?:
           | { messageSecret?: Uint8Array | string | null }
           | null
           | undefined;
-      })
-        ?.messageContextInfo?.messageSecret,
+      })?.messageContextInfo?.messageSecret,
     );
     if (messageContextSecret) return messageContextSecret;
 
+    // 3) fallback para metadados persistidos (encKeyHex já vem descriptografado dos helpers)
     const pollId = pollMessage.key?.id;
     if (pollId) {
-      const metadata = getPollMetadataFromCache(pollId, pollMessage.key?.remoteJid ?? null);
-      if (metadata?.encKeyHex) {
-      const metadata = getPollMetadataFromCache(pollId);
-      const decrypted = decryptSecret(metadata?.encKeyHex ?? null);
-      if (decrypted) {
+      const cached = getPollMetadataFromCache(pollId, pollMessage.key?.remoteJid ?? null);
+      const encKeyHex = cached?.encKeyHex ?? null;
+      if (encKeyHex) {
         try {
-          const buffer = Buffer.from(decrypted, 'hex');
-          if (buffer.length > 0) return new Uint8Array(buffer);
+          const buf = Buffer.from(encKeyHex, 'hex');
+          if (buf.length > 0) return new Uint8Array(buf);
         } catch {
-          // ignore malformed hex
+          // ignora hex inválido
         }
       }
     }
@@ -1046,19 +1051,21 @@ export class PollService {
       const trimmed = value.trim();
       if (!trimmed) return null;
 
+      // tenta base64
       try {
         const base64 = Buffer.from(trimmed, 'base64');
         if (base64.length > 0) return new Uint8Array(base64);
       } catch {
-        // ignore invalid base64
+        // ignore
       }
 
+      // tenta hex
       if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0) {
         try {
           const hex = Buffer.from(trimmed, 'hex');
           if (hex.length > 0) return new Uint8Array(hex);
         } catch {
-          // ignore invalid hex
+          // ignore
         }
       }
     }
@@ -1073,7 +1080,6 @@ export class PollService {
       const author = getKeyAuthor(creationKey, this.sock.user?.id);
       if (author) return author;
     }
-
     return pollMessage.key?.participant ?? pollMessage.key?.remoteJid ?? null;
   }
 }
