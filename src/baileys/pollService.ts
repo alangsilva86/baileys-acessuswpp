@@ -184,6 +184,7 @@ export class PollService {
     for (const message of event.messages) {
       const content = extractMessageContent(message.message);
 
+      // lembra criação de poll
       if (
         content?.pollCreationMessage ||
         (content as { pollCreationMessageV2?: proto.Message.IPollCreationMessage | null })
@@ -195,6 +196,7 @@ export class PollService {
         await rememberPollMetadataFromMessage(message);
       }
 
+      // trata voto
       const pollUpdateMessage =
         content?.pollUpdateMessage ??
         (content as { pollUpdateMessageV2?: proto.Message.IPollUpdateMessage | null })
@@ -218,9 +220,7 @@ export class PollService {
           creationKey?.id ?? message.key?.id ?? null,
           creationKey?.remoteJid ?? message.key?.remoteJid ?? null,
         );
-        if (pollMessage) {
-          this.store.remember(pollMessage);
-        }
+        if (pollMessage) this.store.remember(pollMessage);
       }
       if (!pollMessage) continue;
 
@@ -236,7 +236,6 @@ export class PollService {
         message,
         voterJid,
       );
-
       if (!pollUpdates.length) continue;
 
       const updateLike = {
@@ -278,15 +277,14 @@ export class PollService {
       const pollUpdate = pollUpdates[0] as PollUpdateWithCreationKey | undefined;
       const creationKey = pollUpdate?.pollCreationMessageKey ?? undefined;
       const voterKey = pollUpdate?.pollUpdateMessageKey ?? null;
+
       let pollMessage = this.store.get(creationKey?.id) ?? this.store.get(update.key?.id);
       if (!pollMessage) {
         pollMessage = await this.rehydratePollMessage(
           creationKey?.id ?? update.key?.id ?? null,
           creationKey?.remoteJid ?? update.key?.remoteJid ?? null,
         );
-        if (pollMessage) {
-          this.store.remember(pollMessage);
-        }
+        if (pollMessage) this.store.remember(pollMessage);
       }
       if (!pollMessage) continue;
 
@@ -320,9 +318,8 @@ export class PollService {
   ): string | null {
     if (voterKey) {
       const author = getKeyAuthor(voterKey, this.sock.user?.id);
-      if (author) return author;
+      if (author) return author; // mantém :device se houver
     }
-
     return fallbackKey?.participant ?? fallbackKey?.remoteJid ?? null;
   }
 
@@ -429,7 +426,7 @@ export class PollService {
       }
     }
 
-    const voterJid = normalizeJid(voterInfo.voterJid);
+    const voterJid = normalizeJid(voterInfo.voterJid); // normaliza só para agregação/comparação
     const selectedOptionsByVoter =
       voterJid
         ? aggregate
@@ -511,7 +508,7 @@ export class PollService {
       }
     }
 
-    // Ordem canônica
+    // ordem canônica
     const messageMetadata = pollMetadata?.options.length
       ? null
       : extractPollMetadataFromMessage(pollMessage);
@@ -549,7 +546,7 @@ export class PollService {
       }
     }
 
-    // Selecionadas na ordem canônica
+    // selecionadas na ordem canônica
     const remainingSelectedOptions = new Map(selectedOptionsMap);
     const orderedSelectedOptions: Array<{ id: string | null; text: string | null }> = [];
 
@@ -621,7 +618,7 @@ export class PollService {
       pollMetadata = (await getPollMetadata(pollId, pollRemoteJid)) ?? pollMetadata;
     }
 
-    // Agregados na ordem canônica
+    // agregados na ordem canônica
     const aggregateEntries: Array<{
       index: number;
       hash: string | null;
@@ -715,9 +712,7 @@ export class PollService {
       let mappedOption: { id: string | null; text: string | null } | null = null;
       if (canonicalHash) {
         const candidate = optionHashMap.get(canonicalHash);
-        if (candidate) {
-          mappedOption = candidate;
-        }
+        if (candidate) mappedOption = candidate;
       }
       orderedOptionTotals.push({
         id:
@@ -781,17 +776,11 @@ export class PollService {
       });
     }
 
-    await this.webhook.emit('POLL_CHOICE', payload, {
-      eventId: queued?.id,
-    });
+    await this.webhook.emit('POLL_CHOICE', payload, { eventId: queued?.id });
     await this.maybeSendFeedback(voterJid, payload);
 
     if (selectedOptions.length) {
-      recordVoteSelection(messageId, {
-        pollId,
-        question,
-        selectedOptions,
-      });
+      recordVoteSelection(messageId, { pollId, question, selectedOptions });
     } else {
       recordVoteSelection(messageId, null);
     }
@@ -805,15 +794,13 @@ export class PollService {
     const metadata = await getPollMetadata(pollId, remoteJid ?? null);
     if (!metadata) return null;
 
-    // encKeyHex já vem descriptografado do store helper
+    // encKeyHex já vem descriptografado pelos helpers de store
     const encKeyHex = metadata.encKeyHex ?? null;
     let secretBuffer: Buffer | null = null;
     if (encKeyHex) {
       try {
         const candidate = Buffer.from(encKeyHex, 'hex');
-        if (candidate.length > 0) {
-          secretBuffer = candidate;
-        }
+        if (candidate.length > 0) secretBuffer = candidate;
       } catch {
         secretBuffer = null;
       }
@@ -826,18 +813,14 @@ export class PollService {
       name: metadata.question ?? '',
       selectableOptionsCount: selectableCount,
     };
-    if (optionsArray.length) {
-      pollCreationPayload.options = optionsArray;
-    }
+    if (optionsArray.length) pollCreationPayload.options = optionsArray;
 
     const messageContent: Record<string, unknown> = {
       pollCreationMessageV3: pollCreationPayload,
     };
 
     if (secretBuffer) {
-      messageContent.messageContextInfo = {
-        messageSecret: secretBuffer,
-      };
+      messageContent.messageContextInfo = { messageSecret: secretBuffer };
     }
 
     const synthetic: WAMessage = {
@@ -858,7 +841,6 @@ export class PollService {
     payload: PollChoiceEventPayload,
   ) {
     if (!this.feedbackTemplate || !voterJid || !payload.selectedOptions.length) return;
-
     if (this.sock.user?.id && this.sock.user.id === voterJid) return;
 
     const optionText = payload.selectedOptions
@@ -872,9 +854,7 @@ export class PollService {
 
     try {
       if (this.messageService) {
-        await this.messageService.sendText(voterJid, text, {
-          timeoutMs: getSendTimeoutMs(),
-        });
+        await this.messageService.sendText(voterJid, text, { timeoutMs: getSendTimeoutMs() });
       } else {
         await this.sock.sendMessage(voterJid, { text });
       }
@@ -888,13 +868,11 @@ export class PollService {
     pollUpdates: proto.IPollUpdate[],
   ): proto.IPollUpdate[] {
     const applied: proto.IPollUpdate[] = [];
-
     for (const update of pollUpdates) {
       if (!update?.vote?.selectedOptions?.length) continue;
       updateMessageWithPollUpdate(pollMessage as Pick<WAMessage, 'pollUpdates'>, update);
       applied.push(update);
     }
-
     return applied;
   }
 
@@ -927,11 +905,12 @@ export class PollService {
     return pollUpdates.filter((update) => update?.vote?.selectedOptions?.length);
   }
 
+  /** Decriptação: usar JIDs EXATOS, sem normalize, para respeitar sufixo :device. */
   private decryptPollUpdate(
     pollMessage: WAMessage,
     pollUpdateMessage: proto.Message.IPollUpdateMessage,
     message: WAMessage,
-    voterJid: string | null,
+    voterJidHint: string | null,
   ): proto.IPollUpdate | null {
     const encVote = pollUpdateMessage.vote;
     if (!encVote?.encPayload || !encVote.encIv) return null;
@@ -947,26 +926,34 @@ export class PollService {
       return null;
     }
 
-    const pollCreatorJid = normalizeJid(this.resolvePollCreatorJid(creationKey, pollMessage));
-    const resolvedVoterJid = normalizeJid(
-      voterJid ?? this.resolveVoterJid(pollUpdateMessage.pollUpdateMessageKey ?? null, message.key),
-    );
+    // JIDs exatos (sem normalizar) para derivação correta
+    const pollCreatorJid =
+      this.resolvePollCreatorJid(creationKey, pollMessage) ??
+      pollMessage.key?.participant ??
+      pollMessage.key?.remoteJid ??
+      null;
+
+    const resolvedVoterJid =
+      voterJidHint ??
+      this.resolveVoterJid(
+        (pollUpdateMessage as { pollUpdateMessageKey?: proto.IMessageKey | null })?.pollUpdateMessageKey ?? null,
+        message.key,
+      ) ??
+      null;
 
     if (!pollCreatorJid || !resolvedVoterJid) {
       const logContext: Record<string, unknown> = { pollId: pollMsgId };
-      if (pollEncKeyHash) {
-        logContext.pollEncKeyHash = pollEncKeyHash;
-      }
+      if (pollEncKeyHash) logContext.pollEncKeyHash = pollEncKeyHash;
       this.logger.warn(logContext, 'poll.vote.decrypt.missingParticipants');
       return null;
     }
 
     try {
       const vote = this.decryptPollVote(encVote, {
-        pollCreatorJid,
+        pollCreatorJid,           // mantém sufixo :device se existir
         pollMsgId,
         pollEncKey,
-        voterJid: resolvedVoterJid,
+        voterJid: resolvedVoterJid, // mantém sufixo :device se existir
       });
 
       return {
@@ -977,14 +964,13 @@ export class PollService {
       } as proto.IPollUpdate;
     } catch (err) {
       const logContext: Record<string, unknown> = { err, pollId: pollMsgId };
-      if (pollEncKeyHash) {
-        logContext.pollEncKeyHash = pollEncKeyHash;
-      }
+      if (pollEncKeyHash) logContext.pollEncKeyHash = pollEncKeyHash;
       this.logger.warn(logContext, 'poll.vote.decrypt.failed');
       return null;
     }
   }
 
+  /** Busca encKey: payload → contextInfo → topo → cache persistido (hex). */
   private extractPollEncKey(pollMessage: WAMessage): Uint8Array | null {
     const pollCreations = [
       pollMessage.message?.pollCreationMessage,
@@ -994,7 +980,7 @@ export class PollService {
         ?.pollCreationMessageV3 ?? undefined,
     ];
 
-    // 1) tenta encKey/contextInfo do payload
+    // encKey/contextInfo no payload de criação
     for (const creation of pollCreations) {
       const encKey = this.toUint8Array(
         (creation as { encKey?: Uint8Array | string | null })?.encKey,
@@ -1012,7 +998,7 @@ export class PollService {
       if (secret) return secret;
     }
 
-    // 2) tenta messageContextInfo
+    // messageContextInfo no topo
     const messageContextSecret = this.toUint8Array(
       (pollMessage as {
         messageContextInfo?:
@@ -1023,7 +1009,7 @@ export class PollService {
     );
     if (messageContextSecret) return messageContextSecret;
 
-    // 3) fallback para metadados persistidos (encKeyHex já vem descriptografado dos helpers)
+    // fallback do cache (encKeyHex já em hex na memória)
     const pollId = pollMessage.key?.id;
     if (pollId) {
       const cached = getPollMetadataFromCache(pollId, pollMessage.key?.remoteJid ?? null);
