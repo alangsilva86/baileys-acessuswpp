@@ -16,8 +16,11 @@ import { filterClientMessages } from './baileys/messageUtils.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
+// Reconnect/backoff
 const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
+
+// Status tracking
 const DEFAULT_STATUS_TTL_MS = 10 * 60_000;
 const DEFAULT_STATUS_SWEEP_INTERVAL_MS = 60_000;
 const FINAL_STATUS_THRESHOLD = 3;
@@ -36,8 +39,7 @@ function incrementStatusCount(inst: Instance, status: number): void {
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
-  if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  return fallback;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 const STATUS_TTL_MS = parsePositiveInt(process.env.STATUS_TTL_MS, DEFAULT_STATUS_TTL_MS);
@@ -56,13 +58,11 @@ function removeMessageStatus(
   { recordSnapshot = true }: { recordSnapshot?: boolean } = {},
 ): void {
   if (!inst.statusMap.has(messageId)) return;
+
   const previous = inst.statusMap.get(messageId);
-  if (recordSnapshot) {
-    recordMetricsSnapshot(inst);
-  }
-  if (previous != null) {
-    decrementStatusCount(inst, previous);
-  }
+  if (recordSnapshot) recordMetricsSnapshot(inst);
+  if (previous != null) decrementStatusCount(inst, previous);
+
   inst.statusMap.delete(messageId);
   inst.statusTimestamps.delete(messageId);
   inst.ackSentAt.delete(messageId);
@@ -71,6 +71,7 @@ function removeMessageStatus(
 function pruneStaleStatuses(inst: Instance): void {
   if (!inst.statusMap.size) return;
   const now = Date.now();
+
   for (const [messageId, status] of inst.statusMap.entries()) {
     const updatedAt = inst.statusTimestamps.get(messageId) ?? 0;
     if (isFinalStatus(status) || now - updatedAt >= STATUS_TTL_MS) {
@@ -112,17 +113,28 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     hmacSecret: process.env.WEBHOOK_HMAC_SECRET || API_KEYS[0] || null,
     eventStore: brokerEventStore,
   });
+
   const messageService = new MessageService(sock, webhook, logger, {
     eventStore: brokerEventStore,
     instanceId: inst.id,
   });
+
   const pollService = new PollService(sock, webhook, logger, {
     messageService,
     eventStore: brokerEventStore,
     instanceId: inst.id,
   });
+
   inst.context = { messageService, pollService, webhook };
   inst.stopping = false;
+
+  // Optional sanity for persisted-secrets
+  if (!process.env.SECRET_MASTER_KEY && !process.env.SECRET_MASTER_KEY_HEX) {
+    logger.warn(
+      { iid: inst.id },
+      'secret.masterKey.missing — persisted poll enc keys may not decrypt across restarts',
+    );
+  }
 
   sock.ev.on('connection.update', (update: any) => {
     const { connection, lastDisconnect, qr, receivedPendingNotifications } = update;
@@ -132,11 +144,13 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       inst.lastQR = qr;
       logger.info({ iid }, 'qr.updated');
     }
+
     if (connection === 'open') {
       inst.lastQR = null;
       inst.reconnectDelay = RECONNECT_MIN_DELAY_MS;
       logger.info({ iid, receivedPendingNotifications }, 'whatsapp.connected');
     }
+
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
@@ -145,10 +159,12 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       if (!inst.stopping && !isLoggedOut) {
         const delay = Math.min(inst.reconnectDelay, RECONNECT_MAX_DELAY_MS);
         logger.warn({ iid, delay }, 'whatsapp.reconnect.scheduled');
+
         if (inst.reconnectTimer) clearTimeout(inst.reconnectTimer);
         const currentSock = sock;
+
         inst.reconnectTimer = setTimeout(() => {
-          if (inst.sock !== currentSock) return;
+          if (inst.sock !== currentSock) return; // someone else already reconnected
           inst.reconnectDelay = Math.min(inst.reconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
           startWhatsAppInstance(inst).catch((err) =>
             logger.error({ iid, err }, 'whatsapp.reconnect.failed'),
@@ -160,10 +176,12 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     }
   });
 
+  // messages.upsert: PollService → MessageService → Webhook (mesmo evento normalizado)
   sock.ev.on('messages.upsert', async (evt: BaileysEventMap['messages.upsert']) => {
     const rawMessages = evt.messages || [];
     const filteredMessages = filterClientMessages(rawMessages);
-    const normalizedEvent = { ...evt, messages: filteredMessages };
+    const normalizedEvent: BaileysEventMap['messages.upsert'] = { ...evt, messages: filteredMessages };
+
     const rawCount = rawMessages.length;
     const count = filteredMessages.length;
     const iid = inst.id;
@@ -179,15 +197,7 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
           const selectedId = templateReply?.selectedId ?? buttonsReply?.selectedButtonId ?? null;
           const selectedText =
             templateReply?.selectedDisplayText ?? buttonsReply?.selectedDisplayText ?? null;
-          logger.info(
-            {
-              iid,
-              from,
-              selectedId,
-              selectedText,
-            },
-            'button.reply',
-          );
+          logger.info({ iid, from, selectedId, selectedText }, 'button.reply');
         }
 
         const list = message.message?.listResponseMessage;
@@ -206,7 +216,8 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     }
 
     try {
-      await pollService.onMessageUpsert(evt);
+      // PollService primeiro para garantir decrypt/cache do voto antes do MessageService
+      await pollService.onMessageUpsert(normalizedEvent);
     } catch (err: any) {
       logger.warn({ iid, err: err?.message }, 'poll.service.messages.upsert.failed');
     }
@@ -217,36 +228,43 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       logger.warn({ iid, err: err?.message }, 'message.service.messages.upsert.failed');
     }
 
-    void webhook
-      .emit('WHATSAPP_MESSAGES_UPSERT', {
+    try {
+      await webhook.emit('WHATSAPP_MESSAGES_UPSERT', {
         iid,
         raw: evt,
         normalized: normalizedEvent,
         messages: filteredMessages,
-      })
-      .catch((err: any) => logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.upsert.failed'));
+      });
+    } catch (err: any) {
+      logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.upsert.failed');
+    }
   });
 
-  sock.ev.on('messages.update', (updates: any[]) => {
+  // messages.update: processa primeiro (await), depois métrica/ack, por fim webhook
+  sock.ev.on('messages.update', async (updates: BaileysEventMap['messages.update']) => {
     const iid = inst.id;
-    void webhook.emit('WHATSAPP_MESSAGES_UPDATE', { iid, raw: { updates } }).catch((err: any) =>
-      logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.update.failed'),
-    );
-    pollService
-      .onMessageUpdate(updates as any)
-      .catch((err: any) => logger.warn({ iid, err: err?.message }, 'poll.service.messages.update.failed'));
+
+    try {
+      await pollService.onMessageUpdate(updates);
+    } catch (err: any) {
+      logger.warn({ iid, err: err?.message }, 'poll.service.messages.update.failed');
+    }
+
     for (const update of updates) {
       const messageId = update.key?.id;
       const status = update.update?.status;
+
       if (messageId && status != null) {
         const previousStatus = inst.statusMap.get(messageId);
         if (previousStatus != null && previousStatus !== status) {
           decrementStatusCount(inst, previousStatus);
         }
+
         inst.statusMap.set(messageId, status);
         inst.statusTimestamps.set(messageId, Date.now());
         ensureStatusCleanupTimer(inst);
         incrementStatusCount(inst, status);
+
         inst.metrics.last.lastStatusId = messageId;
         inst.metrics.last.lastStatusCode = status;
 
@@ -286,7 +304,14 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
           removeMessageStatus(inst, messageId, { recordSnapshot: false });
         }
       }
+
       logger.info({ iid, mid: messageId, status }, 'messages.status');
+    }
+
+    try {
+      await webhook.emit('WHATSAPP_MESSAGES_UPDATE', { iid, raw: { updates } });
+    } catch (err: any) {
+      logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.update.failed');
     }
   });
 
@@ -307,7 +332,7 @@ export async function stopWhatsAppInstance(
     try {
       clearTimeout(inst.reconnectTimer);
     } catch {
-      // ignore
+      /* ignore */
     }
     inst.reconnectTimer = null;
   }
@@ -316,7 +341,7 @@ export async function stopWhatsAppInstance(
     try {
       clearInterval(inst.statusCleanupTimer);
     } catch {
-      // ignore
+      /* ignore */
     }
     inst.statusCleanupTimer = null;
   }
@@ -325,13 +350,13 @@ export async function stopWhatsAppInstance(
     try {
       await inst.sock.logout().catch(() => undefined);
     } catch {
-      // ignore
+      /* ignore */
     }
   }
 
   try {
     inst.sock?.end?.(undefined);
   } catch {
-    // ignore
+    /* ignore */
   }
 }

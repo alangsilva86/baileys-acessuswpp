@@ -6,6 +6,7 @@ import type {
 } from '@whiskeysockets/baileys';
 import type Long from 'long';
 import pino from 'pino';
+
 import { buildContactPayload, mapLeadFromMessage } from '../services/leadMapper.js';
 import type { ContactPayload } from '../services/leadMapper.js';
 import { WebhookClient } from '../services/webhook.js';
@@ -24,6 +25,10 @@ import type {
 } from '../broker/eventStore.js';
 import { toIsoDate } from './time.js';
 import { getVoteSelection, recordVoteSelection } from './pollMetadata.js';
+
+/* ========================================================================== */
+/* Tipos de envio                                                             */
+/* ========================================================================== */
 
 export interface SendTextOptions {
   timeoutMs?: number;
@@ -89,6 +94,10 @@ export interface BuiltMediaContent {
   source: 'base64' | 'url';
 }
 
+/* ========================================================================== */
+/* Tipos internos                                                             */
+/* ========================================================================== */
+
 interface InteractivePayload {
   type: string;
   [key: string]: unknown;
@@ -129,6 +138,15 @@ interface StructuredMessageEventPayload extends BrokerEventPayload {
   metadata: EventMetadata;
 }
 
+export interface MessageServiceOptions {
+  eventStore?: BrokerEventStore;
+  instanceId: string;
+}
+
+/* ========================================================================== */
+/* Helpers                                                                    */
+/* ========================================================================== */
+
 const DEFAULT_DOCUMENT_MIMETYPE = 'application/octet-stream';
 
 function createError(code: string, message?: string): Error {
@@ -149,9 +167,7 @@ function extractBase64(value: string): { buffer: Buffer; mimetype: string | null
 
   try {
     const buffer = Buffer.from(base64Data, 'base64');
-    if (!buffer.length) {
-      throw createError('media_base64_invalid', 'base64 payload is empty');
-    }
+    if (!buffer.length) throw createError('media_base64_invalid', 'base64 payload is empty');
     return { buffer, mimetype: mime };
   } catch (err) {
     throw createError('media_base64_invalid', (err as Error).message);
@@ -183,15 +199,14 @@ export function buildMediaMessageContent(
     size = buffer.length;
     detectedMime = mimetype;
   } else {
+    // valida url
     try {
       const parsed = new URL(url);
       if (!['http:', 'https:'].includes(parsed.protocol)) {
         throw createError('media_url_invalid', 'apenas URLs http(s) são aceitas');
       }
     } catch (err) {
-      if ((err as Error & { code?: string }).code === 'media_url_invalid') {
-        throw err;
-      }
+      if ((err as Error & { code?: string }).code === 'media_url_invalid') throw err;
       throw createError('media_url_invalid', (err as Error).message);
     }
     source = { url };
@@ -356,20 +371,16 @@ function buildInteractivePayloadFromMessage(message: WAMessage): InteractivePayl
 
   const interactiveResponse = content.interactiveResponseMessage?.nativeFlowResponseMessage;
   if (interactiveResponse) {
-    const interactive: InteractivePayload = {
-      type: 'interactive_response',
-    };
+    const interactive: InteractivePayload = { type: 'interactive_response' };
     const params = interactiveResponse.paramsJson;
     if (typeof params === 'string') {
       try {
         interactive.params = JSON.parse(params);
-      } catch (_err) {
+      } catch {
         interactive.params = params;
       }
     }
-    if (interactiveResponse.name) {
-      interactive.name = interactiveResponse.name;
-    }
+    if (interactiveResponse.name) interactive.name = interactiveResponse.name;
     const responseId = (interactiveResponse as { id?: string | null }).id;
     if (typeof responseId === 'string' && responseId.trim()) {
       interactive.id = responseId;
@@ -455,14 +466,15 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
       mimetype: null,
       fileName: null,
       size: null,
-      caption: getOptionalString(location, 'caption')
-        ?? getOptionalString(location, 'name')
-        ?? getOptionalString(location, 'address'),
+      caption:
+        getOptionalString(location, 'caption') ??
+        getOptionalString(location, 'name') ??
+        getOptionalString(location, 'address'),
     };
     if (location.degreesLatitude != null) media.latitude = location.degreesLatitude;
     if (location.degreesLongitude != null) media.longitude = location.degreesLongitude;
     if ('accuracyInMeters' in location && location.accuracyInMeters != null) {
-      media.accuracy = location.accuracyInMeters;
+      media.accuracy = (location as any).accuracyInMeters;
     }
     return media;
   }
@@ -470,10 +482,9 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
   return null;
 }
 
-export interface MessageServiceOptions {
-  eventStore?: BrokerEventStore;
-  instanceId: string;
-}
+/* ========================================================================== */
+/* Serviço                                                                     */
+/* ========================================================================== */
 
 export class MessageService {
   private readonly eventStore?: BrokerEventStore;
@@ -488,6 +499,8 @@ export class MessageService {
     this.eventStore = options.eventStore;
     this.instanceId = options.instanceId;
   }
+
+  /* --------------------------------- envio -------------------------------- */
 
   async sendText(jid: string, text: string, options: SendTextOptions = {}): Promise<WAMessage> {
     const message = await this.sendMessageWithTimeout(jid, { text }, options);
@@ -520,9 +533,7 @@ export class MessageService {
       type: 'buttons',
       buttons: payload.buttons.map((button) => ({ ...button })),
     };
-    if (payload.footer) {
-      interactive.footer = payload.footer;
-    }
+    if (payload.footer) interactive.footer = payload.footer;
 
     await this.emitOutboundMessage(message, { text: payload.text, interactive, type: 'buttons' });
     return message;
@@ -568,13 +579,8 @@ export class MessageService {
         })),
       })),
     };
-
-    if (payload.title) {
-      interactive.title = payload.title;
-    }
-    if (payload.footer) {
-      interactive.footer = payload.footer;
-    }
+    if (payload.title) interactive.title = payload.title;
+    if (payload.footer) interactive.footer = payload.footer;
 
     await this.emitOutboundMessage(message, { text: payload.text, interactive, type: 'list' });
     return message;
@@ -588,7 +594,6 @@ export class MessageService {
   ): Promise<WAMessage> {
     const timeoutMs = options.timeoutMs ?? getSendTimeoutMs();
     const built = buildMediaMessageContent(type, media, options);
-
     const sendPromise = this.sock.sendMessage(jid, built.content, options.messageOptions);
 
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -604,7 +609,6 @@ export class MessageService {
     if (timeoutHandle) clearTimeout(timeoutHandle);
 
     const caption = sanitizeString(options.caption);
-
     await this.emitOutboundMessage(message, {
       text: caption || null,
       type: 'media',
@@ -619,6 +623,8 @@ export class MessageService {
 
     return message;
   }
+
+  /* ------------------------------- processamento -------------------------- */
 
   async onMessagesUpsert(event: BaileysEventMap['messages.upsert']): Promise<void> {
     const inbound = filterClientMessages(event.messages);
@@ -648,14 +654,14 @@ export class MessageService {
           });
         }
 
-        await this.webhook.emit('MESSAGE_INBOUND', eventPayload, {
-          eventId: queued?.id,
-        });
+        await this.webhook.emit('MESSAGE_INBOUND', eventPayload, { eventId: queued?.id });
       } catch (err) {
         this.logger.warn({ err }, 'message.inbound.emit.failed');
       }
     }
   }
+
+  /* ------------------------------- internos -------------------------------- */
 
   private async sendMessageWithTimeout(
     jid: string,
@@ -676,7 +682,6 @@ export class MessageService {
       : sendPromise);
 
     if (timeoutHandle) clearTimeout(timeoutHandle);
-
     return message;
   }
 
@@ -690,18 +695,9 @@ export class MessageService {
       const text = extras.text;
       overrides.text = typeof text === 'string' ? text : text == null ? null : String(text);
     }
-
-    if ('interactive' in extras) {
-      overrides.interactive = extras.interactive ?? null;
-    }
-
-    if ('media' in extras) {
-      overrides.media = extras.media ?? null;
-    }
-
-    if ('type' in extras) {
-      overrides.type = extras.type ?? null;
-    }
+    if ('interactive' in extras) overrides.interactive = extras.interactive ?? null;
+    if ('media' in extras) overrides.media = extras.media ?? null;
+    if ('type' in extras) overrides.type = extras.type ?? null;
 
     const eventPayload = this.createStructuredPayload(message, 'outbound', overrides);
 
@@ -720,9 +716,7 @@ export class MessageService {
       });
     }
 
-    await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload, {
-      eventId: queued?.id,
-    });
+    await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload, { eventId: queued?.id });
   }
 
   private createStructuredPayload(
@@ -732,28 +726,35 @@ export class MessageService {
   ): StructuredMessageEventPayload {
     const lead = mapLeadFromMessage(message);
     const contact = buildContactPayload(lead);
+
     const messageId = message.key?.id ?? null;
     const chatId = message.key?.remoteJid ?? null;
+
+    // Texto extraído do conteúdo bruto
     const extractedText = extractMessageText(message);
+
+    // Texto derivado do voto (se previamente cacheado pelo PollService)
     const voteSelection = getVoteSelection(messageId);
     let voteText: string | null = null;
     if (voteSelection?.selectedOptions?.length) {
       const parts = voteSelection.selectedOptions
-        .map((option) => option.text || option.id || '')
-        .map((value) => (typeof value === 'string' ? value.trim() : ''))
-        .filter((value) => Boolean(value));
-      if (parts.length) {
-        voteText = parts.join(', ');
-      }
-    }
-    if (voteSelection) {
-      recordVoteSelection(messageId, null);
+        .map(opt => (typeof opt.text === 'string' && opt.text.trim()) || (typeof opt.id === 'string' && opt.id.trim()) || '')
+        .filter(Boolean);
+      if (parts.length) voteText = parts.join(', ');
     }
 
+    // Decide o texto final: overrides > voto > texto bruto
     const text =
       Object.prototype.hasOwnProperty.call(messageOverrides, 'text')
         ? messageOverrides.text ?? null
         : voteText ?? extractedText ?? null;
+
+    // Se usamos texto do voto em inbound, limpamos o cache para não vazar em mensagens futuras
+    const pickedTextFromVote =
+      !Object.prototype.hasOwnProperty.call(messageOverrides, 'text') && !!voteText;
+    if (pickedTextFromVote && direction === 'inbound' && messageId) {
+      recordVoteSelection(messageId, null);
+    }
 
     const interactive =
       Object.prototype.hasOwnProperty.call(messageOverrides, 'interactive')
@@ -789,20 +790,12 @@ export class MessageService {
       text,
     };
 
-    if (interactive) {
-      structuredMessage.interactive = interactive;
-    }
-
-    if (media) {
-      structuredMessage.media = media;
-    }
+    if (interactive) structuredMessage.interactive = interactive;
+    if (media) structuredMessage.media = media;
 
     const metadata: EventMetadata = {
       timestamp: toIsoDate(message.messageTimestamp),
-      broker: {
-        direction,
-        type: 'baileys',
-      },
+      broker: { direction, type: 'baileys' },
       source: 'baileys-acessus',
     };
 
