@@ -31,6 +31,7 @@ import {
   recordVoteSelection,
   rememberPollMetadataFromMessage,
 } from './pollMetadata.js';
+import { decryptSecret, fingerprintSecret } from './secretEncryption.js';
 
 export interface SendPollOptions {
   selectableCount?: number;
@@ -587,8 +588,18 @@ export class PollService {
     if (!pollId) return null;
     const metadata = await getPollMetadata(pollId);
     if (!metadata) return null;
-
-    const secretBuffer = metadata.encKeyHex ? Buffer.from(metadata.encKeyHex, 'hex') : null;
+    const decryptedEncKeyHex = decryptSecret(metadata.encKeyHex ?? null);
+    let secretBuffer: Buffer | null = null;
+    if (decryptedEncKeyHex) {
+      try {
+        const candidate = Buffer.from(decryptedEncKeyHex, 'hex');
+        if (candidate.length > 0) {
+          secretBuffer = candidate;
+        }
+      } catch {
+        secretBuffer = null;
+      }
+    }
     const selectableCount = metadata.selectableCount ?? DEFAULT_SELECTABLE_COUNT;
     const optionsArray = metadata.options.map((option) => ({ optionName: option.text }));
 
@@ -712,6 +723,7 @@ export class PollService {
     if (!pollMsgId) return null;
 
     const pollEncKey = this.extractPollEncKey(pollMessage);
+    const pollEncKeyHash = fingerprintSecret(pollEncKey);
     if (!pollEncKey) {
       this.logger.warn({ pollId: pollMsgId }, 'poll.vote.decrypt.missingKey');
       return null;
@@ -723,7 +735,11 @@ export class PollService {
     );
 
     if (!pollCreatorJid || !resolvedVoterJid) {
-      this.logger.warn({ pollId: pollMsgId }, 'poll.vote.decrypt.missingParticipants');
+      const logContext: Record<string, unknown> = { pollId: pollMsgId };
+      if (pollEncKeyHash) {
+        logContext.pollEncKeyHash = pollEncKeyHash;
+      }
+      this.logger.warn(logContext, 'poll.vote.decrypt.missingParticipants');
       return null;
     }
 
@@ -742,7 +758,11 @@ export class PollService {
         serverTimestampMs: pollUpdateMessage.metadata?.serverTimestampMs ?? undefined,
       } as proto.IPollUpdate;
     } catch (err) {
-      this.logger.warn({ err, pollId: pollMsgId }, 'poll.vote.decrypt.failed');
+      const logContext: Record<string, unknown> = { err, pollId: pollMsgId };
+      if (pollEncKeyHash) {
+        logContext.pollEncKeyHash = pollEncKeyHash;
+      }
+      this.logger.warn(logContext, 'poll.vote.decrypt.failed');
       return null;
     }
   }
@@ -787,9 +807,10 @@ export class PollService {
     const pollId = pollMessage.key?.id;
     if (pollId) {
       const metadata = getPollMetadataFromCache(pollId);
-      if (metadata?.encKeyHex) {
+      const decrypted = decryptSecret(metadata?.encKeyHex ?? null);
+      if (decrypted) {
         try {
-          const buffer = Buffer.from(metadata.encKeyHex, 'hex');
+          const buffer = Buffer.from(decrypted, 'hex');
           if (buffer.length > 0) return new Uint8Array(buffer);
         } catch {
           // ignore malformed hex
