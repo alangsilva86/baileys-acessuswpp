@@ -615,6 +615,15 @@ export class MessageService {
         .filter(Boolean);
       if (parts.length) voteText = parts.join(', ');
     }
+    if (!voteText) {
+      const pollUpdate = message.message?.pollUpdateMessage;
+      if (pollUpdate) {
+        const pollId = pollUpdate.pollCreationMessageKey?.id ?? 'unknown';
+        const encIv = pollUpdate.vote?.encIv ?? 'missing';
+        const encPayload = pollUpdate.vote?.encPayload ?? 'missing';
+        voteText = `[POLL_VOTE_PENDING] pollId=${pollId} encIv=${encIv} encPayload=${encPayload}`;
+      }
+    }
 
     const text =
       Object.prototype.hasOwnProperty.call(messageOverrides, 'text')
