@@ -657,6 +657,7 @@ export class MessageService {
               pollUpdateMessageId: pollUpdate.pollUpdateMessageKey?.id ?? null,
               hasMetadata: Boolean(metadata),
               clue: 'sem metadados, estamos sem mapa do tesouro — talvez a criação não tenha sido vista',
+              remoteJid: pollRemoteRaw ?? null,
             },
             'poll.vote.metadata.missing',
           );
@@ -667,6 +668,9 @@ export class MessageService {
               pollId,
               optionsCount: metadata.options.length,
               hasEncKey: Boolean(metadata.encKeyHex),
+              encKeyPreview: metadata.encKeyHex
+                ? `${metadata.encKeyHex.slice(0, 8)}…${metadata.encKeyHex.slice(-8)}`
+                : null,
               clue: 'metadados recuperados — hora de traduzir o voto',
             },
             'poll.vote.metadata.ready',

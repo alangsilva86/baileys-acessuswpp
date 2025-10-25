@@ -212,6 +212,11 @@ export class PollService {
           (message.message?.pollCreationMessageV2 as { options?: unknown[] } | undefined)?.options ??
           (message.message?.pollCreationMessageV3 as { options?: unknown[] } | undefined)?.options ??
           [];
+        const creatorAuthor = getKeyAuthor(message.key, this.sock.user?.id);
+        const secretFingerprint =
+          typeof secret === 'string'
+            ? fingerprintSecret(Buffer.from(secret, secret.includes('/') || secret.includes('+') ? 'base64' : 'utf-8'))
+            : fingerprintSecret(secret as Uint8Array | Buffer | null);
         this.logger.info(
           {
             pollId,
@@ -219,6 +224,8 @@ export class PollService {
             hasSecret: Boolean(secret),
             optionsCount: Array.isArray(options) ? options.length : 0,
             note: 'estivemos com a criação da enquete em mãos',
+            creatorAuthor,
+            secretFingerprint,
           },
           'poll.detected.creation',
         );
@@ -1012,6 +1019,10 @@ export class PollService {
       return null;
     }
 
+    const pollUpdateKey =
+      (pollUpdateMessage as { pollUpdateMessageKey?: proto.IMessageKey | null })
+        ?.pollUpdateMessageKey ?? null;
+
     const attempts: Array<{ creator: string; voter: string; label: string }> = [];
     const seen = new Set<string>();
     const enqueueAttempt = (creator: string | null, voter: string | null, label: string) => {
@@ -1042,6 +1053,11 @@ export class PollService {
           pollEncKeyHash,
           attempt: attempt.label,
           clue: 'tentativa de decifrar o voto — vamos ver se essa chave abre o cofre',
+          pollUpdateMessageKey: {
+            id: pollUpdateKey?.id ?? null,
+            remoteJid: pollUpdateKey?.remoteJid ?? null,
+            participant: pollUpdateKey?.participant ?? null,
+          },
         },
         'poll.vote.decrypt.attempt',
       );
@@ -1084,6 +1100,11 @@ export class PollService {
         pollId: pollMsgId,
         pollEncKeyHash,
         attempts: errors,
+        pollUpdateMessageKey: {
+          id: pollUpdateKey?.id ?? null,
+          remoteJid: pollUpdateKey?.remoteJid ?? null,
+          participant: pollUpdateKey?.participant ?? null,
+        },
         tip: 'se continuar falhando, confira se o messageSecret foi salvo ou se o voto veio de outro dispositivo',
       },
       'poll.vote.decrypt.failed',
