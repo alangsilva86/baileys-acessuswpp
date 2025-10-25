@@ -1057,15 +1057,7 @@ export class PollService {
       const trimmed = value.trim();
       if (!trimmed) return null;
 
-      // tenta base64
-      try {
-        const base64 = Buffer.from(trimmed, 'base64');
-        if (base64.length > 0) return new Uint8Array(base64);
-      } catch {
-        // ignore
-      }
-
-      // tenta hex
+      // tenta hex primeiro (evita interpretar hex válido como base64)
       if (/^[0-9a-fA-F]+$/.test(trimmed) && trimmed.length % 2 === 0) {
         try {
           const hex = Buffer.from(trimmed, 'hex');
@@ -1073,6 +1065,14 @@ export class PollService {
         } catch {
           // ignore
         }
+      }
+
+      // tenta base64
+      try {
+        const base64 = Buffer.from(trimmed, 'base64');
+        if (base64.length > 0) return new Uint8Array(base64);
+      } catch {
+        // ignore
       }
     }
     return null;
