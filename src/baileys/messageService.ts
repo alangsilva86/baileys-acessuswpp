@@ -17,6 +17,7 @@ import {
   filterClientMessages,
   getNormalizedMessageContent,
 } from './messageUtils.js';
+import { Buffer } from 'node:buffer';
 import type {
   BrokerEvent,
   BrokerEventDirection,
@@ -24,7 +25,14 @@ import type {
   BrokerEventStore,
 } from '../broker/eventStore.js';
 import { toIsoDate } from './time.js';
-import { getVoteSelection, recordVoteSelection } from './pollMetadata.js';
+import {
+  computeOptionHash,
+  getPollMetadataFromCache,
+  getVoteSelection,
+  normalizeJid,
+  recordVoteSelection,
+} from './pollMetadata.js';
+import { decryptPollVote } from '@whiskeysockets/baileys/lib/Utils/process-message.js';
 
 export interface SendTextOptions {
   timeoutMs?: number;
@@ -617,11 +625,87 @@ export class MessageService {
     }
     if (!voteText) {
       const pollUpdate = message.message?.pollUpdateMessage;
-      if (pollUpdate) {
-        const pollId = pollUpdate.pollCreationMessageKey?.id ?? 'unknown';
-        const encIv = pollUpdate.vote?.encIv ?? 'missing';
-        const encPayload = pollUpdate.vote?.encPayload ?? 'missing';
-        voteText = `[POLL_VOTE_PENDING] pollId=${pollId} encIv=${encIv} encPayload=${encPayload}`;
+      if (pollUpdate?.vote?.encPayload && pollUpdate.vote.encIv) {
+        const pollId = pollUpdate.pollCreationMessageKey?.id ?? null;
+        const pollRemoteRaw =
+          pollUpdate.pollCreationMessageKey?.remoteJid ?? message.key?.remoteJid ?? null;
+        const normalizedRemote = normalizeJid(pollRemoteRaw);
+        const metadata =
+          (pollId ? getPollMetadataFromCache(pollId, normalizedRemote) : null) ?? null;
+
+        const pollEncKeyHex = metadata?.encKeyHex ?? null;
+        const pollCreatorJid =
+          pollUpdate.pollCreationMessageKey?.participant ??
+          pollUpdate.pollCreationMessageKey?.remoteJid ??
+          message.key?.participant ??
+          message.key?.remoteJid ??
+          null;
+        const voterJid =
+          message.key?.participant ?? message.key?.remoteJid ?? pollRemoteRaw ?? null;
+
+        const convertToUint8 = (value: Uint8Array | Buffer | string): Uint8Array => {
+          if (value instanceof Uint8Array) return value;
+          if (Buffer.isBuffer(value)) return new Uint8Array(value);
+          return new Uint8Array(Buffer.from(value, 'base64'));
+        };
+
+        if (
+          pollId &&
+          pollCreatorJid &&
+          voterJid &&
+          pollEncKeyHex &&
+          pollEncKeyHex.length % 2 === 0
+        ) {
+          try {
+            const pollEncKey = new Uint8Array(Buffer.from(pollEncKeyHex, 'hex'));
+            const votePayload = {
+              ...pollUpdate.vote,
+              encPayload: convertToUint8(pollUpdate.vote.encPayload),
+              encIv: convertToUint8(pollUpdate.vote.encIv),
+            };
+            const voteMessage = decryptPollVote(votePayload, {
+              pollCreatorJid,
+              pollMsgId: pollId,
+              pollEncKey,
+              voterJid,
+            });
+            const selected = voteMessage?.selectedOptions ?? [];
+            const options = metadata?.options ?? [];
+            const decoded = selected
+              .map((entry) => {
+                const hash = Buffer.from(entry).toString('hex');
+                const match =
+                  options.find((opt) => opt.hash === hash) ??
+                  options.find((opt) => computeOptionHash(opt.text) === hash);
+                return match?.text ?? match?.id ?? `hash:${hash}`;
+              })
+              .filter((text): text is string => Boolean(text));
+            if (decoded.length) {
+              voteText = decoded.join(', ');
+              recordVoteSelection(pollUpdate.pollUpdateMessageKey?.id ?? messageId, {
+                pollId,
+                question: metadata?.question ?? '',
+                selectedOptions: decoded.map((text) => ({ id: text, text })),
+              });
+            }
+          } catch {
+            // ignore decrypt errors, fallback below
+          }
+        }
+
+        if (!voteText) {
+          const format = (value: unknown): string => {
+            if (!value) return 'missing';
+            if (typeof value === 'string') return value;
+            if (value instanceof Uint8Array) return Buffer.from(value).toString('base64');
+            if (Buffer.isBuffer(value)) return value.toString('base64');
+            return String(value);
+          };
+          const encIv = format(pollUpdate.vote.encIv);
+          const encPayload = format(pollUpdate.vote.encPayload);
+          const pollIdLabel = pollId ?? 'unknown';
+          voteText = `[POLL_VOTE_PENDING] pollId=${pollIdLabel} encIv=${encIv} encPayload=${encPayload}`;
+        }
       }
     }
 
