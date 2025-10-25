@@ -37,6 +37,12 @@ import {
   rememberPollMetadataFromMessage,
 } from './pollMetadata.js';
 import { fingerprintSecret } from './secretEncryption.js';
+import {
+  jidNormalizedUser,
+  isLidUser,
+  jidDecode,
+  jidEncode,
+} from '@whiskeysockets/baileys/lib/WABinary/jid-utils.js';
 
 export interface SendPollOptions {
   selectableCount?: number;
@@ -241,16 +247,51 @@ export class PollService {
         message.message?.pollUpdateMessage ??
         (message.message as { pollUpdateMessageV2?: proto.Message.IPollUpdateMessage | null })
           ?.pollUpdateMessageV2 ??
-        (message.message as { pollUpdateMessageV3?: proto.Message.IPollUpdateMessage | null })
-          ?.pollUpdateMessageV3 ??
-        null;
+      (message.message as { pollUpdateMessageV3?: proto.Message.IPollUpdateMessage | null })
+        ?.pollUpdateMessageV3 ??
+      null;
 
-      if (!pollUpdateMessage) continue;
+    if (!pollUpdateMessage) continue;
 
-      const creationKey = (pollUpdateMessage as PollUpdateWithCreationKey | undefined)
-        ?.pollCreationMessageKey;
+    const rawPollKey =
+      (pollUpdateMessage as { pollUpdateMessageKey?: proto.IMessageKey | null })
+        ?.pollUpdateMessageKey ?? null;
+    const keySnapshot = message.key
+      ? {
+          remoteJid: message.key.remoteJid ?? null,
+          participant: message.key.participant ?? null,
+          fromMe: message.key.fromMe ?? null,
+          id: message.key.id ?? null,
+          availableProps: Object.keys(message.key as Record<string, unknown>),
+          senderLid:
+            ((message.key as unknown as { senderLid?: string | null }).senderLid ??
+              (message as unknown as { senderLid?: string | null }).senderLid) ??
+            null,
+        }
+      : null;
 
-      let pollMessage = this.store.get(creationKey?.id) ?? this.store.get(message.key?.id);
+    this.logger.info(
+      {
+        pollId: rawPollKey?.id ?? pollUpdateMessage.pollCreationMessageKey?.id ?? null,
+        messageId: message.key?.id ?? null,
+        key: keySnapshot,
+        pollUpdateKey: rawPollKey
+          ? {
+              remoteJid: rawPollKey.remoteJid ?? null,
+              participant: rawPollKey.participant ?? null,
+              id: rawPollKey.id ?? null,
+              fromMe: rawPollKey.fromMe ?? null,
+            }
+          : null,
+        clue: 'dossiê do voto em mãos — investigando JIDs presentes',
+      },
+      'poll.vote.key.snapshot',
+    );
+
+    const creationKey = (pollUpdateMessage as PollUpdateWithCreationKey | undefined)
+      ?.pollCreationMessageKey;
+
+    let pollMessage = this.store.get(creationKey?.id) ?? this.store.get(message.key?.id);
       if (!pollMessage) {
         pollMessage = await this.rehydratePollMessage(
           creationKey?.id ?? message.key?.id ?? null,
@@ -1023,24 +1064,188 @@ export class PollService {
       (pollUpdateMessage as { pollUpdateMessageKey?: proto.IMessageKey | null })
         ?.pollUpdateMessageKey ?? null;
 
-    const attempts: Array<{ creator: string; voter: string; label: string }> = [];
-    const seen = new Set<string>();
-    const enqueueAttempt = (creator: string | null, voter: string | null, label: string) => {
-      if (!creator || !voter) return;
-      const key = `${creator}__${voter}`;
-      if (seen.has(key)) return;
-      seen.add(key);
-      attempts.push({ creator, voter, label });
+    const rawSenderLid =
+      ((message.key as unknown as { senderLid?: string | null }).senderLid ??
+        (message as unknown as { senderLid?: string | null }).senderLid ??
+        (pollUpdateMessage as unknown as { senderLid?: string | null }).senderLid ??
+        null) ?? null;
+
+    const creationKeyParticipant = creationKey?.participant ?? null;
+    const creationKeyRemote = creationKey?.remoteJid ?? null;
+    const pollMessageKeyParticipant = pollMessage.key?.participant ?? null;
+    const pollMessageKeyRemote = pollMessage.key?.remoteJid ?? null;
+    const pollUpdateParticipant = pollUpdateKey?.participant ?? null;
+    const pollUpdateRemote = pollUpdateKey?.remoteJid ?? null;
+    const selfId = this.sock.user?.id ?? null;
+
+    const collectCandidates = (
+      items: Array<{ label: string; value: string | null | undefined }>
+    ): Array<{ label: string; value: string }> => {
+      const result: Array<{ label: string; value: string }> = [];
+      const seenValues = new Set<string>();
+      for (const item of items) {
+        const value = typeof item.value === 'string' ? item.value.trim() : '';
+        if (!value) continue;
+        if (seenValues.has(value)) continue;
+        seenValues.add(value);
+        result.push({ label: item.label, value });
+      }
+      return result;
     };
 
-    enqueueAttempt(pollCreatorJid, resolvedVoterJid, 'exact');
+    const maybeLidVariants = (value: string | null | undefined): Array<{ label: string; value: string }> => {
+      if (!value) return [];
+      const trimmed = value.trim();
+      if (!trimmed) return [];
+      const candidates: Array<{ label: string; value: string }> = [{ label: 'raw', value: trimmed }];
+      if (isLidUser(trimmed)) {
+        const decoded = jidDecode(trimmed);
+        if (decoded?.user) {
+          candidates.push({
+            label: 'lid->user-s.whatsapp',
+            value: jidEncode(decoded.user, 's.whatsapp.net', decoded?.device),
+          });
+        }
+      } else if (!trimmed.endsWith('@lid')) {
+        // try mapping to lid namespace (heurística)
+        const decoded = jidDecode(trimmed);
+        if (decoded?.user) {
+          candidates.push({
+            label: 'user->lid',
+            value: jidEncode(decoded.user, 'lid', decoded?.device),
+          });
+        }
+      }
+      const seen = new Set<string>();
+      return candidates.filter((entry) => {
+        if (seen.has(entry.value)) return false;
+        seen.add(entry.value);
+        return true;
+      });
+    };
 
-    const normalizedCreator = normalizeJid(pollCreatorJid);
-    const normalizedVoter = normalizeJid(resolvedVoterJid);
+    const baseCreatorCandidates = collectCandidates([
+      { label: 'creator.exact', value: pollCreatorJid },
+      { label: 'creator.normalized', value: normalizeJid(pollCreatorJid) },
+      { label: 'creator.creationKey.participant', value: creationKeyParticipant },
+      {
+        label: 'creator.creationKey.participant.normalized',
+        value: normalizeJid(creationKeyParticipant),
+      },
+      { label: 'creator.creationKey.remote', value: creationKeyRemote },
+      { label: 'creator.pollMessage.participant', value: pollMessageKeyParticipant },
+      {
+        label: 'creator.pollMessage.participant.normalized',
+        value: normalizeJid(pollMessageKeyParticipant),
+      },
+      { label: 'creator.pollMessage.remote', value: pollMessageKeyRemote },
+      { label: 'creator.self', value: selfId },
+      { label: 'creator.self.normalized', value: normalizeJid(selfId) },
+    ]);
 
-    enqueueAttempt(normalizedCreator, normalizedVoter, 'normalized-both');
-    enqueueAttempt(normalizedCreator, resolvedVoterJid, 'normalized-creator');
-    enqueueAttempt(pollCreatorJid, normalizedVoter, 'normalized-voter');
+    const creatorCandidates: Array<{ label: string; value: string }> = [];
+    for (const candidate of baseCreatorCandidates) {
+      creatorCandidates.push(candidate);
+      for (const variant of maybeLidVariants(candidate.value)) {
+        creatorCandidates.push({
+          label: `${candidate.label}->${variant.label}`,
+          value: variant.value,
+        });
+      }
+    }
+
+    const baseVoterCandidates = collectCandidates([
+      { label: 'voter.exact', value: resolvedVoterJid },
+      { label: 'voter.normalized', value: normalizeJid(resolvedVoterJid) },
+      { label: 'voter.key.participant', value: message.key?.participant ?? null },
+      {
+        label: 'voter.key.participant.normalized',
+        value: normalizeJid(message.key?.participant ?? null),
+      },
+      { label: 'voter.key.remote', value: message.key?.remoteJid ?? null },
+      { label: 'voter.pollUpdateKey.participant', value: pollUpdateParticipant },
+      {
+        label: 'voter.pollUpdateKey.participant.normalized',
+        value: normalizeJid(pollUpdateParticipant),
+      },
+      { label: 'voter.pollUpdateKey.remote', value: pollUpdateRemote },
+      { label: 'voter.creationKey.remote', value: creationKeyRemote },
+      { label: 'voter.creationKey.participant', value: creationKeyParticipant },
+      { label: 'voter.pollMessage.participant', value: pollMessageKeyParticipant },
+      { label: 'voter.pollMessage.remote', value: pollMessageKeyRemote },
+      { label: 'voter.hint', value: voterJidHint },
+    ]);
+
+    const rawSenderLidCandidates = maybeLidVariants(rawSenderLid);
+    for (const entry of rawSenderLidCandidates) {
+      baseVoterCandidates.push({
+        label: `voter.senderLid.${entry.label}`,
+        value: entry.value,
+      });
+      baseVoterCandidates.push({
+        label: `voter.senderLid.normalized.${entry.label}`,
+        value: jidNormalizedUser(entry.value),
+      });
+    }
+
+    const voterCandidates: Array<{ label: string; value: string }> = [];
+    for (const candidate of baseVoterCandidates) {
+      voterCandidates.push(candidate);
+      for (const variant of maybeLidVariants(candidate.value)) {
+        voterCandidates.push({
+          label: `${candidate.label}->${variant.label}`,
+          value: variant.value,
+        });
+      }
+    }
+
+    const creatorMap = collectCandidates(creatorCandidates);
+    const voterMap = collectCandidates(voterCandidates);
+
+    this.logger.info(
+      {
+        pollId: pollMsgId,
+        creatorCandidates: creatorMap,
+        voterCandidates: voterMap,
+        clue: 'lista completa de identidades que vamos testar — JIDs alinhados e prontos',
+      },
+      'poll.vote.decrypt.candidate_map',
+    );
+
+    const attempts: Array<{ creator: string; voter: string; label: string }> = [];
+    const seen = new Set<string>();
+    const enqueueAttempt = (
+      creator: { label: string; value: string },
+      voter: { label: string; value: string },
+    ) => {
+      if (!creator?.value || !voter?.value) return;
+      const key = `${creator.value}__${voter.value}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      attempts.push({
+        creator: creator.value,
+        voter: voter.value,
+        label: `${creator.label}|${voter.label}`,
+      });
+    };
+
+    for (const creator of creatorMap) {
+      for (const voter of voterMap) {
+        enqueueAttempt(creator, voter);
+      }
+    }
+
+    if (!attempts.length) {
+      this.logger.warn(
+        {
+          pollId: pollMsgId,
+          pollEncKeyHash,
+          clue: 'não conseguimos gerar pares de JID para tentar decifrar — inputs insuficientes',
+        },
+        'poll.vote.decrypt.no_attempts',
+      );
+      return null;
+    }
 
     const errors: Array<{ attempt: string; error: string }> = [];
 
