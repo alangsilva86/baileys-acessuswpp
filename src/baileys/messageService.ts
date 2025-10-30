@@ -103,10 +103,18 @@ interface StructuredMessagePayload {
 
 type StructuredMessageOverrides = Partial<Omit<StructuredMessagePayload, 'id' | 'chatId'>>;
 
+interface PollChoiceMetadata {
+  pollId: string | null;
+  question: string | null;
+  selectedOptions: Array<{ id: string | null; text: string | null }>;
+  optionIds: string[];
+}
+
 interface EventMetadata {
   timestamp: string;
   broker: { direction: BrokerEventDirection; type: string; };
   source: string;
+  pollChoice: PollChoiceMetadata | null;
 }
 
 interface StructuredMessageEventPayload extends BrokerEventPayload {
@@ -610,9 +618,17 @@ export class MessageService {
 
     // Voto decifrado pelo PollService (cache)
     const voteSelection = getVoteSelection(messageId);
+    let pollChoice: PollChoiceMetadata | null = null;
+    let normalizedSelectedOptions: Array<{ id: string | null; text: string | null }> = [];
+    if (voteSelection) {
+      normalizedSelectedOptions = (voteSelection.selectedOptions ?? []).map((opt) => ({
+        id: opt?.id ?? null,
+        text: opt?.text ?? null,
+      }));
+    }
     let voteText: string | null = null;
-    if (voteSelection?.selectedOptions?.length) {
-      const parts = voteSelection.selectedOptions
+    if (normalizedSelectedOptions.length) {
+      const parts = normalizedSelectedOptions
         .map((opt) =>
           (typeof opt.text === 'string' && opt.text.trim()) ||
           (typeof opt.id === 'string' && opt.id.trim()) ||
@@ -620,6 +636,17 @@ export class MessageService {
         )
         .filter(Boolean);
       if (parts.length) voteText = parts.join(', ');
+    }
+    if (voteSelection) {
+      const optionIds = normalizedSelectedOptions
+        .map((opt) => (typeof opt.id === 'string' ? opt.id.trim() : ''))
+        .filter((id): id is string => Boolean(id));
+      pollChoice = {
+        pollId: typeof voteSelection.pollId === 'string' ? voteSelection.pollId : null,
+        question: typeof voteSelection.question === 'string' ? voteSelection.question : null,
+        selectedOptions: normalizedSelectedOptions,
+        optionIds,
+      };
     }
     if (!voteText) {
       const pollUpdate = message.message?.pollUpdateMessage;
@@ -712,6 +739,7 @@ export class MessageService {
       timestamp: toIsoDate(message.messageTimestamp),
       broker: { direction, type: 'baileys' },
       source: 'baileys-acessus',
+      pollChoice,
     };
 
     return { contact, message: structuredMessage, metadata };

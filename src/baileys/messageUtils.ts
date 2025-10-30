@@ -1,7 +1,32 @@
 import type { WAMessage } from '@whiskeysockets/baileys';
 
 export function filterClientMessages(messages: WAMessage[]): WAMessage[] {
-  return (messages || []).filter((m) => !m.key.fromMe);
+  return (messages || []).filter((m) => {
+    if (!m || typeof m !== 'object') return false;
+    if (m.key?.fromMe) return false;
+    if (typeof m.messageStubType === 'number') return false;
+
+    const content = m.message;
+    if (!content || typeof content !== 'object') return false;
+
+    if ((content as { protocolMessage?: unknown }).protocolMessage) return false;
+    if ((content as { historySyncNotification?: unknown }).historySyncNotification) return false;
+
+    const entries = Object.values(content);
+    const hasContent = entries.some((value) => {
+      if (value == null) return false;
+      if (typeof value === 'object') {
+        try {
+          return Object.keys(value as Record<string, unknown>).length > 0;
+        } catch {
+          return true;
+        }
+      }
+      return true;
+    });
+
+    return hasContent;
+  });
 }
 
 export function getNormalizedMessageContent(message: WAMessage): any {

@@ -4,6 +4,7 @@ import type pino from 'pino';
 import type { WASocket, WAMessage } from '@whiskeysockets/baileys';
 
 import { MessageService } from '../src/baileys/messageService.js';
+import { recordVoteSelection } from '../src/baileys/pollMetadata.js';
 import { BrokerEventStore } from '../src/broker/eventStore.js';
 import type { WebhookClient } from '../src/services/webhook.js';
 
@@ -162,12 +163,70 @@ test('MessageService emits structured inbound payload', async () => {
       type: 'baileys',
     },
     source: 'baileys-acessus',
+    pollChoice: null,
   });
 
   const [event] = eventStore.list();
   assert.equal(event?.type, 'MESSAGE_INBOUND');
   assert.equal(event?.direction, 'inbound');
   assert.deepStrictEqual(event?.payload, payload);
+});
+
+test('MessageService inclui pollChoice nos metadados quando voto decifrado está disponível', async () => {
+  const eventStore = new BrokerEventStore();
+  const webhookEvents: Array<{ event: string; payload: any }> = [];
+
+  const webhook = {
+    async emit(event: string, payload: unknown) {
+      webhookEvents.push({ event, payload });
+    },
+  } as unknown as WebhookClient;
+
+  const service = new MessageService(
+    {} as unknown as WASocket,
+    webhook,
+    { warn: () => {} } as unknown as pino.Logger,
+    { eventStore, instanceId: 'test-instance' },
+  );
+
+  const messageId = 'POLL-VOTE-1';
+  recordVoteSelection(messageId, {
+    pollId: 'poll-123',
+    question: 'Qual seu lanche favorito?',
+    selectedOptions: [
+      { id: 'option-1', text: 'Coxinha' },
+      { id: null, text: 'Pastel' },
+    ],
+  });
+
+  const pollVoteMessage = createMessage(messageId, {
+    message: {
+      pollUpdateMessage: {
+        pollCreationMessageKey: { id: 'poll-123', remoteJid: '5511987654321@s.whatsapp.net' },
+        pollUpdateMessageKey: { id: 'POLL-UPD-1' },
+        vote: { encPayload: new Uint8Array([1, 2, 3]), encIv: new Uint8Array([4, 5, 6]) },
+      },
+    } as any,
+  });
+
+  await service.onInbound([pollVoteMessage]);
+
+  assert.equal(webhookEvents.length, 1);
+  assert.equal(webhookEvents[0].event, 'MESSAGE_INBOUND');
+
+  const payload = webhookEvents[0].payload;
+  assert.equal(payload.message.text, 'Coxinha, Pastel');
+  assert.deepStrictEqual(payload.metadata.pollChoice, {
+    pollId: 'poll-123',
+    question: 'Qual seu lanche favorito?',
+    selectedOptions: [
+      { id: 'option-1', text: 'Coxinha' },
+      { id: null, text: 'Pastel' },
+    ],
+    optionIds: ['option-1'],
+  });
+
+  recordVoteSelection(messageId, null);
 });
 
 test('MessageService maps participant phone for group messages when valid', async () => {
@@ -333,6 +392,7 @@ test('MessageService emits structured outbound payload for text messages', async
       type: 'baileys',
     },
     source: 'baileys-acessus',
+    pollChoice: null,
   });
 
   const stored = eventStore.list({ limit: 5 });
@@ -428,6 +488,7 @@ test('MessageService inclui metadados de mídia ao enviar para o LeadEngine', as
       type: 'baileys',
     },
     source: 'baileys-acessus',
+    pollChoice: null,
   });
 
   const stored = eventStore.list({ limit: 5 });
