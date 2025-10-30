@@ -78,7 +78,9 @@ app.use('/instances', instanceRoutes);
 app.get('/health', (_req, res) => {
   const instances = getAllInstances().map((inst) => ({
     id: inst.id,
-    connected: Boolean(inst.sock?.user),
+    connected: inst.connectionState === 'open',
+    connectionState: inst.connectionState,
+    connectionUpdatedAt: inst.connectionUpdatedAt ? new Date(inst.connectionUpdatedAt).toISOString() : null,
   }));
   const queue = brokerEventStore.metrics();
   res.json({ status: 'ok', uptime: process.uptime(), instances, queue });

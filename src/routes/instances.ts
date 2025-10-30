@@ -64,6 +64,26 @@ function auth(req: Request, res: Response, next: NextFunction): void {
 
 router.use(auth);
 
+function connectionUpdatedAtIso(inst: Instance | undefined): string | null {
+  if (!inst?.connectionUpdatedAt) return null;
+  const date = new Date(inst.connectionUpdatedAt);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function ensureInstanceOnline(inst: Instance | undefined, res: Response): inst is Instance & { sock: WASocket } {
+  if (!inst) {
+    res.status(404).json({ error: 'instance_not_found' });
+    return false;
+  }
+  if (!inst.sock || inst.connectionState !== 'open') {
+    res
+      .status(503)
+      .json({ error: 'instance_offline', state: inst.connectionState, updatedAt: connectionUpdatedAtIso(inst) });
+    return false;
+  }
+  return true;
+}
+
 function getErrorMessage(err: unknown): string {
   if (err && typeof err === 'object') {
     const anyErr = err as Record<string, unknown>;
@@ -377,10 +397,7 @@ router.post(
   '/:iid/pair',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
     const phoneNumberRaw = (req.body as any)?.phoneNumber;
     if (!phoneNumberRaw) {
       res.status(400).json({ error: 'phoneNumber obrigatório (ex: 5544...)' });
@@ -395,10 +412,7 @@ router.post(
   '/:iid/logout',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
     try {
       await inst.sock.logout();
       res.json({ ok: true, message: 'Sessão desconectada. Um novo QR aparecerá em breve.' });
@@ -485,10 +499,7 @@ router.get(
   '/:iid/groups',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
     const all = await inst.sock.groupFetchAllParticipating();
     const list = Object.values(all).map((group) => ({ id: group.id, subject: group.subject }));
     res.json(list);
@@ -499,10 +510,7 @@ router.post(
   '/:iid/groups',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
 
     const subjectRaw = (req.body as any)?.subject;
     const subject = typeof subjectRaw === 'string' ? subjectRaw.trim() : '';
@@ -558,10 +566,7 @@ router.post(
   '/:iid/groups/:gid/members',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
 
     const groupJid = ensureGroupJid(req.params.gid);
     if (!groupJid) {
@@ -621,10 +626,7 @@ router.delete(
   '/:iid/groups/:gid/members',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
 
     const groupJid = ensureGroupJid(req.params.gid);
     if (!groupJid) {
@@ -795,10 +797,7 @@ router.post(
   '/:iid/exists',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
     const normalized = normalizeToE164BR((req.body as any)?.to);
     if (!normalized) {
       res.status(400).json({ error: 'to inválido. Use E.164: 55DDDNUMERO' });
@@ -813,10 +812,7 @@ router.post(
   '/:iid/send-text',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
     if (!allowSend(inst)) {
       res.status(429).json({ error: 'rate limit exceeded' });
       return;
@@ -888,10 +884,7 @@ router.post(
   '/:iid/send-buttons',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
     if (!allowSend(inst)) {
       res.status(429).json({ error: 'rate limit exceeded' });
       return;
@@ -1002,10 +995,7 @@ router.post(
   '/:iid/send-list',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
     if (!allowSend(inst)) {
       res.status(429).json({ error: 'rate limit exceeded' });
       return;
@@ -1188,10 +1178,7 @@ router.post(
   '/:iid/send-media',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
     if (!allowSend(inst)) {
       res.status(429).json({ error: 'rate limit exceeded' });
       return;
@@ -1311,10 +1298,7 @@ router.post(
   '/:iid/send-poll',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!inst || !inst.sock) {
-      res.status(503).json({ error: 'socket indisponível' });
-      return;
-    }
+    if (!ensureInstanceOnline(inst, res)) return;
     if (!allowSend(inst)) {
       res.status(429).json({ error: 'rate limit exceeded' });
       return;
@@ -1388,11 +1372,13 @@ router.post(
 );
 
 function serializeInstance(inst: Instance) {
-  const connected = Boolean(inst.sock && inst.sock.user);
+  const connected = inst.connectionState === 'open';
   return {
     id: inst.id,
     name: inst.name,
     connected,
+    connectionState: inst.connectionState,
+    connectionUpdatedAt: connectionUpdatedAtIso(inst),
     user: connected ? inst.sock?.user ?? null : null,
     note: inst.metadata?.note || '',
     metadata: {

@@ -66,6 +66,7 @@ export interface Instance {
   name: string;
   dir: string;
   sock: WASocket | null;
+  socketId: number;
   lastQR: string | null;
   reconnectDelay: number;
   stopping: boolean;
@@ -79,6 +80,8 @@ export interface Instance {
   rateWindow: number[];
   ackSentAt: Map<string, number>;
   context: InstanceContext | null;
+  connectionState: 'connecting' | 'open' | 'close';
+  connectionUpdatedAt: number | null;
 }
 
 const instances = new Map<string, Instance>();
@@ -115,6 +118,7 @@ function createInstanceRecord(
     name,
     dir,
     sock: null,
+    socketId: 0,
     lastQR: null,
     reconnectDelay: 1000,
     stopping: false,
@@ -128,6 +132,8 @@ function createInstanceRecord(
     rateWindow: [],
     ackSentAt: new Map(),
     context: null,
+    connectionState: 'close',
+    connectionUpdatedAt: Date.now(),
   };
 }
 

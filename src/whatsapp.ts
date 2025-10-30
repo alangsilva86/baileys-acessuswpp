@@ -73,10 +73,28 @@ export interface InstanceContext {
   webhook: WebhookClient;
 }
 
+function updateConnectionState(inst: Instance, state: Instance['connectionState']): void {
+  inst.connectionState = state;
+  inst.connectionUpdatedAt = Date.now();
+}
+
 export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   const { state, saveCreds } = await useMultiFileAuthState(inst.dir);
   const { version } = await fetchLatestBaileysVersion();
   logger.info({ iid: inst.id, version }, 'baileys.version');
+
+  if (inst.reconnectTimer) {
+    try {
+      clearTimeout(inst.reconnectTimer);
+    } catch {
+      // ignore
+    }
+    inst.reconnectTimer = null;
+  }
+
+  inst.socketId += 1;
+  const currentSocketId = inst.socketId;
+  updateConnectionState(inst, 'connecting');
 
   const sock = makeWASocket({ version, auth: state, logger });
   inst.sock = sock;
@@ -110,10 +128,19 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     const { connection, lastDisconnect, qr, receivedPendingNotifications } = update;
     const iid = inst.id;
 
+    if (inst.socketId !== currentSocketId) return;
+
     if (qr) { inst.lastQR = qr; logger.info({ iid }, 'qr.updated'); }
-    if (connection === 'open') { inst.lastQR = null; inst.reconnectDelay = RECONNECT_MIN_DELAY_MS; logger.info({ iid, receivedPendingNotifications }, 'whatsapp.connected'); }
+    if (connection === 'connecting') { updateConnectionState(inst, 'connecting'); }
+    if (connection === 'open') {
+      updateConnectionState(inst, 'open');
+      inst.lastQR = null;
+      inst.reconnectDelay = RECONNECT_MIN_DELAY_MS;
+      logger.info({ iid, receivedPendingNotifications }, 'whatsapp.connected');
+    }
 
     if (connection === 'close') {
+      updateConnectionState(inst, 'close');
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
       logger.warn({ iid, statusCode }, 'whatsapp.disconnected');
@@ -123,16 +150,19 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
         logger.warn({ iid, delay }, 'whatsapp.reconnect.scheduled');
 
         if (inst.reconnectTimer) clearTimeout(inst.reconnectTimer);
-        const currentSock = sock;
 
         inst.reconnectTimer = setTimeout(() => {
-          if (inst.sock !== currentSock) return;
+          if (inst.socketId !== currentSocketId) return;
+          inst.reconnectTimer = null;
           inst.reconnectDelay = Math.min(inst.reconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
           startWhatsAppInstance(inst).catch((err) => logger.error({ iid, err }, 'whatsapp.reconnect.failed'));
         }, delay);
       } else if (isLoggedOut) {
         logger.error({ iid }, 'session.loggedOut');
       }
+
+      inst.sock = null;
+      inst.context = null;
     }
   });
 
@@ -235,11 +265,35 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
 export async function stopWhatsAppInstance(inst: Instance | undefined, { logout = false }: { logout?: boolean } = {}): Promise<void> {
   if (!inst) return;
   inst.stopping = true;
+  inst.socketId += 1;
   inst.context = null;
+  updateConnectionState(inst, 'close');
+  inst.reconnectDelay = RECONNECT_MIN_DELAY_MS;
 
-  if (inst.reconnectTimer) { try { clearTimeout(inst.reconnectTimer); } catch {} inst.reconnectTimer = null; }
-  if (inst.statusCleanupTimer) { try { clearInterval(inst.statusCleanupTimer); } catch {} inst.statusCleanupTimer = null; }
+  if (inst.reconnectTimer) {
+    try {
+      clearTimeout(inst.reconnectTimer);
+    } catch {}
+    inst.reconnectTimer = null;
+  }
+  if (inst.statusCleanupTimer) {
+    try {
+      clearInterval(inst.statusCleanupTimer);
+    } catch {}
+    inst.statusCleanupTimer = null;
+  }
 
-  if (logout && inst.sock) { try { await inst.sock.logout().catch(() => undefined); } catch {} }
-  try { inst.sock?.end?.(undefined); } catch {}
+  inst.lastQR = null;
+
+  const sock = inst.sock;
+  inst.sock = null;
+
+  if (logout && sock) {
+    try {
+      await sock.logout().catch(() => undefined);
+    } catch {}
+  }
+  try {
+    sock?.end?.(undefined);
+  } catch {}
 }
