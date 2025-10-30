@@ -140,6 +140,7 @@ let lastLogsSignature = '';
 const BADGE_STYLES = {
   'status-connected': 'bg-emerald-100 text-emerald-800',
   'status-disconnected': 'bg-rose-100 text-rose-800',
+  'status-connecting': 'bg-amber-100 text-amber-800',
   logout: 'bg-amber-100 text-amber-800',
   wipe: 'bg-rose-200 text-rose-900',
   delete: 'bg-rose-600 text-white',
@@ -148,6 +149,43 @@ const BADGE_STYLES = {
   info: 'bg-slate-200 text-slate-800'
 };
 let badgeLockUntil = 0;
+
+const CONNECTION_STATE_META = {
+  open: {
+    label: 'Conectado',
+    badgeType: 'status-connected',
+    badgeClass: 'bg-emerald-100 text-emerald-700',
+    optionSuffix: ' • on-line',
+    cardLabel: (ts) => (ts ? `Conectado • ${ts}` : 'Conectado'),
+    badgeText: (name, ts) => (ts ? `Conectado (${name}) • ${ts}` : `Conectado (${name})`),
+    qrState: 'connected',
+    qrMessage: (ts) => (ts ? `Instância conectada. Atualizado em ${ts}.` : 'Instância conectada.'),
+    shouldLoadQr: false,
+  },
+  connecting: {
+    label: 'Reconectando…',
+    badgeType: 'status-connecting',
+    badgeClass: 'bg-amber-100 text-amber-700',
+    optionSuffix: ' • reconectando',
+    cardLabel: (ts) => (ts ? `Reconectando… • ${ts}` : 'Reconectando…'),
+    badgeText: (name, ts) => (ts ? `Reconectando (${name}) • ${ts}` : `Reconectando (${name})`),
+    qrState: 'loading',
+    qrMessage: (ts) => (ts ? `Reconectando… Atualizado em ${ts}.` : 'Reconectando…'),
+    shouldLoadQr: false,
+  },
+  close: {
+    label: 'Desconectado',
+    badgeType: 'status-disconnected',
+    badgeClass: 'bg-rose-100 text-rose-700',
+    optionSuffix: ' • off-line',
+    cardLabel: (ts) => (ts ? `Desconectado • ${ts}` : 'Desconectado'),
+    badgeText: (name, ts) => (ts ? `Desconectado (${name}) • ${ts}` : `Desconectado (${name})`),
+    qrState: 'disconnected',
+    qrMessage: (ts) =>
+      ts ? `Instância desconectada. Atualizado em ${ts}.` : 'Instância desconectada. Aponte o WhatsApp para o QR code.',
+    shouldLoadQr: true,
+  },
+};
 
 function applyBadge(type, msg) {
   const cls = BADGE_STYLES[type] || BADGE_STYLES.info;
@@ -159,9 +197,14 @@ function setBadgeState(type, msg, holdMs = 4000) {
   badgeLockUntil = holdMs ? Date.now() + holdMs : 0;
 }
 function canUpdateBadge() { return Date.now() >= badgeLockUntil; }
-function setStatusBadge(connected, name) {
+function setStatusBadge(connection, name) {
   if (!canUpdateBadge()) return;
-  applyBadge(connected ? 'status-connected' : 'status-disconnected', connected ? 'Conectado (' + name + ')' : 'Desconectado (' + name + ')');
+  const info = connection || {};
+  const meta = info.meta || CONNECTION_STATE_META.close;
+  const text = typeof meta.badgeText === 'function'
+    ? meta.badgeText(name, info.updatedText)
+    : `${meta.label} (${name})${info.updatedText ? ' • ' + info.updatedText : ''}`;
+  applyBadge(meta.badgeType || 'info', text);
 }
 
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
@@ -258,6 +301,25 @@ function getStatusCounts(src) {
 
 const dateTimeFmt = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
 const timeLabelFmt = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+function parseConnectionTimestamp(value) {
+  if (!value && value !== 0) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatConnectionTimestamp(value) {
+  const date = parseConnectionTimestamp(value);
+  return date ? dateTimeFmt.format(date) : null;
+}
+
+function describeConnection(source = {}) {
+  const rawState = typeof source.connectionState === 'string' ? source.connectionState : undefined;
+  const state = CONNECTION_STATE_META[rawState] ? rawState : source.connected ? 'open' : 'close';
+  const meta = CONNECTION_STATE_META[state] || CONNECTION_STATE_META.close;
+  const updatedText = formatConnectionTimestamp(source.connectionUpdatedAt);
+  return { state, meta, updatedText };
+}
 const relativeTimeFmt = new Intl.RelativeTimeFormat('pt-BR', { numeric: 'auto' });
 
 function formatDateTime(iso) {
@@ -767,7 +829,9 @@ async function refreshInstances(options = {}) {
 
       let keepPrev = false;
       data.forEach(inst => {
-        const label = `${inst.name}${inst.connected ? ' • on-line' : ' • off-line'}`;
+        const connection = describeConnection(inst);
+        const suffix = connection.meta?.optionSuffix || '';
+        const label = `${inst.name}${suffix}`;
         const opt = option(inst.id, label);
         if (inst.id === prev) { opt.selected = true; keepPrev = true; }
         els.selInstance.appendChild(opt);
@@ -777,11 +841,14 @@ async function refreshInstances(options = {}) {
       els.cards.innerHTML = '';
       const selected = els.selInstance.value;
       data.forEach(i => {
+        const connection = describeConnection(i);
         const card = document.createElement('article');
         card.className = 'p-4 bg-white rounded-2xl shadow transition ring-emerald-200/50 space-y-3';
         if (i.id === selected) card.classList.add('ring-2', 'ring-emerald-200');
-        const connected = !!i.connected;
-        const badgeClass = connected ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700';
+        const badgeClass = connection.meta?.badgeClass || 'bg-slate-100 text-slate-700';
+        const statusLabel = typeof connection.meta?.cardLabel === 'function'
+          ? connection.meta.cardLabel(connection.updatedText)
+          : connection.meta?.label || 'Desconhecido';
         const sent = i.counters?.sent || 0;
         const statusCounts = getStatusCounts(i.counters?.statusCounts || i.counters?.status || {});
         const statusCardsHtml = STATUS_CODES.map(code => {
@@ -806,7 +873,7 @@ async function refreshInstances(options = {}) {
             <input data-field="name" data-iid="${i.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" value="${escapeHtml(i.name)}" />
           </div>
           <span class="px-2 py-0.5 rounded text-xs ${badgeClass}">
-            ${connected ? 'Conectado' : 'Desconectado'}
+            ${escapeHtml(statusLabel)}
           </span>
         </div>
 
@@ -937,8 +1004,8 @@ async function refreshSelected(options = {}) {
 
   try {
     const data = await fetchJSON('/instances/' + iid, true);
-    const connected = !!data.connected;
-    setStatusBadge(connected, data.name);
+    const connection = describeConnection(data);
+    setStatusBadge(connection, data.name);
 
     if (els.noteCard) {
       els.noteCard.classList.remove('hidden');
@@ -952,15 +1019,21 @@ async function refreshSelected(options = {}) {
       setNoteStatus('synced');
     }
 
-    if (connected) {
-      toggleHidden(els.qrImg, true);
-      setQrState('connected', 'Instância conectada.');
-    } else {
+    if (connection.meta?.shouldLoadQr) {
       setQrState('loading', 'Sincronizando QR…');
       const qrOk = await loadQRCode(iid);
       if (qrOk) {
-        setQrState('disconnected', 'Aponte o WhatsApp para o QR code.');
+        const qrMessage = connection.meta?.qrMessage
+          ? connection.meta.qrMessage(connection.updatedText)
+          : 'Instância desconectada.';
+        setQrState(connection.meta.qrState, qrMessage);
       }
+    } else {
+      toggleHidden(els.qrImg, true);
+      const qrMessage = connection.meta?.qrMessage
+        ? connection.meta.qrMessage(connection.updatedText)
+        : 'Instância conectada.';
+      setQrState(connection.meta?.qrState || 'loading', qrMessage);
     }
 
     const metrics = await fetchJSON('/instances/' + iid + '/metrics', true);
