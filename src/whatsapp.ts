@@ -7,7 +7,7 @@ import {
 } from '@whiskeysockets/baileys';
 import type { BaileysEventMap } from '@whiskeysockets/baileys';
 import { recordMetricsSnapshot } from './utils.js';
-import type { Instance } from './instanceManager.js';
+import { type Instance, resetInstanceSession } from './instanceManager.js';
 import { MessageService } from './baileys/messageService.js';
 import { PollService } from './baileys/pollService.js';
 import { WebhookClient } from './services/webhook.js';
@@ -101,6 +101,7 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   inst.socketId += 1;
   const currentSocketId = inst.socketId;
   updateConnectionState(inst, 'connecting');
+  let resetScheduledForSocket = false;
 
   const sock = makeWASocket({ version, auth: state, logger });
   inst.sock = sock;
@@ -193,7 +194,18 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
           startWhatsAppInstance(inst).catch((err) => logger.error({ iid, err }, 'whatsapp.reconnect.failed'));
         }, delay);
       } else if (isLoggedOut) {
-        logger.error({ iid }, 'session.loggedOut');
+        if (inst.stopping) {
+          logger.info({ iid }, 'session.resetSkipped.stopping');
+        } else if (!resetScheduledForSocket) {
+          resetScheduledForSocket = true;
+          logger.error({ iid }, 'session.loggedOut');
+          inst.lastQR = null;
+          updateConnectionState(inst, 'connecting');
+          logger.warn({ iid }, 'session.resetScheduled');
+          void resetInstanceSession(inst);
+        } else {
+          logger.debug({ iid }, 'session.resetScheduled.duplicate');
+        }
       }
 
       inst.sock = null;
