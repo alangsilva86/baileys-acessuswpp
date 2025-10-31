@@ -253,8 +253,9 @@ function bindDocumentShortcuts() {
       return;
     }
 
+    let key;
     try {
-      requireKey();
+      key = requireKey();
     } catch {
       return;
     }
