@@ -468,7 +468,7 @@ export function getStatusCounts(src) {
     totals[series.key] = 0;
   });
 
-  const handled = new Set<string>();
+  const handled = new Set();
   STATUS_SERIES.forEach((series) => {
     series.codes.forEach((code) => {
       const key = String(code);
