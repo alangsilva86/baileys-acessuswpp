@@ -43,6 +43,8 @@ import {
   jidDecode,
   jidEncode,
 } from '@whiskeysockets/baileys/lib/WABinary/jid-utils.js';
+import type { LidMappingStore } from '../lidMappingStore.js';
+import { resolveJid } from '../lidMappingStore.js';
 
 export interface SendPollOptions {
   selectableCount?: number;
@@ -57,6 +59,7 @@ export interface PollServiceOptions {
   instanceId?: string;
   aggregateVotesFn?: typeof getAggregateVotesInPollMessage;
   decryptPollVoteFn?: typeof defaultDecryptPollVote;
+  mappingStore?: LidMappingStore | null;
 }
 
 interface PollChoiceEventPayload {
@@ -143,6 +146,7 @@ export class PollService {
   private readonly messageService?: MessageService;
   private readonly eventStore?: BrokerEventStore;
   private readonly instanceId: string;
+  private readonly mappingStore: LidMappingStore | null;
   private readonly aggregateVotes: typeof getAggregateVotesInPollMessage;
   private readonly decryptPollVote: typeof defaultDecryptPollVote;
   private readonly receiptHints = new Map<string, Set<string>>();
@@ -158,6 +162,7 @@ export class PollService {
     this.messageService = options.messageService;
     this.eventStore = options.eventStore;
     this.instanceId = options.instanceId ?? 'default';
+    this.mappingStore = options.mappingStore ?? null;
     this.aggregateVotes = options.aggregateVotesFn ?? getAggregateVotesInPollMessage;
     this.decryptPollVote = options.decryptPollVoteFn ?? defaultDecryptPollVote;
 
@@ -427,11 +432,25 @@ export class PollService {
     voterKey: proto.IMessageKey | null | undefined,
     fallbackKey?: WAMessage['key'],
   ): string | null {
+    const meId = this.sock.user?.id;
     if (voterKey) {
-      const author = getKeyAuthor(voterKey, this.sock.user?.id);
-      if (author) return author; // mantém :device se houver
+      const author = getKeyAuthor(voterKey, meId);
+      const authorAlt =
+        (voterKey as unknown as { participantAlt?: string | null })?.participantAlt ??
+        (voterKey as unknown as { remoteJidAlt?: string | null })?.remoteJidAlt ??
+        null;
+      const resolvedAuthor = resolveJid(author, authorAlt, this.mappingStore);
+      if (resolvedAuthor) return resolvedAuthor;
     }
-    return fallbackKey?.participant ?? fallbackKey?.remoteJid ?? null;
+
+    const fallbackParticipant = fallbackKey?.participant ?? null;
+    const fallbackParticipantAlt = (fallbackKey as unknown as { participantAlt?: string | null })?.participantAlt ?? null;
+    const resolvedParticipant = resolveJid(fallbackParticipant, fallbackParticipantAlt, this.mappingStore);
+    if (resolvedParticipant) return resolvedParticipant;
+
+    const fallbackRemote = fallbackKey?.remoteJid ?? null;
+    const fallbackRemoteAlt = (fallbackKey as unknown as { remoteJidAlt?: string | null })?.remoteJidAlt ?? null;
+    return resolveJid(fallbackRemote, fallbackRemoteAlt, this.mappingStore);
   }
 
   private async processPollVote(
@@ -443,7 +462,19 @@ export class PollService {
     const pollId = pollMessage.key?.id;
     if (!pollId) return;
 
-    const pollRemoteJid = pollMessage.key?.remoteJid ?? null;
+    const pollRemoteAlt = (pollMessage.key as unknown as { remoteJidAlt?: string | null })?.remoteJidAlt ?? null;
+    if (this.mappingStore && pollMessage.key?.remoteJid && pollRemoteAlt) {
+      if (isLidUser(pollMessage.key.remoteJid)) {
+        this.mappingStore.rememberMapping(pollRemoteAlt, pollMessage.key.remoteJid);
+      } else if (isLidUser(pollRemoteAlt)) {
+        this.mappingStore.rememberMapping(pollMessage.key.remoteJid, pollRemoteAlt);
+      }
+    }
+    const pollRemoteJid =
+      this.mappingStore?.resolveRemoteJid(pollMessage.key?.remoteJid ?? null, pollRemoteAlt) ??
+      pollMessage.key?.remoteJid ??
+      pollRemoteAlt ??
+      null;
 
     const appliedUpdates = this.applyPollUpdatesToMessage(pollMessage, pollUpdates);
     if (!appliedUpdates.length) return;
@@ -469,6 +500,7 @@ export class PollService {
         voterInfo.voterJid,
         meId,
       ),
+      { mappingStore: this.mappingStore },
     );
     const contact = buildContactPayload(lead);
 
