@@ -400,6 +400,7 @@ Envie até **3 botões de resposta rápida** para um contato usando `templateBut
 - `text` é obrigatório e será exibido como corpo da mensagem.
 - `options` é obrigatório, aceita de 1 a 3 itens com campos `id` (único) e `title`.
 - `footer` é opcional e aparece abaixo dos botões.
+- A resposta da API é enviada imediatamente após o Baileys confirmar o envio da mensagem.
 
 Resposta típica:
 
@@ -446,6 +447,7 @@ Monte menus com seções usando mensagens do tipo `list` do Baileys. Exemplo de 
 - Cada seção pode ter um `title` opcional e precisa de pelo menos uma opção.
 - Cada opção exige `id` (único dentro da mensagem) e `title`; `description` é opcional e aparece como legenda.
 - `text`, `footer` e `title` são exibidos como corpo, rodapé e cabeçalho da mensagem, respectivamente.
+- A confirmação do endpoint ocorre assim que o envio é aceito pelo WhatsApp.
 
 Resposta:
 

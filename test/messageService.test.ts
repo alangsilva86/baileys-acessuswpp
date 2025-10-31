@@ -440,6 +440,11 @@ test('MessageService emits structured outbound payload for text messages', async
   assert.deepStrictEqual(stored[0]?.payload, payload);
 });
 
+test('MessageService.sendText rejects when Baileys sendMessage times out', async () => {
+  const webhook = new FakeWebhook();
+  const sock = {
+    async sendMessage() {
+      return new Promise<any>(() => {});
 test('MessageService resolves outbound payload identities using cached PN/LID mapping', async () => {
   const eventStore = new BrokerEventStore();
   const webhook = new FakeWebhook();
@@ -469,6 +474,11 @@ test('MessageService resolves outbound payload identities using cached PN/LID ma
     sock,
     webhook as unknown as WebhookClient,
     { warn: () => {} } as unknown as pino.Logger,
+    { eventStore: new BrokerEventStore(), instanceId: 'timeout-instance' },
+  );
+
+  await assert.rejects(service.sendText('551199999999@s.whatsapp.net', 'Oi', { timeoutMs: 10 }), /send timeout/);
+  assert.equal(webhook.events.length, 0, 'no webhook event should be emitted when send fails');
     { eventStore, instanceId: 'test-instance', mappingStore },
   );
 

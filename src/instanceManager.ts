@@ -8,13 +8,6 @@ import { LidMappingStore } from './lidMappingStore.js';
 const SESSIONS_ROOT = process.env.SESSION_DIR || './sessions';
 const INSTANCES_INDEX = path.join(SESSIONS_ROOT, 'instances.json');
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
-type AckStatusCode = number;
-
-interface AckWaiter {
-  resolve: (value: AckStatusCode | null) => void;
-  timer: NodeJS.Timeout;
-}
-
 export interface MetricsTimelineEntry {
   ts: number;
   iso: string;
@@ -51,13 +44,7 @@ export interface InstanceMetrics {
   last: {
     sentId: string | null;
     lastStatusId: string | null;
-    lastStatusCode: AckStatusCode | null;
-  };
-  ack: {
-    totalMs: number;
-    count: number;
-    avgMs: number;
-    lastMs: number | null;
+    lastStatusCode: number | null;
   };
   timeline: MetricsTimelineEntry[];
 }
@@ -75,12 +62,10 @@ export interface Instance {
   reconnectTimer: NodeJS.Timeout | null;
   metadata: InstanceMetadata;
   metrics: InstanceMetrics;
-  statusMap: Map<string, AckStatusCode>;
+  statusMap: Map<string, number>;
   statusTimestamps: Map<string, number>;
   statusCleanupTimer: NodeJS.Timeout | null;
-  ackWaiters: Map<string, AckWaiter>;
   rateWindow: number[];
-  ackSentAt: Map<string, number>;
   context: InstanceContext | null;
   connectionState: 'connecting' | 'open' | 'close' | 'qr_timeout';
   connectionUpdatedAt: number | null;
@@ -97,7 +82,6 @@ function createEmptyMetrics(): InstanceMetrics {
     sent_by_type: { text: 0, image: 0, video: 0, audio: 0, document: 0, group: 0, buttons: 0, lists: 0 },
     status_counts: { '1': 0, '2': 0, '3': 0, '4': 0, '5': 0 },
     last: { sentId: null, lastStatusId: null, lastStatusCode: null },
-    ack: { totalMs: 0, count: 0, avgMs: 0, lastMs: null },
     timeline: [],
   };
 }
@@ -133,9 +117,7 @@ function createInstanceRecord(
     statusMap: new Map(),
     statusTimestamps: new Map(),
     statusCleanupTimer: null,
-    ackWaiters: new Map(),
     rateWindow: [],
-    ackSentAt: new Map(),
     context: null,
     connectionState: 'close',
     connectionUpdatedAt: Date.now(),

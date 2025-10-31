@@ -13,13 +13,7 @@ import {
   type Instance,
 } from '../instanceManager.js';
 import { brokerEventStore } from '../broker/eventStore.js';
-import {
-  allowSend,
-  sendWithTimeout,
-  waitForAck,
-  normalizeToE164BR,
-  getSendTimeoutMs,
-} from '../utils.js';
+import { allowSend, sendWithTimeout, normalizeToE164BR, getSendTimeoutMs } from '../utils.js';
 import {
   buildMediaMessageContent,
   type BuiltMediaContent,
@@ -747,6 +741,14 @@ router.get('/:iid/metrics', (req, res) => {
 
   const summary = serializeInstance(inst);
   const { metricsStartedAt, ...rest } = summary;
+  const statusCounts = summary.counters?.statusCounts || {};
+  const deliverySummary = {
+    pending: Number(statusCounts['1']) || 0,
+    serverAck: Number(statusCounts['2']) || 0,
+    delivered: Number(statusCounts['3']) || 0,
+  };
+  const inFlight = deliverySummary.pending + deliverySummary.serverAck;
+  const delivery = { ...deliverySummary, inFlight };
   const timeline = (inst.metrics.timeline || []).map((entry) => {
     const hasNewStatusFields =
       Object.prototype.hasOwnProperty.call(entry, 'serverAck') ||
@@ -775,11 +777,7 @@ router.get('/:iid/metrics', (req, res) => {
     ...rest,
     startedAt: metricsStartedAt,
     timeline,
-    ack: {
-      avgMs: inst.metrics.ack?.avgMs || 0,
-      lastMs: inst.metrics.ack?.lastMs || null,
-      samples: inst.metrics.ack?.count || 0,
-    },
+    delivery,
     sessionDir: inst.dir,
   });
 });
@@ -809,10 +807,9 @@ router.post(
       return;
     }
 
-    const { to, message, waitAckMs } = (req.body || {}) as {
+    const { to, message } = (req.body || {}) as {
       to?: string;
       message?: string;
-      waitAckMs?: number;
     };
     if (!to || typeof message !== 'string' || !message.trim()) {
       res.status(400).json({ error: 'parâmetros to e message são obrigatórios' });
@@ -858,16 +855,7 @@ router.post(
     inst.metrics.sent += 1;
     inst.metrics.sent_by_type.text += 1;
     inst.metrics.last.sentId = messageId;
-    if (messageId) {
-      inst.ackSentAt.set(messageId, Date.now());
-    }
-
-    let ackStatus: number | null = null;
-    if (waitAckMs && messageId) {
-      ackStatus = await waitForAck(inst, messageId, waitAckMs);
-    }
-
-    res.json({ id: messageId, messageId, status: sent.status, ack: ackStatus });
+    res.json({ id: messageId, messageId, status: sent.status });
   }),
 );
 
@@ -881,12 +869,11 @@ router.post(
       return;
     }
 
-    const { to, text, options, footer, waitAckMs } = (req.body || {}) as {
+    const { to, text, options, footer } = (req.body || {}) as {
       to?: string;
       text?: string;
       options?: unknown;
       footer?: string;
-      waitAckMs?: number;
     };
 
     if (!to) {
@@ -969,16 +956,8 @@ router.post(
     inst.metrics.sent += 1;
     inst.metrics.sent_by_type.buttons += 1;
     inst.metrics.last.sentId = messageId;
-    if (messageId) {
-      inst.ackSentAt.set(messageId, Date.now());
-    }
 
-    let ackStatus: number | null = null;
-    if (waitAckMs && messageId) {
-      ackStatus = await waitForAck(inst, messageId, waitAckMs);
-    }
-
-    res.json({ id: messageId, messageId, status: sent?.status ?? null, ack: ackStatus });
+    res.json({ id: messageId, messageId, status: sent?.status ?? null });
   }),
 );
 
@@ -992,14 +971,13 @@ router.post(
       return;
     }
 
-    const { to, text, buttonText, sections, footer, title, waitAckMs } = (req.body || {}) as {
+    const { to, text, buttonText, sections, footer, title } = (req.body || {}) as {
       to?: string;
       text?: string;
       buttonText?: string;
       sections?: unknown;
       footer?: string;
       title?: string;
-      waitAckMs?: number;
     };
 
     if (!to) {
@@ -1145,16 +1123,8 @@ router.post(
     inst.metrics.sent += 1;
     inst.metrics.sent_by_type.lists += 1;
     inst.metrics.last.sentId = messageId;
-    if (messageId) {
-      inst.ackSentAt.set(messageId, Date.now());
-    }
 
-    let ackStatus: number | null = null;
-    if (waitAckMs && messageId) {
-      ackStatus = await waitForAck(inst, messageId, waitAckMs);
-    }
-
-    res.json({ id: messageId, messageId, status: sent?.status ?? null, ack: ackStatus });
+    res.json({ id: messageId, messageId, status: sent?.status ?? null });
   }),
 );
 
@@ -1180,7 +1150,6 @@ router.post(
       to?: string;
       media?: Record<string, unknown>;
       caption?: string;
-      waitAckMs?: number;
     };
 
     const typeRaw = typeof body.type === 'string' ? body.type.trim().toLowerCase() : '';
@@ -1262,20 +1231,10 @@ router.post(
     const counterKey = MEDIA_TYPE_COUNTER[mediaType];
     inst.metrics.sent_by_type[counterKey] += 1;
     inst.metrics.last.sentId = sent.key?.id ?? null;
-    if (sent.key?.id) {
-      inst.ackSentAt.set(sent.key.id, Date.now());
-    }
-
-    let ackStatus: number | null = null;
-    const waitAckMs = Number(body.waitAckMs);
-    if (Number.isFinite(waitAckMs) && waitAckMs > 0 && sent.key?.id) {
-      ackStatus = await waitForAck(inst, sent.key.id, waitAckMs);
-    }
 
     res.status(201).json({
       id: sent.key?.id ?? null,
       status: sent.status ?? null,
-      ack: ackStatus,
       type: mediaType,
       mimetype: built.mimetype,
       fileName: built.fileName,
@@ -1295,12 +1254,11 @@ router.post(
       return;
     }
 
-    const { to, question, options, selectableCount, waitAckMs } = (req.body || {}) as {
+    const { to, question, options, selectableCount } = (req.body || {}) as {
       to?: string;
       question?: string;
       options?: unknown;
       selectableCount?: number;
-      waitAckMs?: number;
     };
 
     const normalized = normalizeToE164BR(to);
@@ -1349,21 +1307,16 @@ router.post(
     inst.metrics.sent += 1;
     inst.metrics.sent_by_type.buttons += 1;
     inst.metrics.last.sentId = sent.key?.id ?? null;
-    if (sent.key?.id) {
-      inst.ackSentAt.set(sent.key.id, Date.now());
-    }
 
-    let ackStatus: number | null = null;
-    if (waitAckMs && sent.key?.id) {
-      ackStatus = await waitForAck(inst, sent.key.id, waitAckMs);
-    }
-
-    res.status(201).json({ id: sent.key?.id ?? null, status: sent.status, ack: ackStatus });
+    res.status(201).json({ id: sent.key?.id ?? null, status: sent.status });
   }),
 );
 
 function serializeInstance(inst: Instance) {
   const connected = inst.connectionState === 'open';
+  const statusCounts = { ...inst.metrics.status_counts };
+  const pending = Number(statusCounts['1']) || 0;
+  const serverAck = Number(statusCounts['2']) || 0;
   return {
     id: inst.id,
     name: inst.name,
@@ -1383,7 +1336,8 @@ function serializeInstance(inst: Instance) {
     counters: {
       sent: inst.metrics.sent,
       byType: { ...inst.metrics.sent_by_type },
-      statusCounts: { ...inst.metrics.status_counts },
+      statusCounts,
+      inFlight: pending + serverAck,
     },
     last: { ...inst.metrics.last },
     rate: {

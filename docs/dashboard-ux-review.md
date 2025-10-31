@@ -23,6 +23,8 @@ O dashboard atual é construído com HTML estático (`public/index.html`) estili
 
 ### Etapa 4 — Métricas e gráfico de timeline
 - **Comportamento**: KPIs e gráfico de linha atualizam com dados de `/instances/:id/metrics`. Filtro `#selRange` determina janela em minutos armazenada em `localStorage`.
+- **Dependências técnicas**: Endpoint `GET /instances/:id/metrics`, estrutura `metrics.counters`, `metrics.rate`, `metrics.delivery`, timeline com campos `sent`, `pending`, `serverAck`, `delivered`, `read`, `played`.
+- **Observações**: Falta fallback visual além de texto quando não há dados; atualizações dependem do polling global.
 - **Dependências técnicas**: Endpoint `GET /instances/:id/metrics`, estrutura `metrics.counters` (com `statusCounts` 1–5), `metrics.rate` e timeline `sent/pending/serverAck/delivered/read/played`. Status são limpos automaticamente após `STATUS_TTL_MS`.
 - **Observações**: Falta fallback visual além de texto quando não há dados; atualizações dependem do polling global e não há mais exibição de tempos médios de ACK porque o backend responde imediatamente após o envio.
 

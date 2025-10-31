@@ -24,8 +24,8 @@ export const els = {
   kpiFailureHint: q('kpiFailureHint'),
   kpiRateValue: q('kpiRateValue'),
   kpiRateHint: q('kpiRateHint'),
-  kpiAckValue: q('kpiAckValue'),
-  kpiAckHint: q('kpiAckHint'),
+  kpiTransitValue: q('kpiTransitValue'),
+  kpiTransitHint: q('kpiTransitHint'),
   chartHint: q('chartHint'),
   metricsSkeleton: q('metricsSkeleton'),
 
