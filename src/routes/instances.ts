@@ -97,7 +97,7 @@ function getAuthorizedKeyId(req: Request): string | null {
 }
 
 function auth(req: Request, res: Response, next: NextFunction): void {
-  const provided = req.header('x-api-key') || '';
+  const provided = extractApiKey(req);
   const matched = resolveApiKeyMatch(provided);
   if (!matched) {
     res.status(401).json({ error: 'unauthorized' });
