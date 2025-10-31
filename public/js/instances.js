@@ -7,7 +7,6 @@ import {
   STATUS_SERIES,
   INSTANCE_FILTERS,
   INSTANCE_VIEW,
-  STATUS_CODES,
   STATUS_META,
   describeConnection,
   els,
