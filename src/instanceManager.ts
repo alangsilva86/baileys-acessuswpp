@@ -120,6 +120,8 @@ function onInstanceEvent(listener: (event: InstanceEventPayload) => void): () =>
   return () => {
     instanceEventEmitter.off('event', listener);
   };
+}
+
 const MAX_NOTE_REVISIONS = 20;
 const NOTE_MAX_LENGTH = 280;
 

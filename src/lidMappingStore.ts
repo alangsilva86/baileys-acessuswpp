@@ -1,12 +1,10 @@
 import type Long from 'long';
-import type { JidServer } from '@whiskeysockets/baileys';
-import { jidDecode, jidEncode, isLidUser } from '@whiskeysockets/baileys/lib/WABinary/jid-utils.js';
 import {
   jidDecode,
   jidEncode,
   isLidUser,
+  type JidServer,
 } from '@whiskeysockets/baileys/lib/WABinary/jid-utils.js';
-import type { JidServer } from '@whiskeysockets/baileys/lib/WABinary/jid-utils.js';
 
 const S_WHATSAPP_NET_SERVER: JidServer = 's.whatsapp.net';
 const LID_SERVER: JidServer = 'lid';
