@@ -165,14 +165,14 @@ export const STATUS_SERIES = [
 export const STATUS_META = STATUS_SERIES.reduce((acc, item) => {
   acc[item.key] = item;
   return acc;
-}, {} as Record<string, (typeof STATUS_SERIES)[number]>);
+}, {});
 
 export const STATUS_KEYS = STATUS_SERIES.map((item) => item.key);
 
 export const TIMELINE_FIELDS = STATUS_SERIES.reduce((acc, item) => {
   if (item.timelineKey) acc[item.key] = item.timelineKey;
   return acc;
-}, {} as Record<string, string>);
+}, {});
 
 export const NOTE_STATE = {
   lastSaved: '',
@@ -463,7 +463,7 @@ export function validateE164(value) {
 
 export function getStatusCounts(src) {
   const base = src || {};
-  const totals = {} as Record<string, number>;
+  const totals = {};
   STATUS_SERIES.forEach((series) => {
     totals[series.key] = 0;
   });
