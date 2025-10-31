@@ -27,6 +27,10 @@ const els = {
   kpiAckHint: document.getElementById('kpiAckHint'),
   chartHint: document.getElementById('chartHint'),
   metricsSkeleton: document.getElementById('metricsSkeleton'),
+  metricsSkeletonText: document.getElementById('metricsSkeletonText'),
+  metricsSkeletonSpinner: document.getElementById('metricsSkeletonSpinner'),
+  btnExportMetrics: document.getElementById('btnExportMetrics'),
+  metricsExportMenu: document.getElementById('metricsExportMenu'),
 
   // QR / ações rápidas
   qrWrap: document.getElementById('qrWrap'),
@@ -135,6 +139,21 @@ const DELIVERY_STATE_META = {
 };
 
 let lastLogsSignature = '';
+let lastMetricsBundle = null;
+
+const metricsApi = window.MetricsAPI || {};
+const loadMetricsBundle = typeof metricsApi.loadMetrics === 'function'
+  ? metricsApi.loadMetrics.bind(metricsApi)
+  : async (iid, options = {}) => ({ iid, range: options.range, metrics: {}, logs: {} });
+const buildMetricsJSON = typeof metricsApi.buildMetricsJSON === 'function'
+  ? metricsApi.buildMetricsJSON
+  : (bundle) => JSON.stringify(bundle || {});
+const buildMetricsCSV = typeof metricsApi.buildMetricsCSV === 'function'
+  ? metricsApi.buildMetricsCSV
+  : () => '';
+const getCachedMetrics = typeof metricsApi.getCachedMetrics === 'function'
+  ? metricsApi.getCachedMetrics
+  : () => null;
 
 /* ---------- Helpers UI ---------- */
 const BADGE_STYLES = {
@@ -312,7 +331,132 @@ function setCardsLoading(isLoading) {
 }
 
 function setMetricsLoading(isLoading) {
-  toggleHidden(els.metricsSkeleton, !isLoading);
+  if (!els.metricsSkeleton) return;
+  if (isLoading) {
+    els.metricsSkeleton.dataset.mode = 'loading';
+    if (els.metricsSkeletonText) els.metricsSkeletonText.textContent = 'Carregando métricas…';
+    if (els.metricsSkeletonSpinner) els.metricsSkeletonSpinner.classList.remove('hidden');
+    els.metricsSkeleton.classList.remove('hidden');
+    return;
+  }
+
+  if (els.metricsSkeleton.dataset.mode === 'loading') {
+    els.metricsSkeleton.dataset.mode = 'idle';
+    els.metricsSkeleton.classList.add('hidden');
+    if (els.metricsSkeletonSpinner) els.metricsSkeletonSpinner.classList.remove('hidden');
+  }
+}
+
+function setMetricsPlaceholder(isActive, message = 'Aguardando dados suficientes…') {
+  if (!els.metricsSkeleton) return;
+  if (isActive) {
+    els.metricsSkeleton.dataset.mode = 'placeholder';
+    if (els.metricsSkeletonSpinner) els.metricsSkeletonSpinner.classList.add('hidden');
+    if (els.metricsSkeletonText) els.metricsSkeletonText.textContent = message;
+    els.metricsSkeleton.classList.remove('hidden');
+  } else if (els.metricsSkeleton.dataset.mode === 'placeholder') {
+    els.metricsSkeleton.dataset.mode = 'idle';
+    if (els.metricsSkeletonSpinner) els.metricsSkeletonSpinner.classList.remove('hidden');
+    els.metricsSkeleton.classList.add('hidden');
+  }
+}
+
+function setMetricsExportMenuVisible(visible) {
+  if (!els.metricsExportMenu) return;
+  els.metricsExportMenu.classList[visible ? 'remove' : 'add']('hidden');
+  if (els.btnExportMetrics) {
+    els.btnExportMetrics.setAttribute('aria-expanded', visible ? 'true' : 'false');
+  }
+}
+
+function toggleMetricsExportMenu() {
+  if (!els.metricsExportMenu) return;
+  const isHidden = els.metricsExportMenu.classList.contains('hidden');
+  setMetricsExportMenuVisible(isHidden);
+}
+
+function closeMetricsExportMenu() {
+  setMetricsExportMenuVisible(false);
+}
+
+function downloadBlob(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function handleMetricsExport(format) {
+  if (!format) return;
+  const iid = els.selInstance?.value;
+  if (!iid) {
+    showError('Selecione uma instância para exportar métricas.');
+    return;
+  }
+
+  try {
+    const rangeMins = Number(els.selRange?.value) || 240;
+    const cached = getCachedMetrics(iid, rangeMins);
+    let bundle = null;
+    if (cached && cached.metrics) {
+      bundle = cached;
+    } else if (
+      lastMetricsBundle &&
+      lastMetricsBundle.iid === iid &&
+      Number(lastMetricsBundle.range) === Number(rangeMins)
+    ) {
+      bundle = lastMetricsBundle;
+    }
+
+    if (!bundle) {
+      bundle = await loadMetricsBundle(iid, {
+        range: rangeMins,
+        fetcher: (path) => fetchJSON(path, true),
+        force: true,
+      });
+      lastMetricsBundle = bundle;
+    }
+
+    if (!bundle || !bundle.metrics) {
+      throw new Error('bundle_missing');
+    }
+
+    lastMetricsBundle = bundle;
+
+    let content = '';
+    let mime = '';
+    let extension = '';
+    if (format === 'json') {
+      content = buildMetricsJSON(bundle);
+      mime = 'application/json';
+      extension = 'json';
+    } else if (format === 'csv') {
+      content = buildMetricsCSV(bundle);
+      mime = 'text/csv;charset=utf-8;';
+      extension = 'csv';
+    } else {
+      throw new Error('format_not_supported');
+    }
+
+    if (!content) {
+      throw new Error('empty_export');
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeRange = Number.isFinite(rangeMins) ? rangeMins : 'custom';
+    const safeIid = iid.replace(/[^a-zA-Z0-9_-]/g, '-');
+    const filename = `metrics-${safeIid}-${safeRange}-${timestamp}.${extension}`;
+    downloadBlob(filename, content, mime);
+    setBadgeState('update', `Exportação ${format.toUpperCase()} pronta`, 3000);
+  } catch (err) {
+    console.error('[dashboard] erro ao exportar métricas', err);
+    showError('Falha ao exportar métricas');
+  }
 }
 
 function resetLogs() {
@@ -620,6 +764,16 @@ function renderLogs(events) {
   els.logsList.appendChild(fragment);
 }
 
+function computeLogsSignature(events = []) {
+  return events
+    .map((ev) => {
+      const delivery = extractDeliveryInfo(ev);
+      const deliveryKey = delivery ? `${delivery.state}:${delivery.attempts}:${delivery.lastStatus ?? ''}` : '';
+      return `${ev.id}:${ev.acknowledged ? 1 : 0}:${deliveryKey}`;
+    })
+    .join('|');
+}
+
 const NOTE_STATUS_VARIANTS = {
   synced: { text: 'Notas sincronizadas', className: 'text-emerald-600' },
   saving: { text: 'Salvando…', className: 'text-slate-500' },
@@ -726,6 +880,11 @@ if (els.selRange) {
   });
 }
 
+if (els.btnExportMetrics) {
+  els.btnExportMetrics.setAttribute('aria-haspopup', 'menu');
+  els.btnExportMetrics.setAttribute('aria-expanded', 'false');
+}
+
 if (els.instanceNote) {
   els.instanceNote.addEventListener('input', () => scheduleNoteAutosave());
   els.instanceNote.addEventListener('blur', () => scheduleNoteAutosave(true));
@@ -784,18 +943,51 @@ let chart;
 let hasLoadedInstances = false;
 let refreshInstancesInFlight = null;
 let hasLoadedSelected = false;
+const METRICS_TOOLTIP_PLUGIN = {
+  id: 'metricsTooltip',
+  beforeInit(chartInstance) {
+    const plugins = chartInstance.options.plugins || {};
+    const tooltip = plugins.tooltip || {};
+    tooltip.backgroundColor = '#0f172a';
+    tooltip.titleColor = '#e2e8f0';
+    tooltip.bodyColor = '#f8fafc';
+    tooltip.borderColor = '#1e293b';
+    tooltip.borderWidth = 1;
+    tooltip.displayColors = false;
+    tooltip.padding = 12;
+    tooltip.titleFont = { family: tooltip.titleFont?.family || 'Inter, sans-serif', size: 12, weight: '600' };
+    tooltip.bodyFont = { family: tooltip.bodyFont?.family || 'Inter, sans-serif', size: 12 };
+    const originalCallbacks = tooltip.callbacks || {};
+    tooltip.callbacks = {
+      ...originalCallbacks,
+      title(items) {
+        if (typeof originalCallbacks.title === 'function') return originalCallbacks.title(items);
+        return items?.[0]?.label || '';
+      },
+      label(context) {
+        if (typeof originalCallbacks.label === 'function') return originalCallbacks.label(context);
+        const dataset = context.dataset || {};
+        const value = typeof context.parsed?.y === 'number' ? context.parsed.y : context.formattedValue;
+        const description = dataset.metaDescription ? ` — ${dataset.metaDescription}` : '';
+        return `${dataset.label || 'Série'}: ${value}${description}`;
+      },
+    };
+    chartInstance.options.plugins = { ...plugins, tooltip };
+  },
+};
 function initChart() {
   const ctx = document.getElementById('metricsChart').getContext('2d');
   const statusDatasets = STATUS_CODES.map(code => {
     const meta = STATUS_META[code] || {};
-    const label = meta.name ? `${meta.name}` : `Status ${code}`;
+    const label = meta.name ? `${meta.name} (status ${code})` : `Status ${code}`;
     return {
-      label: `Status ${code} (${label})`,
+      label,
       data: [],
       borderColor: meta.chartColor || '#94a3b8',
       backgroundColor: meta.chartBackground || 'rgba(148,163,184,0.15)',
       tension: 0.25,
       fill: false,
+      metaDescription: meta.description || '',
     };
   });
   chart = new Chart(ctx, {
@@ -803,7 +995,15 @@ function initChart() {
     data: {
       labels: [],
       datasets: [
-        { label: 'Enviadas', data: [], borderColor: '#0ea5e9', backgroundColor: 'rgba(14,165,233,0.15)', tension: 0.25, fill: false },
+        {
+          label: 'Enviadas',
+          data: [],
+          borderColor: '#0ea5e9',
+          backgroundColor: 'rgba(14,165,233,0.15)',
+          tension: 0.25,
+          fill: false,
+          metaDescription: 'Total de mensagens enviadas na janela selecionada.',
+        },
         ...statusDatasets,
       ]
     },
@@ -813,18 +1013,52 @@ function initChart() {
       animation: false,
       interaction: { intersect: false, mode: 'index' },
       scales: {
-        x: { grid: { display: false } },
-        y: { beginAtZero: true, grace: '5%' }
+        x: { grid: { display: false }, ticks: { color: '#475569' } },
+        y: { beginAtZero: true, grace: '5%', ticks: { color: '#475569' } }
       },
-      plugins: { legend: { display: true, position: 'bottom' } }
-    }
+      plugins: {
+        legend: {
+          display: true,
+          position: 'bottom',
+          labels: { color: '#334155', usePointStyle: true },
+        },
+        tooltip: {},
+      }
+    },
+    plugins: [METRICS_TOOLTIP_PLUGIN]
   });
 }
-function resetChart() {
+function resetChart(message = 'Nenhum dado disponível ainda.') {
+  if (!chart) return;
   chart.data.labels = [];
-  chart.data.datasets.forEach(ds => ds.data = []);
+  chart.data.datasets.forEach(ds => { ds.data = []; });
   chart.update('none');
-  if (els.chartHint) els.chartHint.textContent = 'Nenhum dado disponível ainda.';
+  setMetricsPlaceholder(true, message);
+  if (els.chartHint) els.chartHint.textContent = message;
+}
+function renderMetricsTimeline(timeline = []) {
+  if (!chart) return;
+  const points = Array.isArray(timeline) ? timeline : [];
+  const labels = points.map(p => formatTimelineLabel(p.iso));
+  chart.data.labels = labels;
+  chart.data.datasets[0].data = points.map(p => p.sent ?? 0);
+  STATUS_CODES.forEach((code, idx) => {
+    const key = TIMELINE_FIELDS[code];
+    chart.data.datasets[idx + 1].data = points.map(p => (key ? (p[key] ?? 0) : 0));
+  });
+
+  if (points.length >= 2) {
+    chart.update();
+    setMetricsPlaceholder(false);
+    if (els.chartHint) els.chartHint.textContent = `Exibindo ${points.length} pontos de dados.`;
+  } else {
+    chart.update('none');
+    const message = points.length === 1
+      ? 'Aguardando mais um ponto para desenhar a série.'
+      : 'Nenhum dado disponível ainda.';
+    setMetricsPlaceholder(true, message);
+    if (els.chartHint) els.chartHint.textContent = message;
+  }
 }
 function updateKpis(metrics) {
   const counters = metrics?.counters || {};
@@ -1083,11 +1317,13 @@ async function refreshSelected(options = {}) {
   const { silent = false, withSkeleton } = options;
   const iid = els.selInstance.value;
 
+  closeMetricsExportMenu();
+
   if (!iid) {
     toggleHidden(els.qrImg, true);
     setQrState('idle', 'Nenhuma instância selecionada.');
     if (els.noteCard) els.noteCard.classList.add('hidden');
-    resetChart();
+    resetChart('Selecione uma instância para visualizar as métricas.');
     resetLogs();
     hasLoadedSelected = false;
     return;
@@ -1136,27 +1372,26 @@ async function refreshSelected(options = {}) {
       setQrState(connection.meta?.qrState || 'loading', qrMessage);
     }
 
-    const metrics = await fetchJSON('/instances/' + iid + '/metrics', true);
+    const rangeMins = Number(els.selRange.value) || 240;
+    const bundle = await loadMetricsBundle(iid, {
+      range: rangeMins,
+      fetcher: (path) => fetchJSON(path, true),
+      force: true,
+    });
+    lastMetricsBundle = bundle;
+    const metrics = bundle.metrics || {};
     updateKpis(metrics);
 
-    const rangeMins = Number(els.selRange.value) || 240;
     const since = Date.now() - rangeMins * 60 * 1000;
     const timeline = (metrics.timeline || []).filter(p => p.ts >= since);
+    renderMetricsTimeline(timeline);
 
-    if (timeline.length > 1) {
-      chart.data.labels = timeline.map(p => formatTimelineLabel(p.iso));
-      chart.data.datasets[0].data = timeline.map(p => p.sent ?? 0);
-      STATUS_CODES.forEach((code, idx) => {
-        const key = TIMELINE_FIELDS[code];
-        chart.data.datasets[idx + 1].data = timeline.map(p => (key ? (p[key] ?? 0) : 0));
-      });
-      chart.update();
-      if (els.chartHint) els.chartHint.textContent = `Exibindo ${timeline.length} pontos de dados.`;
+    const events = Array.isArray(bundle.logs?.events) ? bundle.logs.events : null;
+    if (events) {
+      await refreshLogs({ silent: true, events });
     } else {
-      resetChart();
+      await refreshLogs({ silent: true });
     }
-
-    await refreshLogs({ silent: true });
 
     hasLoadedSelected = true;
   } catch (err) {
@@ -1315,6 +1550,7 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Escape') return;
   if (els.modalDelete && !els.modalDelete.classList.contains('hidden')) closeDeleteModal();
   if (els.pairModal && !els.pairModal.classList.contains('hidden')) closePairModal();
+  if (els.metricsExportMenu && !els.metricsExportMenu.classList.contains('hidden')) closeMetricsExportMenu();
 });
 
 /* Delegação de eventos click */
@@ -1547,10 +1783,19 @@ if (els.btnSend) els.btnSend.onclick = async () => {
 
 async function refreshLogs(options = {}) {
   if (!els.logsList || !els.logsEmpty) return;
-  const { silent = false } = options;
+  const { silent = false, events: providedEvents } = options;
   const iid = els.selInstance?.value;
   if (!iid) {
     resetLogs();
+    return;
+  }
+
+  if (Array.isArray(providedEvents)) {
+    const signature = computeLogsSignature(providedEvents);
+    if (signature !== lastLogsSignature) {
+      renderLogs(providedEvents);
+      lastLogsSignature = signature;
+    }
     return;
   }
 
@@ -1560,13 +1805,7 @@ async function refreshLogs(options = {}) {
     const params = new URLSearchParams({ limit: '20' });
     const data = await fetchJSON('/instances/' + iid + '/logs?' + params.toString(), true);
     const events = Array.isArray(data?.events) ? data.events : [];
-    const signature = events
-      .map((ev) => {
-        const delivery = extractDeliveryInfo(ev);
-        const deliveryKey = delivery ? `${delivery.state}:${delivery.attempts}:${delivery.lastStatus ?? ''}` : '';
-        return `${ev.id}:${ev.acknowledged ? 1 : 0}:${deliveryKey}`;
-      })
-      .join('|');
+    const signature = computeLogsSignature(events);
     if (signature !== lastLogsSignature) {
       renderLogs(events);
       lastLogsSignature = signature;
@@ -1583,8 +1822,32 @@ if (els.btnRefreshLogs) {
   els.btnRefreshLogs.addEventListener('click', () => refreshLogs({ silent: false }));
 }
 
+if (els.btnExportMetrics) {
+  els.btnExportMetrics.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    toggleMetricsExportMenu();
+  });
+}
+
+if (els.metricsExportMenu) {
+  els.metricsExportMenu.addEventListener('click', (ev) => {
+    const target = ev.target.closest('button[data-format]');
+    if (!target) return;
+    ev.preventDefault();
+    closeMetricsExportMenu();
+    handleMetricsExport(target.dataset.format);
+  });
+}
+
+document.addEventListener('click', (ev) => {
+  if (!els.metricsExportMenu || els.metricsExportMenu.classList.contains('hidden')) return;
+  if (els.metricsExportMenu.contains(ev.target) || els.btnExportMetrics?.contains(ev.target)) return;
+  closeMetricsExportMenu();
+});
+
 /* Boot do dashboard */
 initChart();
+setMetricsPlaceholder(true, 'Selecione uma instância para visualizar as métricas.');
 refreshInstances({ withSkeleton: true });
 setInterval(() => {
   refreshInstances({ silent: true }).catch(err => console.debug('[dashboard] auto-refresh falhou', err));
