@@ -8,6 +8,10 @@ export const els = {
   cards: q('cards'),
   cardsSkeleton: q('cardsSkeleton'),
   instanceLoading: q('instanceLoading'),
+  instanceSearch: q('instanceSearch'),
+  instanceFilterState: q('instanceFilterState'),
+  instanceSort: q('instanceSort'),
+  instanceCounter: q('instanceCounter'),
 
   // Note card
   noteCard: q('noteCard'),
@@ -149,6 +153,27 @@ export const NOTE_STATE = {
   revisions: [],
   selectedRevision: 'current',
   restoring: false,
+};
+
+export const INSTANCE_FILTERS = {
+  search: '',
+  status: 'all',
+  sort: 'name',
+};
+
+export const INSTANCE_VIEW = {
+  total: 0,
+  filtered: 0,
+  virtualization: {
+    ready: false,
+    columns: 1,
+    rowHeight: 0,
+    rowGap: 16,
+    paddingTop: 0,
+    paddingBottom: 0,
+    startIndex: 0,
+    endIndex: 0,
+  },
 };
 
 export const REFRESH_INTERVAL_MS = 5000;
