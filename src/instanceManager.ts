@@ -5,7 +5,7 @@ import type { WASocket } from '@whiskeysockets/baileys';
 import { startWhatsAppInstance, stopWhatsAppInstance, type InstanceContext } from './whatsapp.js';
 
 const SESSIONS_ROOT = process.env.SESSION_DIR || './sessions';
-const INSTANCES_INDEX = path.join(process.cwd(), 'instances.json');
+const INSTANCES_INDEX = path.join(SESSIONS_ROOT, 'instances.json');
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 type AckStatusCode = number;
 
@@ -150,6 +150,7 @@ async function saveInstancesIndex(): Promise<void> {
   }));
 
   try {
+    await mkdir(SESSIONS_ROOT, { recursive: true });
     await writeFile(INSTANCES_INDEX, JSON.stringify(index, null, 2));
   } catch (err) {
     logger.error({ err }, 'instance_index.save.failed');
