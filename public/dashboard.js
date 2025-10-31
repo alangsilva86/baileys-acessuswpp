@@ -117,7 +117,13 @@ const NOTE_STATE = {
   timer: null,
   pending: '',
   saving: false,
+  autosavePromise: null,
+  metaInterval: null,
+  statusState: 'idle',
+  statusExtra: '',
 };
+
+const NoteHelpers = window.NoteHelpers || {};
 
 const REFRESH_INTERVAL_MS = 5000;
 
@@ -631,9 +637,12 @@ function setNoteStatus(state, extra = '') {
   if (!els.noteStatus) return;
   const variant = NOTE_STATUS_VARIANTS[state] || { text: '', className: 'text-slate-500' };
   const baseText = variant.text || '';
-  const text = extra ? (baseText ? `${baseText} — ${extra}` : extra) : baseText;
+  const normalizedExtra = extra || '';
+  const text = normalizedExtra ? (baseText ? `${baseText} — ${normalizedExtra}` : normalizedExtra) : baseText;
   els.noteStatus.textContent = text;
   els.noteStatus.className = 'text-[11px] ' + (variant.className || 'text-slate-500');
+  NOTE_STATE.statusState = state;
+  NOTE_STATE.statusExtra = normalizedExtra;
   if (state === 'error' || state === 'needsKey') {
     toggleHidden(els.noteRetry, false);
   } else {
@@ -652,14 +661,69 @@ function updateNoteMetaText() {
   els.noteMeta.textContent = parts.join(' • ');
 }
 
+function applySharedNoteUpdate(payload, options = {}) {
+  if (NoteHelpers && typeof NoteHelpers.applyNoteSaveResult === 'function') {
+    NoteHelpers.applyNoteSaveResult(NOTE_STATE, payload, options);
+    return;
+  }
+
+  const metadata = payload?.metadata || {};
+  const hasNoteOption = Object.prototype.hasOwnProperty.call(options, 'note');
+  const noteValue = hasNoteOption ? options.note : payload?.note;
+  if (typeof noteValue === 'string') {
+    NOTE_STATE.pending = noteValue;
+    NOTE_STATE.lastSaved = noteValue.trim();
+  }
+  if (metadata.updatedAt) {
+    NOTE_STATE.updatedAt = metadata.updatedAt;
+  } else if (options?.fallbackUpdatedAt) {
+    NOTE_STATE.updatedAt = options.fallbackUpdatedAt;
+  }
+  if (metadata.createdAt) {
+    NOTE_STATE.createdAt = metadata.createdAt;
+  }
+}
+
+function getNoteRelativeStatusText() {
+  const relative = formatRelativeTime(NOTE_STATE.updatedAt);
+  return relative ? `Atualizado ${relative}` : '';
+}
+
+function refreshSyncedStatusRelative() {
+  if (NOTE_STATE.statusState !== 'synced') return;
+  const extra = getNoteRelativeStatusText();
+  if (extra !== NOTE_STATE.statusExtra) {
+    setNoteStatus('synced', extra);
+  }
+}
+
+function refreshNoteFeedback() {
+  if (!els.noteCard || els.noteCard.classList.contains('hidden')) return;
+  updateNoteMetaText();
+  refreshSyncedStatusRelative();
+}
+
 const NOTE_AUTOSAVE_DEBOUNCE = 800;
+const NOTE_META_REFRESH_INTERVAL = 30000;
+
+function startNoteMetaRefresh() {
+  if (NOTE_STATE.metaInterval) return;
+  NOTE_STATE.metaInterval = setInterval(refreshNoteFeedback, NOTE_META_REFRESH_INTERVAL);
+}
+
+function stopNoteMetaRefresh() {
+  if (!NOTE_STATE.metaInterval) return;
+  clearInterval(NOTE_STATE.metaInterval);
+  NOTE_STATE.metaInterval = null;
+}
 
 function scheduleNoteAutosave(immediate = false) {
   if (!els.instanceNote || !els.selInstance?.value) return;
   const value = els.instanceNote.value;
   NOTE_STATE.pending = value;
   if (value.trim() === NOTE_STATE.lastSaved.trim()) {
-    setNoteStatus('synced');
+    setNoteStatus('synced', getNoteRelativeStatusText());
+    refreshNoteFeedback();
     return;
   }
   setNoteStatus('saving');
@@ -680,20 +744,23 @@ async function runNoteAutosave() {
   }
   NOTE_STATE.saving = true;
   try {
-    const payload = await fetchJSON('/instances/' + els.selInstance.value, true, {
+    const fallbackUpdatedAt = new Date().toISOString();
+    const request = fetchJSON('/instances/' + els.selInstance.value, true, {
       method: 'PATCH',
       body: JSON.stringify({ note: NOTE_STATE.pending }),
     });
-    NOTE_STATE.lastSaved = (NOTE_STATE.pending || '').trim();
-    NOTE_STATE.updatedAt = payload?.metadata?.updatedAt || new Date().toISOString();
-    NOTE_STATE.createdAt = payload?.metadata?.createdAt || NOTE_STATE.createdAt;
-    updateNoteMetaText();
-    setNoteStatus('synced');
+    NOTE_STATE.autosavePromise = request;
+    const payload = await request;
+    applySharedNoteUpdate(payload, { note: NOTE_STATE.pending, fallbackUpdatedAt });
+    setNoteStatus('synced', getNoteRelativeStatusText());
+    refreshNoteFeedback();
+    startNoteMetaRefresh();
   } catch (err) {
     console.error('[dashboard] erro ao salvar notas', err);
     setNoteStatus('error', err.message || 'Falha inesperada');
   } finally {
     NOTE_STATE.saving = false;
+    NOTE_STATE.autosavePromise = null;
   }
 }
 function formatTimelineLabel(iso) {
@@ -739,8 +806,7 @@ if (els.inpMsg) {
   updateMsgCounter();
 }
 
-setInterval(updateNoteMetaText, 60000);
-setNoteStatus('synced');
+setNoteStatus('synced', getNoteRelativeStatusText());
 
 /* ---------- Requisições ---------- */
 function showError(msg) {
@@ -893,6 +959,15 @@ async function refreshInstances(options = {}) {
         NOTE_STATE.lastSaved = '';
         NOTE_STATE.createdAt = null;
         NOTE_STATE.updatedAt = null;
+        NOTE_STATE.pending = '';
+        NOTE_STATE.autosavePromise = null;
+        if (NoteHelpers && typeof NoteHelpers.cancelAutosave === 'function') {
+          NoteHelpers.cancelAutosave(NOTE_STATE);
+        } else if (NOTE_STATE.timer) {
+          clearTimeout(NOTE_STATE.timer);
+          NOTE_STATE.timer = null;
+        }
+        stopNoteMetaRefresh();
         updateNoteMetaText();
         resetChart();
         resetLogs();
@@ -910,6 +985,7 @@ async function refreshInstances(options = {}) {
         const suffix = connection.meta?.optionSuffix || '';
         const label = `${inst.name}${suffix}`;
         const opt = option(inst.id, label);
+        opt.dataset.statusSuffix = suffix;
         if (inst.id === prev) { opt.selected = true; keepPrev = true; }
         els.selInstance.appendChild(opt);
       });
@@ -1115,8 +1191,9 @@ async function refreshSelected(options = {}) {
       NOTE_STATE.lastSaved = noteVal.trim();
       NOTE_STATE.createdAt = data.metadata?.createdAt || null;
       NOTE_STATE.updatedAt = data.metadata?.updatedAt || null;
-      updateNoteMetaText();
-      setNoteStatus('synced');
+      setNoteStatus('synced', getNoteRelativeStatusText());
+      refreshNoteFeedback();
+      startNoteMetaRefresh();
     }
 
     if (connection.meta?.shouldLoadQr) {
@@ -1174,8 +1251,12 @@ function findCardByIid(iid) {
 async function handleSaveMetadata(iid) {
   const card = findCardByIid(iid);
   if (!card) return;
-  const name = card.querySelector('[data-field="name"]')?.value?.trim();
-  const note = card.querySelector('[data-field="note"]')?.value?.trim();
+  const nameField = card.querySelector('[data-field="name"]');
+  const noteField = card.querySelector('[data-field="note"]');
+  const rawName = nameField?.value ?? '';
+  const rawNote = noteField?.value ?? '';
+  const name = rawName.trim();
+  const note = rawNote.trim();
   if (!name) { showError('O nome não pode estar vazio.'); return; }
 
   const btn = card.querySelector('[data-act="save"][data-iid="' + iid + '"]');
@@ -1183,17 +1264,38 @@ async function handleSaveMetadata(iid) {
   try {
     const key = requireKey();
     localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+    if (NoteHelpers && typeof NoteHelpers.cancelAutosave === 'function') {
+      NoteHelpers.cancelAutosave(NOTE_STATE);
+    } else if (NOTE_STATE.timer) {
+      clearTimeout(NOTE_STATE.timer);
+      NOTE_STATE.timer = null;
+    }
+    if (NOTE_STATE.autosavePromise) {
+      try {
+        await NOTE_STATE.autosavePromise;
+      } catch (_) {}
+    }
     const payload = await fetchJSON('/instances/' + iid, true, { method: 'PATCH', body: JSON.stringify({ name, note }) });
     setBadgeState('update', 'Dados salvos (' + payload.name + ')', 4000);
-    if (iid === els.selInstance.value) {
-      NOTE_STATE.lastSaved = (note || '').trim();
-      NOTE_STATE.pending = note || '';
-      NOTE_STATE.updatedAt = payload?.metadata?.updatedAt || NOTE_STATE.updatedAt;
-      NOTE_STATE.createdAt = payload?.metadata?.createdAt || NOTE_STATE.createdAt;
-      updateNoteMetaText();
-      setNoteStatus('synced');
+    const updatedName = payload?.name || name;
+    if (nameField) nameField.value = updatedName;
+    if (noteField) {
+      const newNote = typeof payload?.note === 'string' ? payload.note : rawNote;
+      noteField.value = newNote;
     }
-    await refreshInstances({ silent: true, withSkeleton: false });
+    const option = els.selInstance?.querySelector(`option[value="${iid}"]`);
+    if (option) {
+      const suffix = option.dataset.statusSuffix || '';
+      option.textContent = (payload?.name || name) + suffix;
+    }
+    if (iid === els.selInstance.value) {
+      const syncedNote = typeof payload?.note === 'string' ? payload.note : rawNote;
+      if (els.instanceNote) els.instanceNote.value = syncedNote;
+      applySharedNoteUpdate(payload, { note: syncedNote, fallbackUpdatedAt: new Date().toISOString() });
+      setNoteStatus('synced', getNoteRelativeStatusText());
+      refreshNoteFeedback();
+      startNoteMetaRefresh();
+    }
   } catch (err) {
     console.error('[dashboard] erro ao salvar metadados', err);
     showError('Falha ao salvar dados da instância');
