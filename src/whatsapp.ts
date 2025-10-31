@@ -21,7 +21,18 @@ import { filterClientMessages } from './baileys/messageUtils.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const PHONE_NUMBER_SHARE_EVENT = 'chats.phoneNumberShare' as const;
-type PhoneNumberSharePayload = BaileysEventMap[typeof PHONE_NUMBER_SHARE_EVENT];
+type PhoneNumberSharePayload = {
+  jid?: unknown;
+  lid?: unknown;
+} | null | undefined;
+function extractPhoneNumberShare(payload: PhoneNumberSharePayload): {
+  jid: string | null;
+  lid: string | null;
+} {
+  const jid = typeof payload?.jid === 'string' && payload.jid.trim() ? payload.jid : null;
+  const lid = typeof payload?.lid === 'string' && payload.lid.trim() ? payload.lid : null;
+  return { jid, lid };
+}
 
 const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
@@ -278,10 +289,11 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   inst.context = null;
 
   sock.ev.on('creds.update', saveCreds);
-  sock.ev.on(PHONE_NUMBER_SHARE_EVENT, (payload: PhoneNumberSharePayload) => {
-    const added = inst.lidMapping.rememberMapping(payload?.jid, payload?.lid);
+  sock.ev.on(PHONE_NUMBER_SHARE_EVENT as unknown as keyof BaileysEventMap, (payload: unknown) => {
+    const { jid, lid } = extractPhoneNumberShare(payload as PhoneNumberSharePayload);
+    const added = inst.lidMapping.rememberMapping(jid, lid);
     if (added) {
-      logger.debug({ iid: inst.id, jid: payload?.jid, lid: payload?.lid }, 'lidMapping.share');
+      logger.debug({ iid: inst.id, jid, lid }, 'lidMapping.share');
     }
   });
   sock.ev.on('lid-mapping.update' as unknown as keyof BaileysEventMap, (payload: unknown) => {
