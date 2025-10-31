@@ -2,14 +2,16 @@ import { fetchJSON, getApiKeyValue } from './api.js';
 import { applyInstanceNote, resetNotes } from './notes.js';
 import { refreshLogs, resetLogs } from './logs.js';
 import {
-  STATUS_CODES,
+  STATUS_SERIES,
   STATUS_META,
   TIMELINE_FIELDS,
   describeConnection,
   els,
   formatTimelineLabel,
+  formatDateTime,
   getStatusCounts,
   isInstanceLocked,
+  setLogsLoading,
   setMetricsLoading,
   setQrState,
   setSelectedInstanceActionsDisabled,
@@ -24,6 +26,22 @@ let hasLoadedSelected = false;
 let currentInstanceId = null;
 let currentConnectionState = null;
 const qrVersionCache = new Map();
+let lastRangeRequest = { from: null, to: null };
+let lastRangeSummary = null;
+
+function formatRangeLabel(range) {
+  if (!range) return '';
+  const formatTs = (value) => {
+    if (!Number.isFinite(value)) return null;
+    return formatDateTime(new Date(value).toISOString());
+  };
+  const fromLabel = formatTs(range.from);
+  const toLabel = formatTs(range.to);
+  if (fromLabel && toLabel) return `${fromLabel} – ${toLabel}`;
+  if (fromLabel) return `Desde ${fromLabel}`;
+  if (toLabel) return `Até ${toLabel}`;
+  return '';
+}
 let selectedSnapshot = null;
 let qrCountdownTimer = null;
 let qrInvalidationTimer = null;
@@ -236,11 +254,11 @@ function initChart() {
   const canvas = document.getElementById('metricsChart');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  const statusDatasets = STATUS_CODES.map((code) => {
-    const meta = STATUS_META[code] || {};
-    const label = meta.name ? `${meta.name}` : `Status ${code}`;
+  const statusDatasets = STATUS_SERIES.map((series) => {
+    const meta = STATUS_META[series.key] || series;
+    const label = meta.name ? `${meta.name}` : series.key;
     return {
-      label: `Status ${code} (${label})`,
+      label,
       data: [],
       borderColor: meta.chartColor || '#94a3b8',
       backgroundColor: meta.chartBackground || 'rgba(148,163,184,0.15)',
@@ -291,18 +309,22 @@ export function resetChart() {
 function updateKpis(metrics) {
   if (!els.kpiDeliveryValue) return;
   const counters = metrics?.counters || {};
-  const statusCounts = getStatusCounts(counters.statusCounts || counters.status || {});
+  const aggregatedCounts = counters.statusAggregated || null;
+  const statusCounts = aggregatedCounts
+    ? { ...aggregatedCounts }
+    : getStatusCounts(counters.statusCounts || counters.status || {});
   const sent = counters.sent || 0;
-  const pending = statusCounts['1'];
-  const serverAck = statusCounts['2'];
-  const delivered = statusCounts['3'];
-  const read = statusCounts['4'];
-  const played = statusCounts['5'];
+  const pending = statusCounts.pending || 0;
+  const serverAck = statusCounts.serverAck || 0;
+  const delivered = statusCounts.delivered || 0;
+  const read = statusCounts.read || 0;
+  const played = statusCounts.played || 0;
+  const failed = statusCounts.failed || 0;
 
   if (sent) {
     const deliveryPct = Math.round((delivered / sent) * 100);
     els.kpiDeliveryValue.textContent = deliveryPct + '%';
-    els.kpiDeliveryHint.textContent = `${delivered} de ${sent} mensagens entregues (status 3). Pendentes: ${pending} • Servidor recebeu: ${serverAck}`;
+    els.kpiDeliveryHint.textContent = `${delivered} de ${sent} mensagens entregues. Pendentes: ${pending} • Servidor: ${serverAck} • Falhas: ${failed}`;
   } else {
     els.kpiDeliveryValue.textContent = '—';
     els.kpiDeliveryHint.textContent = 'Envie uma mensagem para iniciar o monitoramento.';
@@ -310,8 +332,8 @@ function updateKpis(metrics) {
 
   els.kpiFailureValue.className = 'mt-1 text-2xl font-semibold text-indigo-600';
   if (sent) {
-    els.kpiFailureValue.textContent = String(read || 0);
-    els.kpiFailureHint.textContent = `Status 4 (Lidas): ${read} • Status 5 (Reproduzidas): ${played}`;
+    els.kpiFailureValue.textContent = String(read + played || 0);
+    els.kpiFailureHint.textContent = `Lidas: ${read} • Reproduzidas: ${played} • Falhas: ${failed}`;
   } else {
     els.kpiFailureValue.textContent = '0';
     els.kpiFailureHint.textContent = 'Envie mensagens para acompanhar leituras e reproduções.';
@@ -328,7 +350,7 @@ function updateKpis(metrics) {
   const inTransit = Number.isFinite(inTransitRaw) ? inTransitRaw : pending + serverAck;
   if (sent) {
     els.kpiTransitValue.textContent = String(inTransit);
-    els.kpiTransitHint.textContent = `Status 1: ${pending} • Status 2: ${serverAck}`;
+    els.kpiTransitHint.textContent = `Pendentes: ${pending} • Servidor: ${serverAck}`;
   } else {
     els.kpiTransitValue.textContent = '0';
     els.kpiTransitHint.textContent = 'Envie mensagens para acompanhar envios em trânsito.';
@@ -447,6 +469,68 @@ async function loadQRCode(iid, options = {}) {
   }
 }
 
+function toggleButtonLoading(button, loading, label = 'Exportando…') {
+  if (!button) return;
+  if (loading) {
+    if (!button.dataset.originalText) button.dataset.originalText = button.textContent || '';
+    button.textContent = label;
+    button.disabled = true;
+    button.classList.add('opacity-60', 'pointer-events-none');
+  } else {
+    if (button.dataset.originalText != null) {
+      button.textContent = button.dataset.originalText;
+      delete button.dataset.originalText;
+    }
+    button.disabled = false;
+    button.classList.remove('opacity-60', 'pointer-events-none');
+  }
+}
+
+async function exportMetrics(format) {
+  const iid = currentInstanceId;
+  if (!iid) {
+    showError('Selecione uma instância para exportar.');
+    return;
+  }
+
+  const button = format === 'csv' ? els.btnExportCsv : els.btnExportJson;
+  const apiKey = getApiKeyValue();
+  if (!apiKey) {
+    showError('Informe a API Key para exportar os dados.');
+    return;
+  }
+
+  try {
+    toggleButtonLoading(button, true);
+    const params = new URLSearchParams();
+    if (lastRangeRequest.from != null) params.set('from', String(lastRangeRequest.from));
+    if (lastRangeRequest.to != null) params.set('to', String(lastRangeRequest.to));
+    const query = params.toString();
+    const response = await fetch(`/instances/${iid}/export.${format}${query ? `?${query}` : ''}`, {
+      headers: { 'x-api-key': apiKey },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    const fallbackName = `${iid}-metrics.${format}`;
+    const fileName = match ? match[1] : fallbackName;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error('[metrics] export failed', err);
+    showError('Falha ao exportar métricas.');
+  } finally {
+    toggleButtonLoading(button, false);
+  }
+}
+
 export async function refreshSelected(options = {}) {
   const { silent = false, withSkeleton } = options;
   const iid = els.selInstance?.value;
@@ -457,6 +541,7 @@ export async function refreshSelected(options = {}) {
     resetNotes();
     resetChart();
     resetLogs();
+    setLogsLoading(false);
     hasLoadedSelected = false;
     currentInstanceId = null;
     currentConnectionState = null;
@@ -480,32 +565,57 @@ export async function refreshSelected(options = {}) {
     const data = await fetchJSON(`/instances/${iid}`, true);
     applyInstanceSnapshot(data, { refreshNote: true, forceQrReload: true });
 
-    const metrics = await fetchJSON(`/instances/${iid}/metrics`, true);
+    const rangeMins = Number(els.selRange?.value) || 240;
+    const now = Date.now();
+    const from = Math.max(0, now - rangeMins * 60 * 1000);
+    const params = new URLSearchParams();
+    params.set('from', String(from));
+    params.set('to', String(now));
+
+    const metrics = await fetchJSON(`/instances/${iid}/metrics?${params.toString()}`, true);
+    lastRangeRequest = { from, to: now };
+    lastRangeSummary = metrics?.range?.summary || null;
+
     updateKpis(metrics);
 
-    const rangeMins = Number(els.selRange?.value) || 240;
-    const since = Date.now() - rangeMins * 60 * 1000;
-    const timeline = (metrics.timeline || []).filter((p) => p.ts >= since);
+    const timeline = metrics.timeline || [];
 
-    if (chart && timeline.length > 1) {
+    if (chart && timeline.length) {
       chart.data.labels = timeline.map((p) => formatTimelineLabel(p.iso));
       chart.data.datasets[0].data = timeline.map((p) => p.sent ?? 0);
-      STATUS_CODES.forEach((code, idx) => {
-        const key = TIMELINE_FIELDS[code];
+      STATUS_SERIES.forEach((series, idx) => {
+        const key = TIMELINE_FIELDS[series.key];
         chart.data.datasets[idx + 1].data = timeline.map((p) => (key ? p[key] ?? 0 : 0));
       });
       chart.update();
-      if (els.chartHint) els.chartHint.textContent = `Exibindo ${timeline.length} pontos de dados.`;
     } else {
       resetChart();
     }
 
-    await refreshLogs({ silent: true });
+    if (els.chartHint) {
+      const effectiveRange = metrics?.range?.effective || { from, to: now };
+      const rangeLabel = formatRangeLabel(effectiveRange);
+      if (timeline.length) {
+        const sentDelta = Number(lastRangeSummary?.deltas?.sent);
+        const parts = [`${timeline.length} ponto${timeline.length > 1 ? 's' : ''}`];
+        if (rangeLabel) parts.push(`Intervalo: ${rangeLabel}`);
+        if (Number.isFinite(sentDelta)) parts.push(`Enviadas no período: ${sentDelta}`);
+        els.chartHint.textContent = parts.join(' • ');
+      } else {
+        els.chartHint.textContent = rangeLabel ? `Sem dados no intervalo selecionado (${rangeLabel}).` : 'Nenhum dado disponível ainda.';
+      }
+    }
+
+    setLogsLoading(true);
+    const effectiveRange = metrics?.range?.effective || { from, to: now };
+    await refreshLogs({ silent: true, range: effectiveRange });
+    setLogsLoading(false);
     hasLoadedSelected = true;
   } catch (err) {
     console.error('[metrics] erro ao buscar detalhes da instância', err);
     showError('Falha ao carregar detalhes da instância');
   } finally {
+    setLogsLoading(false);
     setMetricsLoading(false);
   }
 }
@@ -524,6 +634,8 @@ function applySavedRange() {
 export function initMetrics() {
   initChart();
   applySavedRange();
+  if (els.btnExportCsv) els.btnExportCsv.addEventListener('click', () => exportMetrics('csv'));
+  if (els.btnExportJson) els.btnExportJson.addEventListener('click', () => exportMetrics('json'));
   ensureInstanceStream();
   if (els.inpApiKey) {
     const scheduleReinit = () => {

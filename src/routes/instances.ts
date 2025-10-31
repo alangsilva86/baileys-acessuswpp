@@ -11,6 +11,7 @@ import {
   resetInstanceSession,
   saveInstancesIndex,
   type Instance,
+  type MetricsTimelineEntry,
   emitInstanceEvent,
   onInstanceEvent,
   type InstanceEventPayload,
@@ -161,6 +162,212 @@ function toIsoFromMs(value: number | null | undefined): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+interface MetricsRange {
+  from: number | null;
+  to: number | null;
+}
+
+interface AggregatedStatusCounts {
+  pending: number;
+  serverAck: number;
+  delivered: number;
+  read: number;
+  played: number;
+  failed: number;
+}
+
+interface TimelineSummary {
+  points: number;
+  durationMs: number;
+  first: MetricsTimelineEntry | null;
+  last: MetricsTimelineEntry | null;
+  deltas: {
+    sent: number;
+    delivered: number;
+    read: number;
+    played: number;
+    failed: number;
+  };
+  latest: AggregatedStatusCounts & { inFlight: number };
+  averages: {
+    rateInWindow: number;
+  };
+}
+
+function parseTimestampParam(value: unknown): number | null {
+  if (value == null) return null;
+  if (Array.isArray(value)) return parseTimestampParam(value[0]);
+  const str = String(value).trim();
+  if (!str) return null;
+  const numeric = Number(str);
+  if (Number.isFinite(numeric)) {
+    return numeric > 0 ? numeric : null;
+  }
+  const date = new Date(str);
+  const ts = date.getTime();
+  return Number.isNaN(ts) ? null : ts;
+}
+
+function parseRangeParams(query: Request['query']): MetricsRange {
+  const from = parseTimestampParam(query.from);
+  const to = parseTimestampParam(query.to);
+  if (from != null && to != null && from > to) {
+    return { from: to, to: from };
+  }
+  return { from, to };
+}
+
+function normalizeTimelineEntry(entry: MetricsTimelineEntry): MetricsTimelineEntry {
+  return {
+    ts: entry.ts,
+    iso: entry.iso || new Date(entry.ts).toISOString(),
+    sent: entry.sent ?? 0,
+    pending: entry.pending ?? 0,
+    serverAck: entry.serverAck ?? 0,
+    delivered: entry.delivered ?? 0,
+    read: entry.read ?? 0,
+    played: entry.played ?? 0,
+    failed: entry.failed ?? 0,
+    rateInWindow: entry.rateInWindow ?? 0,
+  };
+}
+
+function filterTimeline(entries: MetricsTimelineEntry[], range: MetricsRange): MetricsTimelineEntry[] {
+  if (!entries.length) return [];
+  const sorted = [...entries].sort((a, b) => a.ts - b.ts);
+  return sorted
+    .filter((entry) => {
+      if (range.from != null && entry.ts < range.from) return false;
+      if (range.to != null && entry.ts > range.to) return false;
+      return true;
+    })
+    .map((entry) => normalizeTimelineEntry(entry));
+}
+
+function summarizeTimeline(timeline: MetricsTimelineEntry[]): TimelineSummary {
+  if (!timeline.length) {
+    return {
+      points: 0,
+      durationMs: 0,
+      first: null,
+      last: null,
+      deltas: { sent: 0, delivered: 0, read: 0, played: 0, failed: 0 },
+      latest: { pending: 0, serverAck: 0, delivered: 0, read: 0, played: 0, failed: 0, inFlight: 0 },
+      averages: { rateInWindow: 0 },
+    };
+  }
+
+  const first = timeline[0];
+  const last = timeline[timeline.length - 1];
+  const delta = (field: keyof MetricsTimelineEntry): number => {
+    const start = first[field] ?? 0;
+    const end = last[field] ?? 0;
+    if (field === 'sent') {
+      return Math.max(0, Number(end) - Number(start));
+    }
+    return Math.max(0, Number(end) - Number(start));
+  };
+
+  const avgRate =
+    timeline.reduce((acc, entry) => acc + (Number(entry.rateInWindow) || 0), 0) / timeline.length;
+
+  const latest: AggregatedStatusCounts & { inFlight: number } = {
+    pending: Number(last.pending) || 0,
+    serverAck: Number(last.serverAck) || 0,
+    delivered: Number(last.delivered) || 0,
+    read: Number(last.read) || 0,
+    played: Number(last.played) || 0,
+    failed: Number(last.failed) || 0,
+    inFlight: (Number(last.pending) || 0) + (Number(last.serverAck) || 0),
+  };
+
+  return {
+    points: timeline.length,
+    durationMs: (last.ts ?? 0) - (first.ts ?? 0),
+    first,
+    last,
+    deltas: {
+      sent: delta('sent'),
+      delivered: delta('delivered'),
+      read: delta('read'),
+      played: delta('played'),
+      failed: delta('failed'),
+    },
+    latest,
+    averages: { rateInWindow: avgRate },
+  };
+}
+
+function aggregateStatusCounts(source: Record<string, number> | undefined): AggregatedStatusCounts {
+  const result: AggregatedStatusCounts = {
+    pending: 0,
+    serverAck: 0,
+    delivered: 0,
+    read: 0,
+    played: 0,
+    failed: 0,
+  };
+
+  if (!source) return result;
+
+  for (const [key, value] of Object.entries(source)) {
+    const count = Number(value);
+    if (!Number.isFinite(count) || count <= 0) continue;
+    const code = Number(key);
+    let bucket: keyof AggregatedStatusCounts | null = null;
+    if (code === 0) bucket = 'failed';
+    else if (code === 1) bucket = 'pending';
+    else if (code === 2) bucket = 'serverAck';
+    else if (code === 3) bucket = 'delivered';
+    else if (code === 4) bucket = 'read';
+    else if (code === 5) bucket = 'played';
+    else if (code >= 6) bucket = 'failed';
+    if (bucket) {
+      result[bucket] += count;
+    }
+  }
+
+  return result;
+}
+
+function buildMetricsPayload(inst: Instance, range: MetricsRange) {
+  const summary = serializeInstance(inst);
+  const { metricsStartedAt, counters: summaryCounters, ...rest } = summary;
+  const aggregatedStatus = aggregateStatusCounts(summaryCounters?.statusCounts || {});
+  const counters = summaryCounters
+    ? { ...summaryCounters, statusAggregated: aggregatedStatus }
+    : { statusAggregated: aggregatedStatus };
+
+  const timeline = filterTimeline(inst.metrics.timeline || [], range);
+  const effectiveFrom = timeline.length ? timeline[0].ts : null;
+  const effectiveTo = timeline.length ? timeline[timeline.length - 1].ts : null;
+  const timelineSummary = summarizeTimeline(timeline);
+
+  const delivery = {
+    ...aggregatedStatus,
+    inFlight: aggregatedStatus.pending + aggregatedStatus.serverAck,
+  };
+
+  const aggregates = {
+    status: aggregatedStatus,
+    timeline: timelineSummary,
+  };
+
+  return {
+    service: process.env.SERVICE_NAME || 'baileys-api',
+    ...rest,
+    counters,
+    startedAt: metricsStartedAt,
+    timeline,
+    delivery,
+    sessionDir: inst.dir,
+    range: {
+      requested: { from: range.from, to: range.to },
+      effective: { from: effectiveFrom, to: effectiveTo, points: timeline.length },
+      summary: timelineSummary,
+    },
+    aggregates,
+  };
 function connectionUpdatedAtIso(inst: Instance | undefined): string | null {
   return toIsoFromMs(inst?.connectionUpdatedAt ?? null);
 }
@@ -898,47 +1105,101 @@ router.get('/:iid/metrics', (req, res) => {
     return;
   }
 
-  const summary = serializeInstance(inst);
-  const { metricsStartedAt, ...rest } = summary;
-  const statusCounts = summary.counters?.statusCounts || {};
-  const deliverySummary = {
-    pending: Number(statusCounts['1']) || 0,
-    serverAck: Number(statusCounts['2']) || 0,
-    delivered: Number(statusCounts['3']) || 0,
-  };
-  const inFlight = deliverySummary.pending + deliverySummary.serverAck;
-  const delivery = { ...deliverySummary, inFlight };
-  const timeline = (inst.metrics.timeline || []).map((entry) => {
-    const hasNewStatusFields =
-      Object.prototype.hasOwnProperty.call(entry, 'serverAck') ||
-      Object.prototype.hasOwnProperty.call(entry, 'pending') ||
-      Object.prototype.hasOwnProperty.call(entry, 'read') ||
-      Object.prototype.hasOwnProperty.call(entry, 'played');
+  const payload = buildMetricsPayload(inst, parseRangeParams(req.query));
+  res.json(payload);
+});
 
-    const serverAck = entry.serverAck ?? (hasNewStatusFields ? 0 : (entry as any).delivered ?? 0);
+function csvEscape(value: unknown): string {
+  if (value == null) return '';
+  const text = String(value);
+  if (/[",\n]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
 
-    return {
-      ts: entry.ts,
-      iso: entry.iso || new Date(entry.ts).toISOString(),
-      sent: entry.sent ?? 0,
-      pending: entry.pending ?? 0,
-      serverAck,
-      delivered: hasNewStatusFields ? entry.delivered ?? 0 : 0,
-      read: entry.read ?? 0,
-      played: entry.played ?? 0,
-      failed: entry.failed ?? 0,
-      rateInWindow: entry.rateInWindow ?? 0,
-    };
-  });
+function buildCsvPayload(inst: Instance, range: MetricsRange): string {
+  const payload = buildMetricsPayload(inst, range);
+  const lines: string[] = [];
+  const generatedAt = new Date().toISOString();
+  lines.push(['meta', 'instanceId', payload.id].map(csvEscape).join(','));
+  lines.push(['meta', 'generatedAt', generatedAt].map(csvEscape).join(','));
+  lines.push(['meta', 'range.requested.from', payload.range?.requested?.from ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'range.requested.to', payload.range?.requested?.to ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'range.effective.from', payload.range?.effective?.from ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'range.effective.to', payload.range?.effective?.to ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'sent.total', payload.counters?.sent ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'sent.delta', payload.range?.summary?.deltas?.sent ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'delivery.pending', payload.delivery?.pending ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'delivery.serverAck', payload.delivery?.serverAck ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'delivery.delivered', payload.delivery?.delivered ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'delivery.read', payload.delivery?.read ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'delivery.played', payload.delivery?.played ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'delivery.failed', payload.delivery?.failed ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'delivery.inFlight', payload.delivery?.inFlight ?? ''].map(csvEscape).join(','));
+  lines.push('');
+  lines.push(
+    [
+      'timestamp',
+      'iso',
+      'sent',
+      'pending',
+      'serverAck',
+      'delivered',
+      'read',
+      'played',
+      'failed',
+      'rateInWindow',
+    ]
+      .map(csvEscape)
+      .join(','),
+  );
+  for (const point of payload.timeline || []) {
+    lines.push(
+      [
+        point.ts,
+        point.iso,
+        point.sent,
+        point.pending,
+        point.serverAck,
+        point.delivered,
+        point.read,
+        point.played,
+        point.failed,
+        point.rateInWindow,
+      ]
+        .map(csvEscape)
+        .join(','),
+    );
+  }
+  return lines.join('\n');
+}
 
-  res.json({
-    service: process.env.SERVICE_NAME || 'baileys-api',
-    ...rest,
-    startedAt: metricsStartedAt,
-    timeline,
-    delivery,
-    sessionDir: inst.dir,
-  });
+router.get('/:iid/export.json', (req, res) => {
+  const inst = getInstance(req.params.iid);
+  if (!inst) {
+    res.status(404).json({ error: 'instance_not_found' });
+    return;
+  }
+
+  const payload = buildMetricsPayload(inst, parseRangeParams(req.query));
+  const exportedAt = new Date().toISOString();
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="${inst.id}-metrics.json"`);
+  res.json({ exportedAt, ...payload });
+});
+
+router.get('/:iid/export.csv', (req, res) => {
+  const inst = getInstance(req.params.iid);
+  if (!inst) {
+    res.status(404).json({ error: 'instance_not_found' });
+    return;
+  }
+
+  const csv = buildCsvPayload(inst, parseRangeParams(req.query));
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${inst.id}-metrics.csv"`);
+  res.send(csv);
 });
 
 router.post(
@@ -1907,8 +2168,7 @@ router.post(
 function serializeInstance(inst: Instance) {
   const connected = inst.connectionState === 'open';
   const statusCounts = { ...inst.metrics.status_counts };
-  const pending = Number(statusCounts['1']) || 0;
-  const serverAck = Number(statusCounts['2']) || 0;
+  const aggregatedStatus = aggregateStatusCounts(statusCounts);
   return {
     id: inst.id,
     name: inst.name,
@@ -1937,7 +2197,8 @@ function serializeInstance(inst: Instance) {
       sent: inst.metrics.sent,
       byType: { ...inst.metrics.sent_by_type },
       statusCounts,
-      inFlight: pending + serverAck,
+      statusAggregated: aggregatedStatus,
+      inFlight: aggregatedStatus.pending + aggregatedStatus.serverAck,
     },
     last: { ...inst.metrics.last },
     rate: {

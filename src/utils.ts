@@ -8,6 +8,9 @@ const E164_BRAZIL = /^55\d{10,11}$/;
 const DEFAULT_SEND_TIMEOUT_MS = 25_000;
 const METRICS_TIMELINE_MAX = 288;
 const METRICS_TIMELINE_MIN_INTERVAL_MS = 5 * 60_000;
+const DEFAULT_ACK_WAIT_MS = 25_000;
+
+type AckWaiter = (status: number | null) => void;
 
 export function normalizeToE164BR(val: unknown): string | null {
   const digits = String(val ?? '').replace(/\D+/g, '');
@@ -67,7 +70,32 @@ export function waitForAck(inst: Instance, messageId: string): Promise<number | 
     return Promise.resolve(status);
   }
   const lastStatus = inst.metrics.last.lastStatusId === messageId ? inst.metrics.last.lastStatusCode : null;
-  return Promise.resolve(lastStatus ?? 0);
+  if (lastStatus != null) {
+    return Promise.resolve(lastStatus);
+  }
+
+  const timeoutMsRaw = Number(process.env.ACK_WAIT_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : DEFAULT_ACK_WAIT_MS;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let cleanup: () => void = () => {};
+    const finalize = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(code ?? 0);
+    };
+
+    cleanup = addAckWaiter(inst, messageId, finalize);
+    const timer = setTimeout(() => finalize(lastStatus ?? 0), timeoutMs);
+
+    const originalCleanup = cleanup;
+    cleanup = () => {
+      originalCleanup();
+      clearTimeout(timer);
+    };
+  });
 }
 
 export function recordMetricsSnapshot(inst: Instance, force = false): void {
@@ -84,6 +112,9 @@ export function recordMetricsSnapshot(inst: Instance, force = false): void {
 
   for (const status of inst.statusMap.values()) {
     switch (status) {
+      case 0:
+        failed += 1;
+        break;
       case 1:
         pending += 1;
         break;
@@ -133,5 +164,34 @@ export function recordMetricsSnapshot(inst: Instance, force = false): void {
 
   if (inst.metrics.timeline.length > METRICS_TIMELINE_MAX) {
     inst.metrics.timeline.splice(0, inst.metrics.timeline.length - METRICS_TIMELINE_MAX);
+  }
+}
+
+function addAckWaiter(inst: Instance, messageId: string, waiter: AckWaiter): () => void {
+  const bucket = inst.ackWaiters.get(messageId);
+  if (bucket) {
+    bucket.add(waiter);
+  } else {
+    inst.ackWaiters.set(messageId, new Set<AckWaiter>([waiter]));
+  }
+
+  return () => {
+    const current = inst.ackWaiters.get(messageId);
+    if (!current) return;
+    current.delete(waiter);
+    if (!current.size) inst.ackWaiters.delete(messageId);
+  };
+}
+
+export function resolveAckWaiters(inst: Instance, messageId: string, status: number | null): void {
+  const bucket = inst.ackWaiters.get(messageId);
+  if (!bucket?.size) return;
+  inst.ackWaiters.delete(messageId);
+  for (const waiter of bucket) {
+    try {
+      waiter(status);
+    } catch {
+      // ignore waiter errors to avoid crashing metrics updates
+    }
   }
 }

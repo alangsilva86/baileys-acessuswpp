@@ -41,16 +41,28 @@
     </section>
 
     <section class="p-4 bg-white rounded-2xl shadow">
-      <div class="flex items-center justify-between gap-4 mb-4">
+      <div class="flex items-center justify-between gap-4 mb-4 flex-wrap">
         <h2 class="font-semibold">Métricas da Instância</h2>
-        <select id="selRange" class="border rounded-lg px-2 py-1 text-sm">
-          <option value="30">Últimos 30min</option>
-          <option value="60">Última 1h</option>
-          <option value="180">Últimas 3h</option>
-          <option value="360">Últimas 6h</option>
-          <option value="720">Últimas 12h</option>
-          <option value="1440">Últimas 24h</option>
-        </select>
+        <div class="flex items-center gap-2 flex-wrap">
+          <select id="selRange" class="border rounded-lg px-2 py-1 text-sm">
+            <option value="30">Últimos 30min</option>
+            <option value="60">Última 1h</option>
+            <option value="180">Últimas 3h</option>
+            <option value="360">Últimas 6h</option>
+            <option value="720">Últimas 12h</option>
+            <option value="1440">Últimas 24h</option>
+          </select>
+          <button
+            id="btnExportCsv"
+            class="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-sm rounded-lg"
+            type="button"
+          >Exportar CSV</button>
+          <button
+            id="btnExportJson"
+            class="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-sm rounded-lg"
+            type="button"
+          >Exportar JSON</button>
+        </div>
       </div>
 
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
@@ -294,6 +306,11 @@
         <button id="btnRefreshLogs" class="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-sm rounded-lg">Atualizar</button>
       </div>
       <p class="text-xs text-slate-500">Visualize as 20 últimas mensagens inbound, outbound e chamadas de webhook.</p>
+      <div id="logsSkeleton" class="space-y-2 hidden">
+        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
+        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
+        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
+      </div>
       <div id="logsEmpty" class="text-sm text-slate-500 bg-slate-50 rounded-xl p-3">Nenhum evento encontrado ainda para esta instância.</div>
       <div id="logsList" class="space-y-2"></div>
     </section>

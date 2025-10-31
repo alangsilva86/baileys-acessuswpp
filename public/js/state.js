@@ -32,6 +32,8 @@ export const els = {
   kpiTransitHint: q('kpiTransitHint'),
   chartHint: q('chartHint'),
   metricsSkeleton: q('metricsSkeleton'),
+  btnExportCsv: q('btnExportCsv'),
+  btnExportJson: q('btnExportJson'),
 
   // QR / ações rápidas
   qrWrap: q('qrWrap'),
@@ -82,6 +84,7 @@ export const els = {
   btnRefreshLogs: q('btnRefreshLogs'),
   logsList: q('logsList'),
   logsEmpty: q('logsEmpty'),
+  logsSkeleton: q('logsSkeleton'),
 
   // Modal
   modalDelete: q('modalDelete'),
@@ -96,52 +99,80 @@ export const els = {
   pairModalCopy: q('pairModalCopy'),
 };
 
-export const STATUS_META = {
-  '1': {
+export const STATUS_SERIES = [
+  {
+    key: 'pending',
+    codes: ['1'],
     name: 'Pendentes',
-    description: 'A mensagem saiu do app, mas ainda não foi entregue ao servidor do WhatsApp.',
+    description: 'Aguardando confirmação do servidor do WhatsApp.',
     textClass: 'text-amber-600',
     chartColor: '#f59e0b',
     chartBackground: 'rgba(245,158,11,0.15)',
+    timelineKey: 'pending',
   },
-  '2': {
+  {
+    key: 'serverAck',
+    codes: ['2'],
     name: 'Servidor recebeu',
     description: 'O servidor do WhatsApp confirmou o recebimento (✔ cinza).',
     textClass: 'text-sky-600',
     chartColor: '#3b82f6',
     chartBackground: 'rgba(59,130,246,0.15)',
+    timelineKey: 'serverAck',
   },
-  '3': {
+  {
+    key: 'delivered',
+    codes: ['3'],
     name: 'Entregues',
-    description: 'A mensagem chegou ao dispositivo do destinatário (✔✔ cinza).',
+    description: 'Mensagem entregue ao destinatário (✔✔ cinza).',
     textClass: 'text-emerald-600',
     chartColor: '#22c55e',
     chartBackground: 'rgba(34,197,94,0.15)',
+    timelineKey: 'delivered',
   },
-  '4': {
+  {
+    key: 'read',
+    codes: ['4'],
     name: 'Lidas',
-    description: 'O destinatário visualizou a mensagem (✔✔ azul).',
+    description: 'Destinatário visualizou a mensagem (✔✔ azul).',
     textClass: 'text-indigo-600',
     chartColor: '#6366f1',
     chartBackground: 'rgba(99,102,241,0.15)',
+    timelineKey: 'read',
   },
-  '5': {
+  {
+    key: 'played',
+    codes: ['5'],
     name: 'Reproduzidas',
     description: 'Áudio ou mensagem de voz reproduzidos (ícone play azul).',
     textClass: 'text-pink-600',
     chartColor: '#ec4899',
     chartBackground: 'rgba(236,72,153,0.15)',
+    timelineKey: 'played',
   },
-};
+  {
+    key: 'failed',
+    codes: ['0'],
+    name: 'Falhas',
+    description: 'Mensagens com erro definitivo ou recusadas.',
+    textClass: 'text-rose-600',
+    chartColor: '#f87171',
+    chartBackground: 'rgba(248,113,113,0.15)',
+    timelineKey: 'failed',
+  },
+];
 
-export const STATUS_CODES = ['1', '2', '3', '4', '5'];
-export const TIMELINE_FIELDS = {
-  '1': 'pending',
-  '2': 'serverAck',
-  '3': 'delivered',
-  '4': 'read',
-  '5': 'played',
-};
+export const STATUS_META = STATUS_SERIES.reduce((acc, item) => {
+  acc[item.key] = item;
+  return acc;
+}, {} as Record<string, (typeof STATUS_SERIES)[number]>);
+
+export const STATUS_KEYS = STATUS_SERIES.map((item) => item.key);
+
+export const TIMELINE_FIELDS = STATUS_SERIES.reduce((acc, item) => {
+  if (item.timelineKey) acc[item.key] = item.timelineKey;
+  return acc;
+}, {} as Record<string, string>);
 
 export const NOTE_STATE = {
   lastSaved: '',
@@ -406,6 +437,10 @@ export function setMetricsLoading(isLoading) {
   toggleHidden(els.metricsSkeleton, !isLoading);
 }
 
+export function setLogsLoading(isLoading) {
+  if (els.logsSkeleton) toggleHidden(els.logsSkeleton, !isLoading);
+}
+
 export function setQrState(state, message) {
   if (els.qrWrap) {
     els.qrWrap.classList.remove('border-emerald-300', 'border-rose-300', 'border-slate-200', 'border-sky-300', 'border-amber-300');
@@ -428,12 +463,32 @@ export function validateE164(value) {
 
 export function getStatusCounts(src) {
   const base = src || {};
-  const result = {};
-  STATUS_CODES.forEach((code) => {
-    const num = Number(base[code]);
-    result[code] = Number.isFinite(num) ? num : 0;
+  const totals = {} as Record<string, number>;
+  STATUS_SERIES.forEach((series) => {
+    totals[series.key] = 0;
   });
-  return result;
+
+  const handled = new Set<string>();
+  STATUS_SERIES.forEach((series) => {
+    series.codes.forEach((code) => {
+      const key = String(code);
+      handled.add(key);
+      const value = Number(base[key]);
+      if (Number.isFinite(value)) totals[series.key] += value;
+    });
+  });
+
+  for (const [key, value] of Object.entries(base)) {
+    if (handled.has(key)) continue;
+    const numeric = Number(key);
+    const count = Number(value);
+    if (!Number.isFinite(count)) continue;
+    if (Number.isFinite(numeric) && numeric >= 6) {
+      totals.failed += count;
+    }
+  }
+
+  return totals;
 }
 
 const dateTimeFmt = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' });

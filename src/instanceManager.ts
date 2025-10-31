@@ -79,6 +79,7 @@ export interface Instance {
   statusMap: Map<string, number>;
   statusTimestamps: Map<string, number>;
   statusCleanupTimer: NodeJS.Timeout | null;
+  ackWaiters: Map<string, Set<(status: number | null) => void>>;
   rateWindow: number[];
   context: InstanceContext | null;
   connectionState: 'connecting' | 'open' | 'close' | 'qr_timeout';
@@ -221,7 +222,7 @@ function createEmptyMetrics(): InstanceMetrics {
     startedAt: Date.now(),
     sent: 0,
     sent_by_type: { text: 0, image: 0, video: 0, audio: 0, document: 0, group: 0, buttons: 0, lists: 0 },
-    status_counts: { '1': 0, '2': 0, '3': 0, '4': 0, '5': 0 },
+    status_counts: { '0': 0, '1': 0, '2': 0, '3': 0, '4': 0, '5': 0 },
     last: { sentId: null, lastStatusId: null, lastStatusCode: null },
     timeline: [],
   };
@@ -260,6 +261,7 @@ function createInstanceRecord(
     statusMap: new Map(),
     statusTimestamps: new Map(),
     statusCleanupTimer: null,
+    ackWaiters: new Map(),
     rateWindow: [],
     context: null,
     connectionState: 'close',
