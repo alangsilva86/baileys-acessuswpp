@@ -68,6 +68,10 @@ npm start
 - `SEND_TIMEOUT_MS`: Timeout padrão para envios ativos, aplicado tanto às rotas HTTP quanto ao `MessageService` (padrão: 25000)
 - `POLL_STORE_TTL_MS`: Tempo de retenção das mensagens de enquete (padrão: 6h)
 - `POLL_FEEDBACK_TEMPLATE`: Template opcional para resposta automática após voto em enquete
+- `STATUS_TTL_MS`: Janela (ms) antes de limpar entregas finalizadas do cache interno (`10 minutos` por padrão)
+- `STATUS_SWEEP_INTERVAL_MS`: Frequência (ms) de varredura para expirar status antigos (padrão: `60000`)
+- `POLL_METADATA_ENCRYPTION_KEY`, `APP_ENCRYPTION_SECRET` e `APP_ENCRYPTION_KEY`: segredos opcionais para criptografar os metadados de enquetes em disco — defina ao menos um para preservar chaves entre reinícios
+- `WEBHOOK_RETRY_FAST`: quando definido como `1`, desativa o backoff progressivo de tentativas de entrega (útil em testes locais)
 
 ### Webhooks
 
@@ -112,6 +116,13 @@ Todo payload de mensagem inclui o bloco `contact`:
 - `owner` indica a origem lógica (`device` para mensagens enviadas pela instância, `user` para contatos/grupos externos, `server` quando não é possível inferir).
 - `phone` segue o formato E.164 (com `+`). Quando não for possível extrair o número, o campo virá como `null`.
 - `isGroup` fica `true` quando `remoteJid` termina com `@g.us`.
+
+##### Identificadores LID e mapeamento PN↔LID
+
+- A partir da API 7.x, o WhatsApp tende a expor `remoteJid`/`participant` no namespace `@lid` para conversas protegidas. O backend preserva esse valor bruto em `contact.remoteJid`, e o dashboard exibe exatamente o que o socket Baileys informa (`instance.user.id`).
+- O campo `phone` é derivado tentando remover o domínio do JID e normalizando para E.164; isso funciona para JIDs `@s.whatsapp.net` e para participantes de grupos, mas JIDs puramente `@lid` permanecem como `null`.
+- Para enquetes e recibos, o `PollService` coleta pistas de recibos (`lid`, `participant`, `remoteJid`) e gera combinações equivalentes entre `@lid` e `@s.whatsapp.net` antes de tentar descriptografar votos. Essa heurística também registra nos logs qual versão foi aceita, ajudando a mapear um LID ao respectivo PN quando disponível.
+- Eventos `WHATSAPP_MESSAGES_UPDATE` carregam os recibos crus do Baileys (incluindo `lid`/`senderLid`), permitindo que integrações persistam o relacionamento PN↔LID conforme necessário.
 
 Os blocos `metadata` trazem a procedência do evento:
 
@@ -353,6 +364,12 @@ Para mensagens com mídia, o bloco `message` inclui o objeto `media` com detalhe
 - `POST /instances/:id/pair` - Solicitar código de pareamento
 - `POST /instances/:id/logout` - Desconectar sessão
 
+##### Solicitar código de pareamento (`POST /instances/:id/pair`)
+
+- Envie `{ "phoneNumber": "55DDDNUMERO" }` quando a instância estiver conectada ou em `connecting`. O backend valida o formato, persiste o telefone e retorna `pairingCode` direto do Baileys.
+- Após definir `phoneNumber`, o runtime tenta regenerar códigos automaticamente sempre que o socket indicar `qr refs attempts ended` ou timeouts semelhantes, evitando intervenção manual.
+- Para revogar o pareamento armazenado, use `POST /instances/:id/session/wipe` ou atualize o telefone com um novo POST `/instances/:id/pair`.
+
 #### Mensagens
 
 - `POST /instances/:id/send-text` - Enviar mensagem de texto
@@ -375,8 +392,7 @@ Envie até **3 botões de resposta rápida** para um contato usando `templateBut
     { "id": "opt-1", "title": "Primeira opção" },
     { "id": "opt-2", "title": "Segunda opção" }
   ],
-  "footer": "Texto opcional",
-  "waitAckMs": 1000
+  "footer": "Texto opcional"
 }
 ```
 
@@ -384,7 +400,6 @@ Envie até **3 botões de resposta rápida** para um contato usando `templateBut
 - `text` é obrigatório e será exibido como corpo da mensagem.
 - `options` é obrigatório, aceita de 1 a 3 itens com campos `id` (único) e `title`.
 - `footer` é opcional e aparece abaixo dos botões.
-- `waitAckMs`, quando informado, aguarda o ACK do WhatsApp pelo tempo indicado (em ms) antes de responder.
 
 Resposta típica:
 
@@ -392,12 +407,11 @@ Resposta típica:
 {
   "id": "BAE5...",
   "messageId": "BAE5...",
-  "status": 1,
-  "ack": 2
+  "status": 1
 }
 ```
 
-O campo `ack` será `null` se `waitAckMs` não for enviado ou se o status não chegar a tempo. O mesmo formato de resposta é adotado pelos endpoints `send-text` e `send-list`.
+O campo `status` reflete o último código retornado pelo Baileys no momento da escrita da mensagem (ex.: `1` para "pendente"). Não há mais espera automática por ACK — acompanhe a evolução pela rota `GET /instances/:id/status?id=<messageId>` ou pelo webhook `WHATSAPP_MESSAGES_UPDATE`, que avisam quando o WhatsApp promove a mensagem para os status `2` (servidor recebeu), `3` (entregue), `4` (lida) ou `5` (reproduzida).
 
 ##### Enviar listas interativas (`POST /instances/:id/send-list`)
 
@@ -424,8 +438,7 @@ Monte menus com seções usando mensagens do tipo `list` do Baileys. Exemplo de 
         { "id": "cheesecake", "title": "Cheesecake" }
       ]
     }
-  ],
-  "waitAckMs": 1500
+  ]
 }
 ```
 
@@ -433,7 +446,6 @@ Monte menus com seções usando mensagens do tipo `list` do Baileys. Exemplo de 
 - Cada seção pode ter um `title` opcional e precisa de pelo menos uma opção.
 - Cada opção exige `id` (único dentro da mensagem) e `title`; `description` é opcional e aparece como legenda.
 - `text`, `footer` e `title` são exibidos como corpo, rodapé e cabeçalho da mensagem, respectivamente.
-- `waitAckMs` funciona da mesma forma que em `send-text`/`send-buttons`.
 
 Resposta:
 
@@ -441,12 +453,17 @@ Resposta:
 {
   "id": "BAE6...",
   "messageId": "BAE6...",
-  "status": 1,
-  "ack": null
+  "status": 1
 }
 ```
 
-O campo `messageId` é sempre retornado como alias de `id`, facilitando integrações que esperam essa nomenclatura.
+`messageId` é sempre retornado como alias de `id` e deve ser usado para consultar a entrega como descrito acima.
+
+###### Monitorar entrega
+
+- `GET /instances/:id/status?id=<messageId>` retorna o status mais recente armazenado na instância para o ID informado (ou `null` quando expirado). Os códigos seguem a escala oficial do WhatsApp: `1` pendente, `2` servidor recebeu, `3` entregue, `4` lida e `5` reproduzida.
+- Webhooks `WHATSAPP_MESSAGES_UPDATE` e o event store `/instances/:id/events` emitem as mesmas transições em tempo real — use-os para reagir a lidas/entregas sem polling.
+- O dashboard consolida esses valores em `counters.statusCounts` e na timeline de métricas. Por padrão, itens finalizados permanecem disponíveis por até `STATUS_TTL_MS` (10 minutos, ajustável).
 
 #### Grupos
 
@@ -602,7 +619,6 @@ Envia arquivos de mídia para um contato ou grupo. Os parâmetros aceitos são:
   - `mimetype`: MIME type do arquivo (ex.: `image/jpeg`, `video/mp4`, `audio/mpeg`, `application/pdf`).
   - `fileName`: nome do arquivo (obrigatório para documentos; opcional nos demais tipos).
 - `caption` (string, opcional): legenda a ser anexada à mídia.
-- `waitAckMs` (number, opcional): tempo em milissegundos para aguardar o ACK da mensagem.
 
 > **Limites:** uploads em base64 são limitados a 16 MB por mensagem. Para URLs, apenas protocolos `http` ou `https` são aceitos. Recomenda-se utilizar os MIME types suportados oficialmente pelo WhatsApp (`image/jpeg`, `image/png`, `video/mp4`, `audio/mpeg`, `application/pdf`, entre outros).
 
@@ -618,12 +634,11 @@ POST /instances/meu-bot/send-media
     "base64": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...",
     "fileName": "catalogo.jpg",
     "mimetype": "image/jpeg"
-  },
-  "waitAckMs": 5000
+  }
 }
 ```
 
-O endpoint retorna o `id` da mensagem enviada, o status informado pelo WhatsApp, além de metadados da mídia (`type`, `mimetype`, `fileName`, `size` e `source`).
+O endpoint retorna o `id` da mensagem enviada, o status informado pelo WhatsApp e metadados da mídia (`type`, `mimetype`, `fileName`, `size` e `source`). Mensagens com mídia seguem o mesmo fluxo de entrega assíncrona descrito em [Monitorar entrega](#monitorar-entrega).
 
 ## Estrutura do Projeto
 

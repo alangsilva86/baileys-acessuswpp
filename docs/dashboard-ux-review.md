@@ -14,7 +14,7 @@ O dashboard atual é construído com HTML estático (`public/index.html`) estili
 ### Etapa 2 — Seleção e gerenciamento de instâncias
 - **Comportamento**: A lista de instâncias popula `<select id="selInstance">` e gera cards dinâmicos com estatísticas. Ações inline permitem editar nome/notas, selecionar, carregar QR, logout, wipe e exclusão (com modal).
 - **Dependências técnicas**: Endpoints `GET/POST/PATCH/DELETE /instances`, componentes HTML gerados dinamicamente, `fetchJSON()` para chamadas autenticadas, modal `#modalDelete`.
-- **Observações**: Cards refletem contadores por status (1–5) e uso de rate limit.
+- **Observações**: Cards refletem contadores por status (1–5) e uso de rate limit. O cabeçalho exibe `inst.user.id` exatamente como informado pelo socket, portanto IDs `@lid` aparecem sem normalização.
 
 ### Etapa 3 — Contexto da instância e notas
 - **Comportamento**: Ao selecionar uma instância, o bloco "Contexto da instância" é exibido com textarea sincronizada e metadados de criação/atualização (`metadata.createdAt`, `metadata.updatedAt`).
@@ -23,13 +23,13 @@ O dashboard atual é construído com HTML estático (`public/index.html`) estili
 
 ### Etapa 4 — Métricas e gráfico de timeline
 - **Comportamento**: KPIs e gráfico de linha atualizam com dados de `/instances/:id/metrics`. Filtro `#selRange` determina janela em minutos armazenada em `localStorage`.
-- **Dependências técnicas**: Endpoint `GET /instances/:id/metrics`, estrutura `metrics.counters`, `metrics.rate`, `metrics.ack`, timeline com campos `sent`, `pending`, `serverAck`, `delivered`, `read`, `played`.
-- **Observações**: Falta fallback visual além de texto quando não há dados; atualizações dependem do polling global.
+- **Dependências técnicas**: Endpoint `GET /instances/:id/metrics`, estrutura `metrics.counters` (com `statusCounts` 1–5), `metrics.rate` e timeline `sent/pending/serverAck/delivered/read/played`. Status são limpos automaticamente após `STATUS_TTL_MS`.
+- **Observações**: Falta fallback visual além de texto quando não há dados; atualizações dependem do polling global e não há mais exibição de tempos médios de ACK porque o backend responde imediatamente após o envio.
 
 ### Etapa 5 — Ações de sessão e QR Code
 - **Comportamento**: Área de QR mostra imagem carregada via `/instances/:id/qr.png` quando desconectada. Botões executam `logout`, `wipe` e `pair` (gera código de pareamento copiado para clipboard).
 - **Dependências técnicas**: Endpoints `/instances/:id/qr.png`, `/instances/:id/logout`, `/instances/:id/wipe`, `/instances/:id/pair`, uso de API Key (`x-api-key`) e manipulação de `navigator.clipboard`.
-- **Observações**: Feedback textual em `#qrHint`; ausência de estados carregando/erro visuais além de texto.
+- **Observações**: Feedback textual em `#qrHint`; ausência de estados carregando/erro visuais além de texto. Após informar `phoneNumber` em `pair`, o backend passa a reenviar códigos automaticamente em timeouts do QR (não há indicador visual dessa automação).
 
 ### Etapa 6 — Envio rápido
 - **Comportamento**: Formulário "Envio Rápido" solicita API Key, telefone e mensagem, envia `POST /instances/:id/send-text` e exibe JSON de resposta em `#sendOut`.
