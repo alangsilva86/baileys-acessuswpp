@@ -31,6 +31,7 @@ import {
   normalizeJid,
   recordVoteSelection,
 } from './pollMetadata.js';
+import type { LidMappingStore } from '../lidMappingStore.js';
 
 export interface SendTextOptions {
   timeoutMs?: number;
@@ -126,6 +127,7 @@ interface StructuredMessageEventPayload extends BrokerEventPayload {
 export interface MessageServiceOptions {
   eventStore?: BrokerEventStore;
   instanceId: string;
+  mappingStore?: LidMappingStore | null;
 }
 
 /* --------------------------------- helpers -------------------------------- */
@@ -430,6 +432,7 @@ function buildMediaPayloadFromMessage(message: WAMessage): MediaMetadataPayload 
 export class MessageService {
   private readonly eventStore?: BrokerEventStore;
   private readonly instanceId: string;
+  private readonly mappingStore: LidMappingStore | null;
 
   constructor(
     private readonly sock: WASocket,
@@ -439,6 +442,7 @@ export class MessageService {
   ) {
     this.eventStore = options.eventStore;
     this.instanceId = options.instanceId;
+    this.mappingStore = options.mappingStore ?? null;
   }
 
   async sendText(jid: string, text: string, options: SendTextOptions = {}): Promise<WAMessage> {
@@ -608,11 +612,11 @@ export class MessageService {
     direction: BrokerEventDirection,
     messageOverrides: StructuredMessageOverrides = {},
   ): StructuredMessageEventPayload {
-    const lead = mapLeadFromMessage(message);
+    const lead = mapLeadFromMessage(message, { mappingStore: this.mappingStore });
     const contact = buildContactPayload(lead);
 
     const messageId = message.key?.id ?? null;
-    const chatId = message.key?.remoteJid ?? null;
+    const chatId = lead.remoteJid ?? message.key?.remoteJid ?? null;
 
     const extractedText = extractMessageText(message);
 
@@ -654,7 +658,12 @@ export class MessageService {
         const pollId = pollUpdate.pollCreationMessageKey?.id ?? null;
         const pollRemoteRaw =
           pollUpdate.pollCreationMessageKey?.remoteJid ?? message.key?.remoteJid ?? null;
-        const normalizedRemote = normalizeJid(pollRemoteRaw);
+        const pollRemoteAlt =
+          (pollUpdate.pollCreationMessageKey as any)?.remoteJidAlt ??
+          (message.key as any)?.remoteJidAlt ??
+          null;
+        const normalizedRemote =
+          this.mappingStore?.resolveRemoteJid(pollRemoteRaw, pollRemoteAlt) ?? normalizeJid(pollRemoteRaw);
         const metadata =
           (pollId ? getPollMetadataFromCache(pollId, normalizedRemote) : null) ?? null;
 

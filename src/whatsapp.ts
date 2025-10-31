@@ -107,6 +107,22 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   inst.context = null;
 
   sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('chats.phoneNumberShare', (payload: { lid?: string; jid?: string }) => {
+    const added = inst.lidMapping.rememberMapping(payload?.jid, payload?.lid);
+    if (added) {
+      logger.debug({ iid: inst.id, jid: payload?.jid, lid: payload?.lid }, 'lidMapping.share');
+    }
+  });
+  sock.ev.on('lid-mapping.update' as unknown as keyof BaileysEventMap, (payload: unknown) => {
+    try {
+      const count = inst.lidMapping.ingestUpdate(payload);
+      if (count > 0) {
+        logger.debug({ iid: inst.id, count }, 'lidMapping.update');
+      }
+    } catch (err) {
+      logger.warn({ iid: inst.id, err }, 'lidMapping.update.failed');
+    }
+  });
 
   const webhook = new WebhookClient({
     instanceId: inst.id,
@@ -115,8 +131,17 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     eventStore: brokerEventStore,
   });
 
-  const messageService = new MessageService(sock, webhook, logger, { eventStore: brokerEventStore, instanceId: inst.id });
-  const pollService = new PollService(sock, webhook, logger, { messageService, eventStore: brokerEventStore, instanceId: inst.id });
+  const messageService = new MessageService(sock, webhook, logger, {
+    eventStore: brokerEventStore,
+    instanceId: inst.id,
+    mappingStore: inst.lidMapping,
+  });
+  const pollService = new PollService(sock, webhook, logger, {
+    messageService,
+    eventStore: brokerEventStore,
+    instanceId: inst.id,
+    mappingStore: inst.lidMapping,
+  });
 
   inst.context = { messageService, pollService, webhook };
   inst.stopping = false;
