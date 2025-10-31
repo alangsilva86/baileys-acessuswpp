@@ -23,6 +23,28 @@ import {
 
 let hasLoadedInstances = false;
 let refreshInstancesInFlight = null;
+const instanceEtags = new Map();
+let lastInstancesSignature = '';
+let lastSelectedInstanceEtag = null;
+
+function computeInstanceEtag(inst) {
+  if (!inst) return '';
+  const directKeys = ['etag', 'updatedAt', 'updated_at', 'updated_at_ms', 'connectionUpdatedAt'];
+  for (const key of directKeys) {
+    const value = inst[key];
+    if (value != null && value !== '') return String(value);
+  }
+  if (inst?.metadata?.updatedAt) return String(inst.metadata.updatedAt);
+  if (inst?.metadata?.createdAt) return String(inst.metadata.createdAt);
+  if (inst?.counters?.sent != null) return `${inst.id}:${inst.counters.sent}`;
+  return `${inst.id}:${inst.name || ''}:${inst.connectionState || ''}`;
+}
+
+function buildInstancesSignature(data = []) {
+  const parts = data.map((inst) => `${inst.id}:${computeInstanceEtag(inst)}`);
+  parts.sort();
+  return parts.join('|');
+}
 
 function escapeHtml(val) {
   return String(val ?? '').replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch] || ch);
@@ -62,6 +84,7 @@ export async function refreshInstances(options = {}) {
   if (shouldShowSkeleton || !hasLoadedInstances) setCardsLoading(true);
 
   refreshInstancesInFlight = (async () => {
+    let result = { changed: false, selectedChanged: false };
     try {
       const data = await fetchJSON('/instances', true);
       updateInstanceLocksFromSnapshot(data);
@@ -69,6 +92,12 @@ export async function refreshInstances(options = {}) {
       if (els.selInstance) els.selInstance.textContent = '';
 
       if (!Array.isArray(data) || !data.length) {
+        const hadLoadedBefore = hasLoadedInstances;
+        const prevSignature = lastInstancesSignature;
+        const prevSelectedEtag = lastSelectedInstanceEtag;
+        instanceEtags.clear();
+        lastInstancesSignature = '';
+        lastSelectedInstanceEtag = null;
         if (els.selInstance) els.selInstance.value = '';
         if (els.cards) {
           els.cards.innerHTML = '<div class="p-4 bg-white rounded-2xl shadow text-sm text-slate-500">Nenhuma instância cadastrada ainda. Clique em “+ Nova instância”.</div>';
@@ -80,8 +109,24 @@ export async function refreshInstances(options = {}) {
         setQrState('idle', 'Selecione uma instância para visualizar o QR.');
         setBadgeState('info', 'Crie uma instância para começar', 4000);
         hasLoadedInstances = true;
-        return;
+        const listChanged = !hadLoadedBefore || prevSignature !== '';
+        const selectedChanged = prevSelectedEtag !== null;
+        result = { changed: listChanged || selectedChanged, selectedChanged };
+        return result;
       }
+
+      const hadLoadedBefore = hasLoadedInstances;
+      const prevSelectedEtag = lastSelectedInstanceEtag;
+      const previousSignature = lastInstancesSignature;
+      const nextEtags = new Map();
+      const nextSignature = buildInstancesSignature(data);
+      const listChanged = !hadLoadedBefore || previousSignature !== nextSignature;
+      data.forEach((inst) => {
+        nextEtags.set(inst.id, computeInstanceEtag(inst));
+      });
+      instanceEtags.clear();
+      nextEtags.forEach((val, key) => instanceEtags.set(key, val));
+      lastInstancesSignature = nextSignature;
 
       let keepPrev = false;
       data.forEach((inst) => {
@@ -101,6 +146,9 @@ export async function refreshInstances(options = {}) {
 
       if (els.cards) els.cards.innerHTML = '';
       const selected = els.selInstance?.value;
+      const selectedEtag = selected ? instanceEtags.get(selected) || null : null;
+      const selectedChanged = selectedEtag !== prevSelectedEtag;
+      lastSelectedInstanceEtag = selectedEtag;
       data.forEach((inst) => {
         const connection = describeConnection(inst);
         const card = document.createElement('article');
@@ -172,9 +220,11 @@ export async function refreshInstances(options = {}) {
       });
 
       hasLoadedInstances = true;
-      if (!skipSelected) {
+      if (!skipSelected && (selectedChanged || !hadLoadedBefore)) {
         await refreshSelected({ silent, withSkeleton: !silent });
       }
+
+      result = { changed: listChanged || selectedChanged, selectedChanged };
     } catch (err) {
       console.error('[instances] erro ao buscar instâncias', err);
       showError('Falha ao carregar instâncias');
@@ -186,6 +236,8 @@ export async function refreshInstances(options = {}) {
         setSelectedInstanceActionsDisabled(currentSelected, isInstanceLocked(currentSelected));
       }
     }
+
+    return result;
   })();
 
   return refreshInstancesInFlight;

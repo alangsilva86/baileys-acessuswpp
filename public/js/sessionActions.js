@@ -3,6 +3,7 @@ import { handleSaveMetadata, refreshInstances } from './instances.js';
 import { refreshSelected } from './metrics.js';
 import {
   els,
+  formatDateTime,
   isInstanceLocked,
   lockInstanceActions,
   setBadgeState,
@@ -13,6 +14,28 @@ import {
   showError,
   validateE164,
 } from './state.js';
+
+function handleInstanceOfflineError(err) {
+  if (!err || typeof err !== 'object') return false;
+  const status = Number(err.status);
+  if (!Number.isFinite(status) || status !== 503) return false;
+  const body = err.body && typeof err.body === 'object' ? err.body : null;
+  if (!body || body.error !== 'instance_offline') return false;
+
+  const state = typeof body.state === 'string' && body.state.trim() ? body.state.trim() : 'desconhecido';
+  const updatedAtRaw = typeof body.updatedAt === 'string' ? body.updatedAt : null;
+  const updatedAt = updatedAtRaw ? formatDateTime(updatedAtRaw) : '';
+  const statusDetails = updatedAt ? `${state} • atualizado em ${updatedAt}` : state;
+  const message = `Instância offline (${statusDetails}). Aguarde novo QR ou acione o botão “Wipe”.`;
+
+  console.warn('[session] instância offline', { state, updatedAt: updatedAtRaw });
+  setBadgeState('status-disconnected', message, 12000);
+  if (els.qrHint) {
+    const qrHintDetails = updatedAt ? `${state} • ${updatedAt}` : state;
+    els.qrHint.textContent = `Instância offline (${qrHintDetails}). Aguarde novo QR ou use “Wipe”.`;
+  }
+  return true;
+}
 
 function openDeleteModal(iid, name) {
   if (!els.modalDelete) return;
@@ -272,6 +295,7 @@ function bindNewInstance() {
       setBadgeState('update', 'Instância criada (' + label + ')', 4000);
       await refreshInstances({ withSkeleton: true });
     } catch (err) {
+      if (handleInstanceOfflineError(err)) return;
       console.error('[session] erro ao criar instância', err);
       showError('Falha ao criar instância');
       alert('Falha ao criar instância: ' + err.message);
@@ -347,6 +371,7 @@ function bindHeaderActions() {
         }
         setQrState('disconnected', 'Código gerado. Use o pareamento no app.');
       } catch (err) {
+        if (handleInstanceOfflineError(err)) return;
         console.error('[session] erro ao gerar código', err);
         showError('Não foi possível gerar o código de pareamento.');
         alert('Falha ao gerar código: ' + err.message);

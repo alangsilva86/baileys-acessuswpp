@@ -24,12 +24,30 @@ let hasLoadedSelected = false;
 let currentInstanceId = null;
 let currentConnectionState = null;
 let lastQrVersionAttempted = null;
+const qrVersionCache = new Map();
 
 function percent(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 0;
   const clamped = Math.min(Math.max(n, 0), 1);
   return Math.round(clamped * 100);
+}
+
+function extractQrVersion(instance) {
+  if (!instance || typeof instance !== 'object') return null;
+  const candidates = [
+    instance.lastQrVersion,
+    instance.lastQRVersion,
+    instance.lastQRUpdatedAt,
+    instance.lastQrUpdatedAt,
+    instance.lastQR,
+    instance.lastQr,
+  ];
+  for (const value of candidates) {
+    if (value != null && value !== '') return String(value);
+  }
+  if (instance.connectionUpdatedAt) return String(instance.connectionUpdatedAt);
+  return null;
 }
 
 function initChart() {
@@ -229,7 +247,6 @@ export async function refreshSelected(options = {}) {
   const shouldShowMetricsSkeleton = withSkeleton ?? (!silent && !hasLoadedSelected);
   if (shouldShowMetricsSkeleton) setMetricsLoading(true);
   if (!silent) {
-    toggleHidden(els.qrImg, true);
     setQrState('loading', 'Sincronizando instância…');
   }
 
@@ -264,14 +281,42 @@ export async function refreshSelected(options = {}) {
           ? connection.meta.qrMessage(connection.updatedText)
           : 'Instância desconectada.';
         setQrState(connection.meta.qrState, qrMessage);
+    const qrMessage = connection.meta?.qrMessage
+      ? connection.meta.qrMessage(connection.updatedText)
+      : connection.meta?.shouldLoadQr
+      ? 'Instância desconectada.'
+      : 'Instância conectada.';
+    const qrState = connection.meta?.qrState || 'loading';
+    const normalizedQrVersion = extractQrVersion(data);
+    const previousQrVersion = qrVersionCache.get(iid) ?? null;
+    const shouldThrottle = connection.state === 'close' || connection.state === 'connecting';
+    const hasNewQr = normalizedQrVersion ? previousQrVersion !== normalizedQrVersion : !previousQrVersion;
+
+    if (connection.meta?.shouldLoadQr) {
+      if (!shouldThrottle || hasNewQr) {
+        if (hasNewQr && els.qrImg) toggleHidden(els.qrImg, true);
+        setQrState('loading', 'Sincronizando QR…');
+        const qrOk = await loadQRCode(iid, { attempts: 5, delayMs: 2000 });
+        if (qrOk) {
+          const storedVersion = normalizedQrVersion || `loaded:${Date.now()}`;
+          qrVersionCache.set(iid, storedVersion);
+          setQrState(qrState, qrMessage);
+        } else if (!normalizedQrVersion) {
+          qrVersionCache.delete(iid);
+        }
+      } else {
+        setQrState(qrState, qrMessage);
+        if (els.qrImg?.src) toggleHidden(els.qrImg, false);
       }
     } else {
+      qrVersionCache.delete(iid);
       toggleHidden(els.qrImg, true);
       const qrMessage = connection.meta?.qrMessage
         ? connection.meta.qrMessage(connection.updatedText)
         : 'Instância conectada.';
       setQrState(connection.meta?.qrState || 'loading', qrMessage);
       if (qrVersion != null) lastQrVersionAttempted = qrVersion;
+      setQrState(qrState, qrMessage);
     }
 
     const metrics = await fetchJSON(`/instances/${iid}/metrics`, true);
