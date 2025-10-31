@@ -191,16 +191,18 @@ export function resetLogs() {
 }
 
 export async function refreshLogs(options = {}) {
-  if (!els.logsList || !els.logsEmpty) return;
+  if (!els.logsList || !els.logsEmpty) return false;
   const { silent = false } = options;
   const iid = els.selInstance?.value;
   if (!iid) {
+    const hadSignature = lastLogsSignature !== '';
     resetLogs();
-    return;
+    return hadSignature;
   }
 
   if (!silent && els.btnRefreshLogs) setBusy(els.btnRefreshLogs, true, 'Atualizando…');
 
+  let changed = false;
   try {
     const params = new URLSearchParams({ limit: '20' });
     const data = await fetchJSON(`/instances/${iid}/logs?${params.toString()}`, true);
@@ -215,6 +217,7 @@ export async function refreshLogs(options = {}) {
     if (signature !== lastLogsSignature) {
       renderLogs(events);
       lastLogsSignature = signature;
+      changed = true;
     }
   } catch (err) {
     console.error('[logs] erro ao carregar logs', err);
@@ -222,6 +225,8 @@ export async function refreshLogs(options = {}) {
   } finally {
     if (!silent && els.btnRefreshLogs) setBusy(els.btnRefreshLogs, false);
   }
+
+  return changed;
 }
 
 export function initLogs() {
