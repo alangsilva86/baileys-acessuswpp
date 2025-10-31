@@ -68,6 +68,7 @@ export interface Instance {
   sock: WASocket | null;
   socketId: number;
   lastQR: string | null;
+  qrVersion: number;
   reconnectDelay: number;
   stopping: boolean;
   reconnectTimer: NodeJS.Timeout | null;
@@ -80,8 +81,9 @@ export interface Instance {
   rateWindow: number[];
   ackSentAt: Map<string, number>;
   context: InstanceContext | null;
-  connectionState: 'connecting' | 'open' | 'close';
+  connectionState: 'connecting' | 'open' | 'close' | 'qr_timeout';
   connectionUpdatedAt: number | null;
+  phoneNumber: string | null;
 }
 
 const instances = new Map<string, Instance>();
@@ -120,6 +122,7 @@ function createInstanceRecord(
     sock: null,
     socketId: 0,
     lastQR: null,
+    qrVersion: 0,
     reconnectDelay: 1000,
     stopping: false,
     reconnectTimer: null,
@@ -134,6 +137,7 @@ function createInstanceRecord(
     context: null,
     connectionState: 'close',
     connectionUpdatedAt: Date.now(),
+    phoneNumber: null,
   };
 }
 
@@ -142,6 +146,7 @@ async function saveInstancesIndex(): Promise<void> {
     id: instance.id,
     name: instance.name,
     dir: instance.dir,
+    phoneNumber: instance.phoneNumber,
     metadata: {
       note: instance.metadata?.note || '',
       createdAt: instance.metadata?.createdAt || null,
@@ -173,6 +178,9 @@ async function loadInstances(): Promise<void> {
         item.dir || path.join(SESSIONS_ROOT, item.id),
         metadata,
       );
+      if (typeof item.phoneNumber === 'string' && item.phoneNumber.trim()) {
+        instance.phoneNumber = item.phoneNumber.trim();
+      }
       instances.set(item.id, instance);
     }
 

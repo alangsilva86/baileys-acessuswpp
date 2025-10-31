@@ -210,6 +210,20 @@ const CONNECTION_STATE_META = {
       ts ? `Instância desconectada. Atualizado em ${ts}.` : 'Instância desconectada. Aponte o WhatsApp para o QR code.',
     shouldLoadQr: true,
   },
+  qr_timeout: {
+    label: 'QR expirado',
+    badgeType: 'status-disconnected',
+    badgeClass: 'bg-rose-100 text-rose-700',
+    optionSuffix: ' • QR expirado',
+    cardLabel: (ts) => (ts ? `QR expirado • ${ts}` : 'QR expirado'),
+    badgeText: (name, ts) => (ts ? `QR expirado (${name}) • ${ts}` : `QR expirado (${name})`),
+    qrState: 'qr-timeout',
+    qrMessage: (ts) =>
+      ts
+        ? `O QR code expirou. Atualizado em ${ts}. Solicite um novo código de pareamento no aplicativo.`
+        : 'O QR code expirou. Solicite um novo código de pareamento no aplicativo.',
+    shouldLoadQr: false,
+  },
 };
 
 export const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
@@ -344,6 +358,7 @@ export function setQrState(state, message) {
       disconnected: 'border-sky-300',
       error: 'border-rose-300',
       'needs-key': 'border-amber-300',
+      'qr-timeout': 'border-rose-300',
     };
     els.qrWrap.classList.add(classMap[state] || 'border-slate-200');
   }

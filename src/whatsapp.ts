@@ -78,6 +78,12 @@ function updateConnectionState(inst: Instance, state: Instance['connectionState'
   inst.connectionUpdatedAt = Date.now();
 }
 
+function updateLastQr(inst: Instance, qr: string | null): void {
+  if (inst.lastQR === qr) return;
+  inst.lastQR = qr;
+  inst.qrVersion += 1;
+}
+
 export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   const { state, saveCreds } = await useMultiFileAuthState(inst.dir);
   const { version } = await fetchLatestBaileysVersion();
@@ -130,11 +136,14 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
 
     if (inst.socketId !== currentSocketId) return;
 
-    if (qr) { inst.lastQR = qr; logger.info({ iid }, 'qr.updated'); }
+    if (qr) {
+      updateLastQr(inst, qr);
+      logger.info({ iid }, 'qr.updated');
+    }
     if (connection === 'connecting') { updateConnectionState(inst, 'connecting'); }
     if (connection === 'open') {
       updateConnectionState(inst, 'open');
-      inst.lastQR = null;
+      updateLastQr(inst, null);
       inst.reconnectDelay = RECONNECT_MIN_DELAY_MS;
       logger.info({ iid, receivedPendingNotifications }, 'whatsapp.connected');
     }
@@ -142,8 +151,34 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     if (connection === 'close') {
       updateConnectionState(inst, 'close');
       const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const payloadMessage = lastDisconnect?.error?.output?.payload?.message;
+      const errorMessageRaw = lastDisconnect?.error?.message;
+      const errorFallback = typeof lastDisconnect?.error === 'string' ? lastDisconnect?.error : '';
+      const errorMessage = String(payloadMessage || errorMessageRaw || errorFallback || '').toLowerCase();
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+      const isTimedOut =
+        statusCode === DisconnectReason.timedOut || errorMessage.includes('qr refs attempts ended');
       logger.warn({ iid, statusCode }, 'whatsapp.disconnected');
+
+      if (isTimedOut) {
+        updateLastQr(inst, null);
+        const storedPhone = inst.phoneNumber?.trim();
+        if (storedPhone) {
+          const maskedPhone = storedPhone.replace(/.(?=.{4})/g, '*');
+          logger.warn({ iid, maskedPhone }, 'whatsapp.qr_timeout.retrying_pairing');
+          void inst.sock
+            ?.requestPairingCode(storedPhone)
+            .then(() => {
+              logger.info({ iid, maskedPhone }, 'whatsapp.qr_timeout.pairing_requested');
+            })
+            .catch((err: any) => {
+              logger.error({ iid, err: err?.message }, 'whatsapp.qr_timeout.pairing_failed');
+            });
+        } else {
+          updateConnectionState(inst, 'qr_timeout');
+          logger.warn({ iid }, 'whatsapp.qr_timeout.no_phone');
+        }
+      }
 
       if (!inst.stopping && !isLoggedOut) {
         const delay = Math.min(inst.reconnectDelay, RECONNECT_MAX_DELAY_MS);
@@ -283,7 +318,7 @@ export async function stopWhatsAppInstance(inst: Instance | undefined, { logout 
     inst.statusCleanupTimer = null;
   }
 
-  inst.lastQR = null;
+  updateLastQr(inst, null);
 
   const sock = inst.sock;
   inst.sock = null;
