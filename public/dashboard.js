@@ -58,10 +58,19 @@ const els = {
 
   // Pair modal
   pairModal: document.getElementById('pairModal'),
+  pairModalForm: document.getElementById('pairModalForm'),
+  pairModalResult: document.getElementById('pairModalResult'),
+  pairModalSubmit: document.getElementById('pairModalSubmit'),
+  pairModalCancel: document.getElementById('pairModalCancel'),
+  pairModalPhone: document.getElementById('pairModalPhone'),
+  pairModalError: document.getElementById('pairModalError'),
+  pairModalStatus: document.getElementById('pairModalStatus'),
   pairModalCode: document.getElementById('pairModalCode'),
   pairModalClose: document.getElementById('pairModalClose'),
   pairModalCopy: document.getElementById('pairModalCopy'),
 };
+
+const runSessionAction = window.sessionActions?.runSessionAction || null;
 
 const STATUS_META = {
   '1': {
@@ -230,13 +239,18 @@ function setBusy(button, busy, label) {
   }
 }
 
-const INSTANCE_LOCK_ACTIONS = ['save', 'qr', 'logout', 'wipe', 'delete'];
+const INSTANCE_LOCK_ACTIONS = ['save', 'qr', 'logout', 'wipe', 'delete', 'pair'];
 const INSTANCE_LOCK_TIMEOUT_MS = 60_000;
 const instanceActionLocks = new Map();
 
 function escapeSelectorValue(value) {
   if (typeof CSS !== 'undefined' && CSS?.escape) return CSS.escape(value);
   return String(value).replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
+}
+
+function findCardByIid(iid) {
+  const selectorIid = escapeSelectorValue(iid);
+  return document.querySelector(`[data-iid="${selectorIid}"]`)?.closest('article') || null;
 }
 
 function toggleButtonsDisabled(buttons, disabled) {
@@ -264,10 +278,19 @@ function setSelectedInstanceActionsDisabled(iid, disabled) {
   );
 }
 
+function updateCardLockVisual(iid, locked) {
+  const card = findCardByIid(iid);
+  if (!card) return;
+  card.classList.toggle('opacity-75', locked);
+  const indicator = card.querySelector('[data-lock-indicator]');
+  if (indicator) indicator.classList.toggle('hidden', !locked);
+}
+
 function lockInstanceActions(iid, type = 'restart') {
   instanceActionLocks.set(iid, { type, startedAt: Date.now() });
   setInstanceActionsDisabled(iid, true);
   setSelectedInstanceActionsDisabled(iid, true);
+  updateCardLockVisual(iid, true);
 }
 
 function unlockInstanceActions(iid) {
@@ -275,6 +298,7 @@ function unlockInstanceActions(iid) {
   instanceActionLocks.delete(iid);
   setInstanceActionsDisabled(iid, false);
   setSelectedInstanceActionsDisabled(iid, false);
+  updateCardLockVisual(iid, false);
 }
 
 function isInstanceLocked(iid) {
@@ -322,7 +346,31 @@ function resetLogs() {
   lastLogsSignature = '';
 }
 
-function setQrState(state, message) {
+const QR_DISPLAY_STATE = {
+  state: 'idle',
+  baseMessage: '',
+  expiresAt: null,
+  expireState: null,
+  expireMessage: '',
+  countdownTimer: null,
+};
+
+function clearQrCountdown() {
+  if (QR_DISPLAY_STATE.countdownTimer) {
+    clearInterval(QR_DISPLAY_STATE.countdownTimer);
+    QR_DISPLAY_STATE.countdownTimer = null;
+  }
+}
+
+function formatCountdown(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+  const seconds = String(totalSeconds % 60).padStart(2, '0');
+  return `${minutes}:${seconds}`;
+}
+
+function applyQrState() {
+  const state = QR_DISPLAY_STATE.state;
   if (els.qrWrap) {
     els.qrWrap.classList.remove('border-emerald-300', 'border-rose-300', 'border-slate-200', 'border-sky-300', 'border-amber-300');
     const classMap = {
@@ -330,11 +378,91 @@ function setQrState(state, message) {
       disconnected: 'border-sky-300',
       error: 'border-rose-300',
       'needs-key': 'border-amber-300',
+      loading: 'border-amber-300',
     };
     els.qrWrap.classList.add(classMap[state] || 'border-slate-200');
   }
   toggleHidden(els.qrLoader, state !== 'loading');
-  if (message && els.qrHint) els.qrHint.textContent = message;
+
+  let message = QR_DISPLAY_STATE.baseMessage || '';
+  if (QR_DISPLAY_STATE.expiresAt) {
+    const remaining = QR_DISPLAY_STATE.expiresAt - Date.now();
+    if (remaining > 0) {
+      const countdownText = formatCountdown(remaining);
+      message = `${QR_DISPLAY_STATE.baseMessage ? QR_DISPLAY_STATE.baseMessage + ' ' : ''}Expira em ${countdownText}.`;
+    } else if (QR_DISPLAY_STATE.expireMessage) {
+      message = QR_DISPLAY_STATE.expireMessage;
+    }
+  }
+
+  if (els.qrHint) {
+    els.qrHint.textContent = message || '—';
+  }
+}
+
+function scheduleQrCountdown() {
+  clearQrCountdown();
+  if (!QR_DISPLAY_STATE.expiresAt) {
+    applyQrState();
+    return;
+  }
+
+  applyQrState();
+  QR_DISPLAY_STATE.countdownTimer = setInterval(() => {
+    const remaining = QR_DISPLAY_STATE.expiresAt - Date.now();
+    if (remaining <= 0) {
+      clearQrCountdown();
+      if (QR_DISPLAY_STATE.expireState) {
+        setQrState(QR_DISPLAY_STATE.expireState, {
+          message: QR_DISPLAY_STATE.expireMessage || QR_DISPLAY_STATE.baseMessage,
+          expiresAt: null,
+        });
+        return;
+      }
+    }
+    applyQrState();
+  }, 1000);
+}
+
+function setQrState(state, messageOrOptions) {
+  const isOptions = typeof messageOrOptions === 'object' && messageOrOptions !== null;
+  const options = isOptions ? messageOrOptions : { message: messageOrOptions };
+
+  QR_DISPLAY_STATE.state = state;
+
+  if (Object.prototype.hasOwnProperty.call(options, 'message')) {
+    QR_DISPLAY_STATE.baseMessage = options.message || '';
+  } else if (!QR_DISPLAY_STATE.baseMessage) {
+    QR_DISPLAY_STATE.baseMessage = '';
+  }
+
+  if (!options || !options.preserveCountdown) {
+    QR_DISPLAY_STATE.expiresAt = null;
+    QR_DISPLAY_STATE.expireState = null;
+    QR_DISPLAY_STATE.expireMessage = '';
+  }
+
+  if (options && options.expiresAt != null) {
+    const ts = Number(options.expiresAt);
+    QR_DISPLAY_STATE.expiresAt = Number.isFinite(ts) ? ts : null;
+  } else if (options && options.expiresInMs != null) {
+    const ms = Number(options.expiresInMs);
+    QR_DISPLAY_STATE.expiresAt = Number.isFinite(ms) ? Date.now() + ms : null;
+  }
+
+  if (options && options.expiresAt == null && options.expiresInMs == null && !options.preserveCountdown) {
+    clearQrCountdown();
+  }
+
+  if (options && options.expireState) QR_DISPLAY_STATE.expireState = options.expireState;
+  if (options && options.expireMessage != null) QR_DISPLAY_STATE.expireMessage = options.expireMessage;
+
+  if (QR_DISPLAY_STATE.expiresAt) {
+    scheduleQrCountdown();
+  } else {
+    clearQrCountdown();
+    applyQrState();
+  }
 }
 
 function validateE164(value) {
@@ -951,9 +1079,15 @@ async function refreshInstances(options = {}) {
             <label class="text-xs font-medium text-slate-500">Nome</label>
             <input data-field="name" data-iid="${i.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" value="${escapeHtml(i.name)}" />
           </div>
-          <span class="px-2 py-0.5 rounded text-xs ${badgeClass}">
-            ${escapeHtml(statusLabel)}
-          </span>
+          <div class="flex flex-col items-end gap-1 text-right">
+            <span class="px-2 py-0.5 rounded text-xs ${badgeClass}">
+              ${escapeHtml(statusLabel)}
+            </span>
+            <span data-lock-indicator class="hidden text-[11px] text-slate-500 inline-flex items-center gap-1">
+              <span class="h-3 w-3 border-2 border-slate-300 border-t-transparent rounded-full animate-spin"></span>
+              Processando…
+            </span>
+          </div>
         </div>
 
         <div class="text-xs text-slate-500 break-all">WhatsApp: ${userId}</div>
@@ -990,6 +1124,8 @@ async function refreshInstances(options = {}) {
           <button data-act="delete" data-iid="${i.id}" class="px-3 py-1.5 text-sm bg-rose-500 hover:bg-rose-600 text-white rounded-lg">Excluir</button>
         </div>
       `;
+        const indicatorEl = card.querySelector('[data-lock-indicator]');
+        if (indicatorEl) indicatorEl.classList.toggle('hidden', !locked);
         els.cards.appendChild(card);
         setInstanceActionsDisabled(i.id, locked);
       });
@@ -1167,10 +1303,6 @@ async function refreshSelected(options = {}) {
   }
 }
 
-function findCardByIid(iid) {
-  return document.querySelector(`[data-iid="${iid}"]`)?.closest('article');
-}
-
 async function handleSaveMetadata(iid) {
   const card = findCardByIid(iid);
   if (!card) return;
@@ -1202,68 +1334,6 @@ async function handleSaveMetadata(iid) {
   }
 }
 
-async function performInstanceAction(action, iid, key, context = {}) {
-  const endpoints = {
-    logout: '/instances/' + iid + '/logout',
-    wipe: '/instances/' + iid + '/session/wipe'
-  };
-  const badgeTypes = { logout: 'logout', wipe: 'wipe' };
-  const fallbackMessages = {
-    logout: (name) => 'Logout solicitado (' + name + ')',
-    wipe: (name) => 'Wipe solicitado (' + name + ')'
-  };
-  const holdTimes = { logout: 5000, wipe: 7000 };
-  const restartingMessage = (name) => 'Instância reiniciando (' + name + ')';
-
-  const url = endpoints[action];
-  if (!url) return false;
-
-  const button = context.button || null;
-  const name = context.name || iid;
-  if (button) setBusy(button, true, action === 'logout' ? 'Desconectando…' : 'Limpando…');
-  try {
-    const r = await fetch(url, { method: 'POST', headers: { 'x-api-key': key } });
-    if (action === 'wipe' && r.status === 202) {
-      const payload = await r.json().catch(() => ({}));
-      const message = payload?.message || restartingMessage(name);
-      lockInstanceActions(iid, 'restart');
-      setBadgeState('wipe', message, holdTimes[action]);
-      await refreshInstances({ silent: true, withSkeleton: false });
-      return true;
-    }
-    if (!r.ok) {
-      const txt = await r.text().catch(() => '');
-      alert('Falha ao executar ' + action + ': HTTP ' + r.status + (txt ? ' — ' + txt : ''));
-      setBadgeState('error', 'Falha em ' + action + ' (' + name + ')', 5000);
-      return false;
-    }
-    const payload = await r.json().catch(() => ({}));
-    const message = payload?.message || fallbackMessages[action](name);
-    setBadgeState(badgeTypes[action], message, holdTimes[action]);
-    await refreshInstances({ silent: true, withSkeleton: false });
-    return true;
-  } catch (err) {
-    if (action === 'wipe') {
-      console.error('[dashboard] erro em ' + action, err);
-      lockInstanceActions(iid, 'restart');
-      setBadgeState('wipe', restartingMessage(name), holdTimes[action]);
-      setTimeout(() => {
-        refreshInstances({ silent: true, withSkeleton: false }).catch(() => undefined);
-      }, 1500);
-      return true;
-    }
-    console.error('[dashboard] erro em ' + action, err);
-    showError('Erro ao executar ' + action);
-    return false;
-  } finally {
-    if (button) setBusy(button, false);
-    if (isInstanceLocked(iid)) {
-      setInstanceActionsDisabled(iid, true);
-      setSelectedInstanceActionsDisabled(iid, true);
-    }
-  }
-}
-
 /* Modal de exclusão */
 function openDeleteModal(iid, name) {
   els.modalDelete.dataset.iid = iid;
@@ -1292,12 +1362,137 @@ function closePairModal() {
   els.pairModal.classList.add('hidden');
   els.pairModal.classList.remove('flex');
 }
+let pairModalCountdownTimer = null;
+
+function clearPairModalCountdown() {
+  if (pairModalCountdownTimer) {
+    clearInterval(pairModalCountdownTimer);
+    pairModalCountdownTimer = null;
+  }
+}
+
+function setPairModalError(message) {
+  if (!els.pairModalError) return;
+  if (message) {
+    els.pairModalError.textContent = message;
+    els.pairModalError.classList.remove('hidden');
+  } else {
+    els.pairModalError.textContent = '';
+    els.pairModalError.classList.add('hidden');
+  }
+}
+
+function setPairModalStatus(message) {
+  if (!els.pairModalStatus) return;
+  els.pairModalStatus.textContent = message || '';
+  toggleHidden(els.pairModalStatus, !message);
+}
+
+function startPairModalCountdown(expiresAt) {
+  clearPairModalCountdown();
+  if (!Number.isFinite(expiresAt)) {
+    setPairModalStatus('');
+    return;
+  }
+  const apply = () => {
+    const remaining = expiresAt - Date.now();
+    if (remaining <= 0) {
+      setPairModalStatus('Código expirado. Gere novamente.');
+      return false;
+    }
+    const countdownText = formatCountdown(remaining);
+    setPairModalStatus(`Expira em ${countdownText}.`);
+    return true;
+  };
+  if (!apply()) return;
+  pairModalCountdownTimer = setInterval(() => {
+    if (!apply()) clearPairModalCountdown();
+  }, 1000);
+}
+
+function showPairModalForm(iid, options = {}) {
+  if (!els.pairModal) return;
+  if (iid) {
+    els.pairModal.dataset.iid = iid;
+  } else {
+    delete els.pairModal.dataset.iid;
+  }
+  toggleHidden(els.pairModalForm, false);
+  toggleHidden(els.pairModalResult, true);
+  const phone = options.phone || '';
+  if (els.pairModalPhone) {
+    els.pairModalPhone.value = phone;
+    setTimeout(() => {
+      try {
+        els.pairModalPhone.focus();
+        if (phone) els.pairModalPhone.select();
+      } catch (err) {
+        console.warn('[dashboard] pairModal focus failed', err);
+      }
+    }, 50);
+  }
+  setPairModalError('');
+  setPairModalStatus('');
+  clearPairModalCountdown();
+  els.pairModal.classList.remove('hidden');
+  els.pairModal.classList.add('flex');
+}
+
+function showPairModalResult(options = {}) {
+  if (!els.pairModal) return;
+  toggleHidden(els.pairModalForm, true);
+  toggleHidden(els.pairModalResult, false);
+  setPairModalError('');
+  if (els.pairModalCode) els.pairModalCode.textContent = options.code || '—';
+  if (options.status) setPairModalStatus(options.status); else setPairModalStatus('');
+  const expiresAt = options.expiresAt != null
+    ? Number(options.expiresAt)
+    : options.expiresInMs != null
+    ? Date.now() + Number(options.expiresInMs)
+    : null;
+  if (expiresAt && Number.isFinite(expiresAt)) {
+    startPairModalCountdown(expiresAt);
+  } else if (!options.status) {
+    clearPairModalCountdown();
+    setPairModalStatus('');
+  }
+  els.pairModal.classList.remove('hidden');
+  els.pairModal.classList.add('flex');
+}
+
+function openPairModal(options = {}) {
+  const iid = options.iid || els.pairModal?.dataset?.iid || '';
+  if (options.stage === 'result') {
+    if (els.pairModal && iid) els.pairModal.dataset.iid = iid;
+    showPairModalResult(options);
+  } else {
+    showPairModalForm(iid, options);
+  }
+}
+
+function closePairModal() {
+  if (!els.pairModal) return;
+  clearPairModalCountdown();
+  delete els.pairModal.dataset.iid;
+  els.pairModal.classList.add('hidden');
+  els.pairModal.classList.remove('flex');
+  if (els.pairModalPhone) els.pairModalPhone.value = '';
+  setPairModalError('');
+  setPairModalStatus('');
+}
+
 if (els.pairModal) {
   els.pairModal.addEventListener('click', (ev) => {
     if (ev.target === els.pairModal) closePairModal();
   });
 }
 if (els.pairModalClose) els.pairModalClose.addEventListener('click', closePairModal);
+if (els.pairModalCancel) {
+  els.pairModalCancel.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    closePairModal();
+  });
+}
 if (els.pairModalCopy) {
   els.pairModalCopy.addEventListener('click', async () => {
     try {
@@ -1381,16 +1576,26 @@ document.addEventListener('click', async (ev) => {
   }
 
   // ações que usam API Key
-  let key;
-  try { key = requireKey(); } catch { return; }
   localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
 
   if (act === 'logout') {
-    await performInstanceAction('logout', iid, key, { button: btn });
+    if (!runSessionAction) return;
+    try {
+      const name = findCardByIid(iid)?.querySelector('[data-field="name"]')?.value?.trim() || iid;
+      await runSessionAction('logout', iid, { button: btn, name });
+    } catch (err) {
+      console.error('[dashboard] logout failed', err);
+    }
     return;
   }
   if (act === 'wipe') {
-    await performInstanceAction('wipe', iid, key, { button: btn });
+    if (!runSessionAction) return;
+    try {
+      const name = findCardByIid(iid)?.querySelector('[data-field="name"]')?.value?.trim() || iid;
+      await runSessionAction('wipe', iid, { button: btn, name });
+    } catch (err) {
+      console.error('[dashboard] wipe failed', err);
+    }
     return;
   }
   if (act === 'save') {
@@ -1419,61 +1624,65 @@ els.btnNew.onclick = async () => {
 els.selInstance.onchange = () => refreshSelected({ withSkeleton: true });
 
 /* Logout/Wipe (header) */
-els.btnLogout.onclick = async () => {
-  try {
-    localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+if (els.btnLogout) {
+  els.btnLogout.onclick = async () => {
     const iid = els.selInstance.value;
-    if (!iid) return;
-    const key = requireKey();
-    const ok = await performInstanceAction('logout', iid, key, { name: iid, button: els.btnLogout });
-    if (ok) els.qrHint.textContent = 'Desconectando… aguarde novo QR.';
-  } catch {}
-};
-els.btnWipe.onclick = async () => {
-  try {
+    if (!iid || !runSessionAction) return;
     localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+    try {
+      await runSessionAction('logout', iid, { button: els.btnLogout, name: iid });
+    } catch (err) {
+      console.error('[dashboard] logout failed', err);
+    }
+  };
+}
+if (els.btnWipe) {
+  els.btnWipe.onclick = async () => {
     const iid = els.selInstance.value;
-    if (!iid) return;
-    const key = requireKey();
-    const ok = await performInstanceAction('wipe', iid, key, { name: iid, button: els.btnWipe });
-    if (ok) els.qrHint.textContent = 'Limpando sessão… o serviço reiniciará para gerar novo QR.';
-  } catch {}
-};
+    if (!iid || !runSessionAction) return;
+    localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+    try {
+      await runSessionAction('wipe', iid, { button: els.btnWipe, name: iid });
+    } catch (err) {
+      console.error('[dashboard] wipe failed', err);
+    }
+  };
+}
 
 /* Pair por código */
-els.btnPair.onclick = async () => {
-  try {
+if (els.btnPair) {
+  els.btnPair.onclick = () => {
     const iid = els.selInstance.value;
     if (!iid) { showError('Selecione uma instância.'); return; }
     localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
-    try { requireKey(); } catch { return; }
-    const phoneInput = prompt('Número no formato E.164 (ex: +5544999999999):');
-    if (!phoneInput) return;
-    const sanitized = phoneInput.replace(/[^\d+]/g, '');
-    const phoneNumber = sanitized.startsWith('+') ? sanitized : '+' + sanitized.replace(/^\++/, '');
-    if (!validateE164(phoneNumber)) {
-      showError('Telefone inválido. Use o formato E.164 (ex: +5511999999999).');
-      return;
-    }
-    setBusy(els.btnPair, true, 'Gerando…');
-    const payload = await fetchJSON('/instances/' + iid + '/pair', true, { method: 'POST', body: JSON.stringify({ phoneNumber }) });
-    const code = payload?.pairingCode || '(sem código)';
-    openPairModal(code);
+    openPairModal({ stage: 'form', iid });
+  };
+}
+if (els.pairModalSubmit) {
+  els.pairModalSubmit.addEventListener('click', async (ev) => {
+    ev.preventDefault();
+    if (!runSessionAction) return;
+    const iid = els.pairModal?.dataset?.iid || els.selInstance?.value;
+    if (!iid) { showError('Selecione uma instância.'); return; }
+    localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
     try {
-      await navigator.clipboard.writeText(code);
-      setBadgeState('update', 'Código gerado e copiado para a área de transferência.', 4000);
-    } catch {
-      setBadgeState('update', 'Código de pareamento gerado.', 4000);
+      await runSessionAction('pair', iid, {
+        button: els.btnPair,
+        submitButton: els.pairModalSubmit,
+        phoneInput: els.pairModalPhone,
+      });
+    } catch (err) {
+      console.error('[dashboard] pair failed', err);
     }
-    setQrState('disconnected', 'Código gerado. Use o pareamento no app.');
-  } catch (e) {
-    console.error('[dashboard] erro ao gerar código', e);
-    showError('Não foi possível gerar o código de pareamento.');
-    alert('Falha ao gerar código: ' + e.message);
-  } finally {
-    setBusy(els.btnPair, false);
-  }
-};
+  });
+}
+if (els.pairModalPhone) {
+  els.pairModalPhone.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Enter' || ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    ev.preventDefault();
+    els.pairModalSubmit?.click();
+  });
+}
 
 /* Envio rápido */
 if (els.btnSend) els.btnSend.onclick = async () => {
@@ -1581,6 +1790,26 @@ async function refreshLogs(options = {}) {
 
 if (els.btnRefreshLogs) {
   els.btnRefreshLogs.addEventListener('click', () => refreshLogs({ silent: false }));
+}
+
+if (window.sessionActions?.setDependencies) {
+  window.sessionActions.setDependencies({
+    setBusy,
+    lockInstanceActions,
+    unlockInstanceActions,
+    setInstanceActionsDisabled,
+    setSelectedInstanceActionsDisabled,
+    setBadgeState,
+    refreshInstances,
+    showError,
+    requireKey,
+    fetchJSON,
+    setQrState,
+    validateE164,
+    showPairModalResult,
+    setPairModalError,
+    setPairModalStatus,
+  });
 }
 
 /* Boot do dashboard */
