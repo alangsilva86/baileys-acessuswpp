@@ -33,8 +33,20 @@ export async function fetchJSON(path, auth = true, opts = {}) {
   const headers = buildHeaders({ auth, headers: opts.headers || {} });
   const response = await fetch(path, { cache: 'no-store', ...opts, headers });
   if (!response.ok) {
-    const txt = await response.text().catch(() => '');
-    throw new Error('HTTP ' + response.status + (txt ? ' — ' + txt : ''));
+    const text = await response.text().catch(() => '');
+    let body = null;
+    if (text) {
+      try {
+        body = JSON.parse(text);
+      } catch (err) {
+        console.warn('[api] resposta sem JSON válido para erro', err);
+      }
+    }
+    const error = new Error('HTTP ' + response.status + (text ? ' — ' + text : ''));
+    error.status = response.status;
+    error.body = body;
+    error.text = text;
+    throw error;
   }
   try {
     return await response.json();
