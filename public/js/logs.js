@@ -5,11 +5,43 @@ import {
   els,
   formatDateTime,
   setBusy,
+  setLogsLoading,
   showError,
   toggleHidden,
 } from './state.js';
 
 let lastLogsSignature = '';
+let activeRange = null;
+
+function getEventTimestampMs(event) {
+  const metaTs = event?.payload?.metadata?.timestamp;
+  if (metaTs) {
+    const parsed = Date.parse(metaTs);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+
+  const webhookTs = event?.payload?.body?.timestamp;
+  if (webhookTs != null) {
+    const num = Number(webhookTs);
+    if (Number.isFinite(num)) return num * 1000;
+  }
+
+  if (event?.createdAt != null) {
+    const createdNum = Number(event.createdAt);
+    if (Number.isFinite(createdNum)) return createdNum;
+    const createdParsed = Date.parse(event.createdAt);
+    if (!Number.isNaN(createdParsed)) return createdParsed;
+  }
+
+  return null;
+}
+
+function isWithinRange(ts, range) {
+  if (!range || ts == null) return false;
+  if (range.from != null && ts < range.from) return false;
+  if (range.to != null && ts > range.to) return false;
+  return true;
+}
 
 function formatLogTimestamp(event) {
   const ts = event?.payload?.metadata?.timestamp;
@@ -118,6 +150,11 @@ function renderLogs(events) {
   events.forEach((event) => {
     const details = document.createElement('details');
     details.className = 'bg-white rounded-xl shadow-sm p-3 space-y-2';
+    const eventTs = getEventTimestampMs(event);
+    const inRange = isWithinRange(eventTs, activeRange);
+    if (inRange) {
+      details.classList.add('ring-2', 'ring-emerald-200/80', 'ring-offset-1');
+    }
 
     const summary = document.createElement('summary');
     summary.className = 'flex items-start gap-3 cursor-pointer';
@@ -137,6 +174,12 @@ function renderLogs(events) {
     meta.className = 'text-[11px] text-slate-500';
     const timestamp = formatLogTimestamp(event);
     meta.textContent = timestamp ? `${timestamp}${event.acknowledged ? ' • ACK' : ''}` : event.id;
+    if (inRange) {
+      const badge = document.createElement('span');
+      badge.className = 'ml-2 px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-700';
+      badge.textContent = 'Intervalo';
+      meta.appendChild(badge);
+    }
 
     const contact = extractContactInfo(event);
     if (contact?.name) {
@@ -192,15 +235,32 @@ export function resetLogs() {
 
 export async function refreshLogs(options = {}) {
   if (!els.logsList || !els.logsEmpty) return false;
-  const { silent = false } = options;
+  const { silent = false, range } = options;
+
+  if (range !== undefined) {
+    if (range && typeof range === 'object') {
+      const from = Number(range.from);
+      const to = Number(range.to);
+      activeRange = {
+        from: Number.isFinite(from) ? from : null,
+        to: Number.isFinite(to) ? to : null,
+      };
+    } else {
+      activeRange = null;
+    }
+  }
+
   const iid = els.selInstance?.value;
   if (!iid) {
     const hadSignature = lastLogsSignature !== '';
     resetLogs();
+    activeRange = null;
+    setLogsLoading(false);
     return hadSignature;
   }
 
   if (!silent && els.btnRefreshLogs) setBusy(els.btnRefreshLogs, true, 'Atualizando…');
+  if (!silent) setLogsLoading(true);
 
   let changed = false;
   try {
@@ -224,6 +284,7 @@ export async function refreshLogs(options = {}) {
     if (!silent) showError('Falha ao carregar eventos recentes');
   } finally {
     if (!silent && els.btnRefreshLogs) setBusy(els.btnRefreshLogs, false);
+    if (!silent) setLogsLoading(false);
   }
 
   return changed;

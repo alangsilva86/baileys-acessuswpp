@@ -4,7 +4,7 @@ import { refreshSelected, resetChart } from './metrics.js';
 import { resetLogs } from './logs.js';
 import {
   HTML_ESCAPES,
-  STATUS_CODES,
+  STATUS_SERIES,
   STATUS_META,
   describeConnection,
   els,
@@ -57,15 +57,18 @@ function option(value, text) {
   return opt;
 }
 
-function buildStatusCards(statusCounts) {
-  return STATUS_CODES.map((code) => {
-    const meta = STATUS_META[code] || {};
+function buildStatusCards(statusCounts = {}) {
+  return STATUS_SERIES.map((series) => {
+    const meta = STATUS_META[series.key] || series;
     const titleAttr = meta.description ? ` title="${escapeHtml(meta.description)}"` : '';
-    const label = escapeHtml(meta.name || `Status ${code}`);
+    const codesLabel = series.codes.length ? `Status ${series.codes.join('/')}` : 'Status';
+    const count = Number(statusCounts[series.key]) || 0;
     return `
       <div class="rounded-lg bg-slate-50 p-2"${titleAttr}>
-        <span class="block text-[11px] uppercase tracking-wide text-slate-400">Status ${code} • ${label}</span>
-        <span class="text-sm font-semibold ${meta.textClass || 'text-slate-600'}">${statusCounts[code] || 0}</span>
+        <span class="block text-[11px] uppercase tracking-wide text-slate-400">${escapeHtml(codesLabel)} • ${escapeHtml(
+          meta.name || series.key,
+        )}</span>
+        <span class="text-sm font-semibold ${meta.textClass || 'text-slate-600'}">${count}</span>
       </div>`;
   }).join('');
 }
@@ -161,8 +164,19 @@ export async function refreshInstances(options = {}) {
           ? connection.meta.cardLabel(connection.updatedText)
           : connection.meta?.label || 'Desconhecido';
         const sent = inst.counters?.sent || 0;
-        const statusCounts = getStatusCounts(inst.counters?.statusCounts || inst.counters?.status || {});
+        const aggregatedCounts = inst.counters?.statusAggregated || null;
+        const statusCounts = aggregatedCounts
+          ? { ...aggregatedCounts }
+          : getStatusCounts(inst.counters?.statusCounts || inst.counters?.status || {});
         const statusCardsHtml = buildStatusCards(statusCounts);
+        const statusSummaryText = [
+          `Pendentes: ${statusCounts.pending || 0}`,
+          `Servidor: ${statusCounts.serverAck || 0}`,
+          `Entregues: ${statusCounts.delivered || 0}`,
+          `Lidas: ${statusCounts.read || 0}`,
+          `Reproduzidas: ${statusCounts.played || 0}`,
+          `Falhas: ${statusCounts.failed || 0}`,
+        ].join(' • ');
         const usagePercent = percent(inst.rate?.usage || 0);
         const meterColor = usagePercent >= 90 ? 'bg-rose-400' : usagePercent >= 70 ? 'bg-amber-400' : 'bg-emerald-400';
         const userId = inst.user?.id ? escapeHtml(inst.user.id) : '—';
@@ -195,7 +209,7 @@ export async function refreshInstances(options = {}) {
             <div class="h-2 bg-slate-100 rounded-full overflow-hidden">
               <div class="h-full ${meterColor}" style="width:${Math.min(usagePercent, 100)}%"></div>
             </div>
-            <div class="text-[11px] text-slate-400">Status 1: ${statusCounts['1'] || 0} • Status 2: ${statusCounts['2'] || 0} • Status 3: ${statusCounts['3'] || 0} • Status 4: ${statusCounts['4'] || 0} • Status 5: ${statusCounts['5'] || 0}</div>
+            <div class="text-[11px] text-slate-400">${statusSummaryText}</div>
           </div>
         </div>
 

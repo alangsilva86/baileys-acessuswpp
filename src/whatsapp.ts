@@ -6,7 +6,7 @@ import {
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import type { BaileysEventMap } from '@whiskeysockets/baileys';
-import { recordMetricsSnapshot } from './utils.js';
+import { recordMetricsSnapshot, resolveAckWaiters } from './utils.js';
 import { type Instance, resetInstanceSession } from './instanceManager.js';
 import { MessageService } from './baileys/messageService.js';
 import { PollService } from './baileys/pollService.js';
@@ -43,10 +43,12 @@ const STATUS_SWEEP_INTERVAL_MS = parsePosInt(process.env.STATUS_SWEEP_INTERVAL_M
 function isFinal(status: number): boolean {
   return status >= FINAL_STATUS_THRESHOLD || FINAL_STATUS_CODES.has(status);
 }
-function removeStatus(inst: Instance, messageId: string): void {
+function removeStatus(inst: Instance, messageId: string, options: { record?: boolean } = {}): void {
   if (!inst.statusMap.has(messageId)) return;
   const prev = inst.statusMap.get(messageId);
-  recordMetricsSnapshot(inst);
+  if (options.record ?? true) {
+    recordMetricsSnapshot(inst);
+  }
   if (prev != null) dec(inst, prev);
   inst.statusMap.delete(messageId);
   inst.statusTimestamps.delete(messageId);
@@ -62,6 +64,126 @@ function prune(inst: Instance): void {
 function ensureCleanup(inst: Instance): void {
   if (inst.statusCleanupTimer) return;
   inst.statusCleanupTimer = setInterval(() => prune(inst), STATUS_SWEEP_INTERVAL_MS);
+}
+
+function toNumber(val: unknown): number | null {
+  if (val == null) return null;
+  if (typeof val === 'number') {
+    return Number.isFinite(val) ? val : null;
+  }
+  if (typeof val === 'string' && val.trim()) {
+    const parsed = Number(val);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (typeof val === 'object' && typeof (val as { toNumber?: () => number }).toNumber === 'function') {
+    try {
+      const parsed = (val as { toNumber: () => number }).toNumber();
+      return Number.isFinite(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+const STATUS_TEXT_MAP: Record<string, number> = {
+  ERROR: 0,
+  FAILED: 0,
+  PENDING: 1,
+  QUEUED: 1,
+  SENT: 1,
+  SERVER_ACK: 2,
+  ACK: 2,
+  DELIVERY_ACK: 3,
+  DELIVERED: 3,
+  READ: 4,
+  PLAYED: 5,
+};
+
+type ReceiptLike = Partial<{
+  receiptTimestamp: unknown;
+  readTimestamp: unknown;
+  playedTimestamp: unknown;
+  pendingDeviceJid: unknown;
+  deliveredDeviceJid: unknown;
+}>;
+
+function normalizeStatusCode(raw: unknown): number | null {
+  if (raw == null) return null;
+  if (typeof raw === 'number') {
+    const normalized = Math.trunc(raw);
+    return Number.isFinite(normalized) ? normalized : null;
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric)) return Math.trunc(numeric);
+    const mapped = STATUS_TEXT_MAP[trimmed.toUpperCase()];
+    if (mapped != null) return mapped;
+    return null;
+  }
+  if (typeof raw === 'object') {
+    const candidateKeys = ['status', 'code', 'value'];
+    for (const key of candidateKeys) {
+      if (Object.prototype.hasOwnProperty.call(raw, key)) {
+        const result = normalizeStatusCode((raw as Record<string, unknown>)[key]);
+        if (result != null) return result;
+      }
+    }
+  }
+  return null;
+}
+
+function deriveStatusFromReceipt(receipt: ReceiptLike): number | null {
+  if (!receipt) return null;
+  const played = toNumber(receipt.playedTimestamp);
+  if (played && played > 0) return 5;
+  const read = toNumber(receipt.readTimestamp);
+  if (read && read > 0) return 4;
+  const deliveredList = Array.isArray(receipt.deliveredDeviceJid)
+    ? receipt.deliveredDeviceJid.filter(Boolean)
+    : [];
+  if (deliveredList.length > 0) return 3;
+  const receiptTs = toNumber(receipt.receiptTimestamp);
+  if (receiptTs && receiptTs > 0) return 2;
+  const pendingList = Array.isArray(receipt.pendingDeviceJid)
+    ? receipt.pendingDeviceJid.filter(Boolean)
+    : [];
+  if (pendingList.length > 0) return 1;
+  return null;
+}
+
+function applyStatus(inst: Instance, messageId: string, status: number): boolean {
+  if (status == null) return false;
+  const now = Date.now();
+  const prev = inst.statusMap.get(messageId);
+  if (prev != null && status <= prev) {
+    inst.statusTimestamps.set(messageId, now);
+    return false;
+  }
+
+  if (prev != null) {
+    dec(inst, prev);
+  }
+
+  inst.statusMap.set(messageId, status);
+  inst.statusTimestamps.set(messageId, now);
+  ensureCleanup(inst);
+  inc(inst, status);
+
+  inst.metrics.last.lastStatusId = messageId;
+  inst.metrics.last.lastStatusCode = status;
+
+  recordMetricsSnapshot(inst, true);
+  resolveAckWaiters(inst, messageId, status);
+
+  if (isFinal(status)) {
+    removeStatus(inst, messageId, { record: false });
+    recordMetricsSnapshot(inst, true);
+  }
+
+  return true;
 }
 
 const API_KEYS = String(process.env.API_KEY || 'change-me').split(',').map((s) => s.trim()).filter(Boolean);
@@ -278,36 +400,30 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     try { await pollService.onMessageUpdate(updates); } catch (err: any) { logger.warn({ iid, err: err?.message }, 'poll.service.messages.update.failed'); }
 
     for (const u of updates) {
-      const mid = u.key?.id;
-      const status = u.update?.status;
-      if (mid && status != null) {
-        const prev = inst.statusMap.get(mid);
-        if (prev != null && prev !== status) dec(inst, prev);
+      const mid = u.key?.id ?? null;
+      const rawStatus = u.update ? ((u.update as Record<string, unknown>).statusV3 ?? (u.update as Record<string, unknown>).status) : null;
+      const status = normalizeStatusCode(rawStatus);
+      const changed = mid && status != null ? applyStatus(inst, mid, status) : false;
 
-        inst.statusMap.set(mid, status);
-        inst.statusTimestamps.set(mid, Date.now());
-        ensureCleanup(inst);
-        inc(inst, status);
-
-        inst.metrics.last.lastStatusId = mid;
-        inst.metrics.last.lastStatusCode = status;
-
-        let snap = false;
-        const ensureSnap = () => { if (!snap) { recordMetricsSnapshot(inst); snap = true; } };
-
-        ensureSnap();
-
-        if (isFinal(status)) {
-          ensureSnap();
-          removeStatus(inst, mid);
-        }
-      }
-
-      logger.info({ iid, mid, status }, 'messages.status');
+      logger.info({ iid, mid, status, changed, source: 'messages.update', rawStatus }, 'messages.status');
     }
 
     try { await webhook.emit('WHATSAPP_MESSAGES_UPDATE', { iid, raw: { updates } }); }
     catch (err: any) { logger.warn({ iid, err: err?.message }, 'webhook.emit.messages.update.failed'); }
+  });
+
+  sock.ev.on('message-receipt.update', (updates: BaileysEventMap['message-receipt.update']) => {
+    const iid = inst.id;
+
+    for (const update of updates) {
+      const mid = update?.key?.id ?? null;
+      if (!mid) continue;
+      const receipt = update.receipt as ReceiptLike;
+      const status = deriveStatusFromReceipt(receipt);
+      const changed = status != null ? applyStatus(inst, mid, status) : false;
+
+      logger.info({ iid, mid, status, changed, source: 'message-receipt.update' }, 'messages.status');
+    }
   });
 
   recordMetricsSnapshot(inst, true);
@@ -333,6 +449,13 @@ export async function stopWhatsAppInstance(inst: Instance | undefined, { logout 
       clearInterval(inst.statusCleanupTimer);
     } catch {}
     inst.statusCleanupTimer = null;
+  }
+
+  if (inst.ackWaiters.size) {
+    const pending = [...inst.ackWaiters.keys()];
+    for (const messageId of pending) {
+      resolveAckWaiters(inst, messageId, null);
+    }
   }
 
   updateLastQr(inst, null);
