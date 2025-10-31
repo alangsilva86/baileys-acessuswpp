@@ -931,7 +931,8 @@ async function refreshInstances(options = {}) {
 }
 
 /* Carregar QR code com autenticação */
-async function loadQRCode(iid) {
+async function loadQRCode(iid, options = {}) {
+  const { attempts = 3, delayMs = 2000 } = options;
   try {
     const k = els.inpApiKey?.value?.trim();
     if (!k) {
@@ -941,38 +942,51 @@ async function loadQRCode(iid) {
     }
 
     const headers = { 'x-api-key': k };
-    const response = await fetch('/instances/' + iid + '/qr.png?t=' + Date.now(), {
-      headers,
-      cache: 'no-store'
-    });
+    let attempt = 0;
+    while (attempt < attempts) {
+      attempt += 1;
+      const response = await fetch('/instances/' + iid + '/qr.png?t=' + Date.now(), {
+        headers,
+        cache: 'no-store'
+      });
 
-    if (!response.ok) {
+      if (response.ok) {
+        const blob = await response.blob();
+        const imageUrl = URL.createObjectURL(blob);
+        els.qrImg.src = imageUrl;
+        toggleHidden(els.qrImg, false);
+
+        els.qrImg.onload = () => {
+          if (els.qrImg.previousImageUrl) {
+            URL.revokeObjectURL(els.qrImg.previousImageUrl);
+          }
+          els.qrImg.previousImageUrl = imageUrl;
+        };
+
+        return true;
+      }
+
       if (response.status === 401) {
         toggleHidden(els.qrImg, true);
         setQrState('needs-key', 'API Key inválida.');
         return false;
       }
+
       if (response.status === 404) {
         toggleHidden(els.qrImg, true);
+        if (attempt < attempts) {
+          setQrState('loading', 'QR code ainda não disponível. Tentando novamente…');
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          continue;
+        }
         setQrState('error', 'QR code não disponível ainda.');
         return false;
       }
+
       throw new Error('HTTP ' + response.status);
     }
 
-    const blob = await response.blob();
-    const imageUrl = URL.createObjectURL(blob);
-    els.qrImg.src = imageUrl;
-    toggleHidden(els.qrImg, false);
-
-    els.qrImg.onload = () => {
-      if (els.qrImg.previousImageUrl) {
-        URL.revokeObjectURL(els.qrImg.previousImageUrl);
-      }
-      els.qrImg.previousImageUrl = imageUrl;
-    };
-
-    return true;
+    return false;
   } catch (err) {
     console.error('[dashboard] erro ao carregar QR code', err);
     toggleHidden(els.qrImg, true);
@@ -1021,7 +1035,7 @@ async function refreshSelected(options = {}) {
 
     if (connection.meta?.shouldLoadQr) {
       setQrState('loading', 'Sincronizando QR…');
-      const qrOk = await loadQRCode(iid);
+      const qrOk = await loadQRCode(iid, { attempts: 5, delayMs: 2000 });
       if (qrOk) {
         const qrMessage = connection.meta?.qrMessage
           ? connection.meta.qrMessage(connection.updatedText)
