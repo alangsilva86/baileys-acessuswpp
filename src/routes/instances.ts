@@ -73,6 +73,8 @@ function isAuthorized(req: Request): boolean {
   const key = extractApiKey(req);
   if (!key) return false;
   return API_KEYS.some((k) => safeEquals(k, key));
+}
+
 function resolveApiKeyMatch(value: string): string | null {
   for (const candidate of API_KEYS) {
     if (safeEquals(candidate, value)) return candidate;
@@ -368,6 +370,8 @@ function buildMetricsPayload(inst: Instance, range: MetricsRange) {
     },
     aggregates,
   };
+}
+
 function connectionUpdatedAtIso(inst: Instance | undefined): string | null {
   return toIsoFromMs(inst?.connectionUpdatedAt ?? null);
 }
@@ -1122,13 +1126,17 @@ function buildCsvPayload(inst: Instance, range: MetricsRange): string {
   const payload = buildMetricsPayload(inst, range);
   const lines: string[] = [];
   const generatedAt = new Date().toISOString();
+  const totalSent =
+    payload.counters && 'sent' in payload.counters && typeof payload.counters.sent === 'number'
+      ? payload.counters.sent
+      : '';
   lines.push(['meta', 'instanceId', payload.id].map(csvEscape).join(','));
   lines.push(['meta', 'generatedAt', generatedAt].map(csvEscape).join(','));
   lines.push(['meta', 'range.requested.from', payload.range?.requested?.from ?? ''].map(csvEscape).join(','));
   lines.push(['meta', 'range.requested.to', payload.range?.requested?.to ?? ''].map(csvEscape).join(','));
   lines.push(['meta', 'range.effective.from', payload.range?.effective?.from ?? ''].map(csvEscape).join(','));
   lines.push(['meta', 'range.effective.to', payload.range?.effective?.to ?? ''].map(csvEscape).join(','));
-  lines.push(['meta', 'sent.total', payload.counters?.sent ?? ''].map(csvEscape).join(','));
+  lines.push(['meta', 'sent.total', totalSent].map(csvEscape).join(','));
   lines.push(['meta', 'sent.delta', payload.range?.summary?.deltas?.sent ?? ''].map(csvEscape).join(','));
   lines.push(['meta', 'delivery.pending', payload.delivery?.pending ?? ''].map(csvEscape).join(','));
   lines.push(['meta', 'delivery.serverAck', payload.delivery?.serverAck ?? ''].map(csvEscape).join(','));
