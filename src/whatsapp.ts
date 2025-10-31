@@ -7,7 +7,12 @@ import {
 } from '@whiskeysockets/baileys';
 import type { BaileysEventMap } from '@whiskeysockets/baileys';
 import { recordMetricsSnapshot } from './utils.js';
-import { type Instance, resetInstanceSession } from './instanceManager.js';
+import {
+  type Instance,
+  resetInstanceSession,
+  emitInstanceEvent,
+  type InstanceEventReason,
+} from './instanceManager.js';
 import { MessageService } from './baileys/messageService.js';
 import { PollService } from './baileys/pollService.js';
 import { WebhookClient } from './services/webhook.js';
@@ -25,6 +30,8 @@ const DEFAULT_STATUS_TTL_MS = 10 * 60_000;
 const DEFAULT_STATUS_SWEEP_INTERVAL_MS = 60_000;
 const FINAL_STATUS_THRESHOLD = 3;
 const FINAL_STATUS_CODES = new Set([0]);
+const QR_INITIAL_TTL_MS = 60_000;
+const QR_SUBSEQUENT_TTL_MS = 20_000;
 
 function dec(inst: Instance, status: number): void {
   const key = String(status);
@@ -74,6 +81,10 @@ export interface InstanceContext {
   webhook: WebhookClient;
 }
 
+function notifyInstanceEvent(inst: Instance, reason: InstanceEventReason, detail?: Record<string, unknown>): void {
+  emitInstanceEvent({ reason, instance: inst, detail: detail ?? null });
+}
+
 function updateConnectionState(inst: Instance, state: Instance['connectionState']): void {
   inst.connectionState = state;
   inst.connectionUpdatedAt = Date.now();
@@ -83,6 +94,42 @@ function updateLastQr(inst: Instance, qr: string | null): void {
   if (inst.lastQR === qr) return;
   inst.lastQR = qr;
   inst.qrVersion += 1;
+  if (qr) {
+    const now = Date.now();
+    const ttl = inst.qrVersion > 1 ? QR_SUBSEQUENT_TTL_MS : QR_INITIAL_TTL_MS;
+    inst.qrReceivedAt = now;
+    inst.qrExpiresAt = now + ttl;
+    const attempt = incrementPairingAttempts(inst);
+    notifyInstanceEvent(inst, 'qr', {
+      qrVersion: inst.qrVersion,
+      expiresAt: inst.qrExpiresAt,
+      attempt,
+    });
+  } else {
+    inst.qrReceivedAt = null;
+    inst.qrExpiresAt = null;
+  }
+}
+
+function clearPairingState(inst: Instance): void {
+  inst.pairingAttempts = 0;
+}
+
+function clearLastError(inst: Instance): void {
+  inst.lastError = null;
+}
+
+function setLastError(inst: Instance, message: string | null | undefined): void {
+  inst.lastError = message && message.trim() ? message.trim() : null;
+}
+
+function setConnectionDetail(inst: Instance, detail: Instance['connectionStateDetail']): void {
+  inst.connectionStateDetail = detail;
+}
+
+function incrementPairingAttempts(inst: Instance): number {
+  inst.pairingAttempts = Math.max(inst.pairingAttempts + 1, 1);
+  return inst.pairingAttempts;
 }
 
 export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
@@ -167,12 +214,24 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       updateLastQr(inst, qr);
       logger.info({ iid }, 'qr.updated');
     }
-    if (connection === 'connecting') { updateConnectionState(inst, 'connecting'); }
+    if (connection === 'connecting') {
+      updateConnectionState(inst, 'connecting');
+      setConnectionDetail(inst, null);
+      clearLastError(inst);
+      notifyInstanceEvent(inst, 'connection', { connection: 'connecting' });
+    }
     if (connection === 'open') {
       updateConnectionState(inst, 'open');
       updateLastQr(inst, null);
       inst.reconnectDelay = RECONNECT_MIN_DELAY_MS;
+      clearPairingState(inst);
+      clearLastError(inst);
+      setConnectionDetail(inst, null);
       logger.info({ iid, receivedPendingNotifications }, 'whatsapp.connected');
+      notifyInstanceEvent(inst, 'connection', {
+        connection: 'open',
+        receivedPendingNotifications,
+      });
     }
 
     if (connection === 'close') {
@@ -181,11 +240,31 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       const payloadMessage = lastDisconnect?.error?.output?.payload?.message;
       const errorMessageRaw = lastDisconnect?.error?.message;
       const errorFallback = typeof lastDisconnect?.error === 'string' ? lastDisconnect?.error : '';
-      const errorMessage = String(payloadMessage || errorMessageRaw || errorFallback || '').toLowerCase();
+      const combinedError = String(payloadMessage || errorMessageRaw || errorFallback || '');
+      const errorMessage = combinedError.toLowerCase();
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
       const isTimedOut =
         statusCode === DisconnectReason.timedOut || errorMessage.includes('qr refs attempts ended');
       logger.warn({ iid, statusCode }, 'whatsapp.disconnected');
+
+      const detail = {
+        statusCode: Number.isFinite(Number(statusCode)) ? Number(statusCode) : null,
+        reason: combinedError || null,
+        isLoggedOut,
+        isTimedOut,
+      };
+      setConnectionDetail(inst, detail);
+      setLastError(inst, combinedError);
+      notifyInstanceEvent(inst, 'connection', {
+        connection: 'close',
+        detail,
+      });
+      if (detail.reason) {
+        notifyInstanceEvent(inst, 'error', {
+          source: 'disconnect',
+          detail,
+        });
+      }
 
       if (isTimedOut) {
         updateLastQr(inst, null);
@@ -193,17 +272,45 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
         if (storedPhone) {
           const maskedPhone = storedPhone.replace(/.(?=.{4})/g, '*');
           logger.warn({ iid, maskedPhone }, 'whatsapp.qr_timeout.retrying_pairing');
+          const attempt = incrementPairingAttempts(inst);
+          notifyInstanceEvent(inst, 'pairing', {
+            via: 'auto',
+            attempt,
+            maskedPhone,
+          });
           void inst.sock
             ?.requestPairingCode(storedPhone)
             .then(() => {
               logger.info({ iid, maskedPhone }, 'whatsapp.qr_timeout.pairing_requested');
+              clearLastError(inst);
+              notifyInstanceEvent(inst, 'pairing', {
+                via: 'auto',
+                attempt,
+                maskedPhone,
+                status: 'ok',
+              });
             })
             .catch((err: any) => {
               logger.error({ iid, err: err?.message }, 'whatsapp.qr_timeout.pairing_failed');
+              setLastError(inst, err?.message);
+              notifyInstanceEvent(inst, 'error', {
+                source: 'pairing',
+                attempt,
+                detail: {
+                  message: err?.message || null,
+                },
+              });
             });
         } else {
           updateConnectionState(inst, 'qr_timeout');
+          setConnectionDetail(inst, {
+            statusCode: detail.statusCode,
+            reason: 'qr_timeout',
+            isLoggedOut: detail.isLoggedOut,
+            isTimedOut: true,
+          });
           logger.warn({ iid }, 'whatsapp.qr_timeout.no_phone');
+          notifyInstanceEvent(inst, 'connection', { connection: 'qr_timeout' });
         }
       }
 

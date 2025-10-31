@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile, rm, rename } from 'fs/promises';
 import path from 'path';
+import { EventEmitter } from 'events';
 import pino from 'pino';
 import type { WASocket } from '@whiskeysockets/baileys';
 import { startWhatsAppInstance, stopWhatsAppInstance, type InstanceContext } from './whatsapp.js';
@@ -82,12 +83,42 @@ export interface Instance {
   context: InstanceContext | null;
   connectionState: 'connecting' | 'open' | 'close' | 'qr_timeout';
   connectionUpdatedAt: number | null;
+  connectionStateDetail: {
+    statusCode: number | null;
+    reason: string | null;
+    isLoggedOut: boolean;
+    isTimedOut: boolean;
+  } | null;
+  qrReceivedAt: number | null;
+  qrExpiresAt: number | null;
+  pairingAttempts: number;
+  lastError: string | null;
   phoneNumber: string | null;
   lidMapping: LidMappingStore;
 }
 
 const instances = new Map<string, Instance>();
 
+export type InstanceEventReason = 'connection' | 'qr' | 'pairing' | 'error' | 'metadata';
+
+export interface InstanceEventPayload {
+  reason: InstanceEventReason;
+  instance: Instance;
+  detail?: Record<string, unknown> | null;
+}
+
+const instanceEventEmitter = new EventEmitter<{ event: [InstanceEventPayload] }>();
+instanceEventEmitter.setMaxListeners(0);
+
+function emitInstanceEvent(event: InstanceEventPayload): void {
+  instanceEventEmitter.emit('event', event);
+}
+
+function onInstanceEvent(listener: (event: InstanceEventPayload) => void): () => void {
+  instanceEventEmitter.on('event', listener);
+  return () => {
+    instanceEventEmitter.off('event', listener);
+  };
 const MAX_NOTE_REVISIONS = 20;
 const NOTE_MAX_LENGTH = 280;
 
@@ -233,6 +264,11 @@ function createInstanceRecord(
     context: null,
     connectionState: 'close',
     connectionUpdatedAt: Date.now(),
+    connectionStateDetail: null,
+    qrReceivedAt: null,
+    qrExpiresAt: null,
+    pairingAttempts: 0,
+    lastError: null,
     phoneNumber: null,
     lidMapping: new LidMappingStore(),
   };
@@ -462,6 +498,8 @@ export {
   ensureInstance,
   ensureInstanceStarted,
   removeInstance,
+  emitInstanceEvent,
+  onInstanceEvent,
   recordNoteRevision,
   summarizeNoteDiff,
   MAX_NOTE_REVISIONS,

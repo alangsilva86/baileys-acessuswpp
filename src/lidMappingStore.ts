@@ -1,4 +1,6 @@
 import type Long from 'long';
+import type { JidServer } from '@whiskeysockets/baileys';
+import { jidDecode, jidEncode, isLidUser } from '@whiskeysockets/baileys/lib/WABinary/jid-utils.js';
 import {
   jidDecode,
   jidEncode,
@@ -50,12 +52,12 @@ function canonicalizeJid(value: unknown, defaultServer?: JidServer | null): stri
   if (decoded?.user) {
     const server = decoded.server ?? defaultServer ?? null;
     if (!server) return null;
-    return jidEncode(decoded.user, server, decoded.device);
+    return jidEncode(decoded.user, server as JidServer, decoded.device);
   }
 
   if (/^[0-9]+$/.test(trimmed)) {
     if (!defaultServer) return trimmed;
-    return jidEncode(trimmed, defaultServer);
+    return jidEncode(trimmed, defaultServer as JidServer);
   }
 
   if (defaultServer && /^[0-9]+@[^@]+$/.test(trimmed)) {

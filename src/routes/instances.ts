@@ -11,6 +11,9 @@ import {
   resetInstanceSession,
   saveInstancesIndex,
   type Instance,
+  emitInstanceEvent,
+  onInstanceEvent,
+  type InstanceEventPayload,
   recordNoteRevision,
   summarizeNoteDiff,
   MAX_NOTE_REVISIONS,
@@ -50,6 +53,25 @@ function safeEquals(a: unknown, b: unknown): boolean {
   return crypto.timingSafeEqual(A, B);
 }
 
+function extractApiKey(req: Request): string {
+  const headerKey = req.header('x-api-key');
+  if (headerKey && headerKey.trim()) return headerKey.trim();
+  const queryKey = req.query.apiKey;
+  if (typeof queryKey === 'string' && queryKey.trim()) return queryKey.trim();
+  if (Array.isArray(queryKey)) {
+    const [first] = queryKey;
+    if (typeof first === 'string') {
+      const trimmed = first.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return '';
+}
+
+function isAuthorized(req: Request): boolean {
+  const key = extractApiKey(req);
+  if (!key) return false;
+  return API_KEYS.some((k) => safeEquals(k, key));
 function resolveApiKeyMatch(value: string): string | null {
   for (const candidate of API_KEYS) {
     if (safeEquals(candidate, value)) return candidate;
@@ -84,10 +106,63 @@ function auth(req: Request, res: Response, next: NextFunction): void {
 
 router.use(auth);
 
-function connectionUpdatedAtIso(inst: Instance | undefined): string | null {
-  if (!inst?.connectionUpdatedAt) return null;
-  const date = new Date(inst.connectionUpdatedAt);
+router.get('/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  res.write(`retry: 5000\n\n`);
+
+  const iidFilterRaw = req.query.iid;
+  const iidFilter = typeof iidFilterRaw === 'string' && iidFilterRaw.trim() ? iidFilterRaw.trim() : null;
+
+  const send = (event: InstanceEventPayload) => {
+    try {
+      if (iidFilter && event.instance.id !== iidFilter) return;
+      const payload = {
+        type: event.reason,
+        reason: event.reason,
+        detail: event.detail ?? null,
+        instance: serializeInstance(event.instance),
+      };
+      res.write('event: instance\n');
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    } catch (err) {
+      console.error('[instances] sse.write.failed', err);
+    }
+  };
+
+  const unsubscribe = onInstanceEvent(send);
+  const keepAlive = setInterval(() => {
+    try {
+      res.write('event: ping\n');
+      res.write('data: {}\n\n');
+    } catch (err) {
+      console.error('[instances] sse.keepalive.failed', err);
+    }
+  }, 25_000);
+
+  const initial = iidFilter ? getInstance(iidFilter) : null;
+  if (initial) {
+    send({ reason: 'connection', instance: initial, detail: null });
+  } else if (!iidFilter) {
+    getAllInstances().forEach((inst) => send({ reason: 'connection', instance: inst, detail: null }));
+  }
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    unsubscribe();
+  });
+});
+
+function toIsoFromMs(value: number | null | undefined): string | null {
+  if (value == null) return null;
+  const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function connectionUpdatedAtIso(inst: Instance | undefined): string | null {
+  return toIsoFromMs(inst?.connectionUpdatedAt ?? null);
 }
 
 function ensureInstanceHasSocket(
@@ -480,12 +555,37 @@ router.post(
     const previousPhone = inst.phoneNumber;
     inst.phoneNumber = phoneNumber;
     await saveInstancesIndex();
+    const maskedPhone = phoneNumber.replace(/.(?=.{4})/g, '*');
+    const attempt = Math.max(inst.pairingAttempts + 1, 1);
+    inst.pairingAttempts = attempt;
+    inst.lastError = null;
+    emitInstanceEvent({
+      reason: 'pairing',
+      instance: inst,
+      detail: { via: 'manual', attempt, maskedPhone },
+    });
     try {
       const code = await inst.sock.requestPairingCode(phoneNumber);
+      emitInstanceEvent({
+        reason: 'pairing',
+        instance: inst,
+        detail: { via: 'manual', attempt, maskedPhone, status: 'ok' },
+      });
       res.json({ pairingCode: code });
     } catch (err) {
       inst.phoneNumber = previousPhone;
       await saveInstancesIndex();
+      inst.lastError = getErrorMessage(err);
+      emitInstanceEvent({
+        reason: 'pairing',
+        instance: inst,
+        detail: { via: 'manual', attempt, status: 'error', message: inst.lastError },
+      });
+      emitInstanceEvent({
+        reason: 'error',
+        instance: inst,
+        detail: { source: 'pairing', attempt, message: inst.lastError },
+      });
       throw err;
     }
   }),
@@ -1815,9 +1915,16 @@ function serializeInstance(inst: Instance) {
     connected,
     connectionState: inst.connectionState,
     connectionUpdatedAt: connectionUpdatedAtIso(inst),
+    connectionStateDetail: inst.connectionStateDetail
+      ? { ...inst.connectionStateDetail }
+      : null,
     user: connected ? inst.sock?.user ?? null : null,
     qrVersion: inst.qrVersion,
     hasLastQr: Boolean(inst.lastQR),
+    qrReceivedAt: toIsoFromMs(inst.qrReceivedAt),
+    qrExpiresAt: toIsoFromMs(inst.qrExpiresAt),
+    pairingAttempts: inst.pairingAttempts,
+    lastError: inst.lastError,
     hasStoredPhone: Boolean(inst.phoneNumber),
     note: inst.metadata?.note || '',
     metadata: {
