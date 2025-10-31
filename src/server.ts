@@ -31,7 +31,6 @@ app.use(
         ...defaultCsp,
         'script-src': [
           ...(defaultCsp['script-src'] ?? []),
-          'https://cdn.tailwindcss.com',
           'https://cdn.jsdelivr.net',
         ],
         'connect-src': Array.from(
