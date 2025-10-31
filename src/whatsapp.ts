@@ -7,8 +7,6 @@ import {
 } from '@whiskeysockets/baileys';
 import type { BaileysEventMap } from '@whiskeysockets/baileys';
 import { recordMetricsSnapshot, resolveAckWaiters } from './utils.js';
-import { type Instance, resetInstanceSession } from './instanceManager.js';
-import { recordMetricsSnapshot } from './utils.js';
 import {
   type Instance,
   resetInstanceSession,
