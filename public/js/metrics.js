@@ -21,6 +21,9 @@ import {
 
 let chart;
 let hasLoadedSelected = false;
+let currentInstanceId = null;
+let currentConnectionState = null;
+let lastQrVersionAttempted = null;
 const qrVersionCache = new Map();
 
 function percent(value) {
@@ -164,6 +167,11 @@ async function loadQRCode(iid, options = {}) {
     let attempt = 0;
     while (attempt < attempts) {
       attempt += 1;
+      if (currentConnectionState === 'qr_timeout') {
+        toggleHidden(els.qrImg, true);
+        setQrState('qr-timeout', 'QR expirado. Solicite um novo código de pareamento no aplicativo.');
+        return false;
+      }
       const response = await fetch(`/instances/${iid}/qr.png?t=${Date.now()}`, {
         headers,
         cache: 'no-store',
@@ -225,7 +233,15 @@ export async function refreshSelected(options = {}) {
     resetChart();
     resetLogs();
     hasLoadedSelected = false;
+    currentInstanceId = null;
+    currentConnectionState = null;
+    lastQrVersionAttempted = null;
     return;
+  }
+
+  if (iid !== currentInstanceId) {
+    currentInstanceId = iid;
+    lastQrVersionAttempted = null;
   }
 
   const shouldShowMetricsSkeleton = withSkeleton ?? (!silent && !hasLoadedSelected);
@@ -238,6 +254,7 @@ export async function refreshSelected(options = {}) {
     const data = await fetchJSON(`/instances/${iid}`, true);
     updateInstanceLocksFromSnapshot([data]);
     const connection = describeConnection(data);
+    currentConnectionState = connection.state;
     setStatusBadge(connection, data.name);
     setSelectedInstanceActionsDisabled(iid, isInstanceLocked(iid));
 
@@ -245,6 +262,25 @@ export async function refreshSelected(options = {}) {
       applyInstanceNote(data);
     }
 
+    const qrVersionRaw = Number(data?.qrVersion);
+    const qrVersion = Number.isFinite(qrVersionRaw) ? qrVersionRaw : null;
+
+    if (connection.meta?.shouldLoadQr) {
+      const shouldPoll = qrVersion == null || qrVersion !== lastQrVersionAttempted;
+      let qrLoaded = false;
+      if (shouldPoll) {
+        if (qrVersion != null) lastQrVersionAttempted = qrVersion;
+        setQrState('loading', 'Sincronizando QR…');
+        qrLoaded = await loadQRCode(iid, { attempts: 5, delayMs: 2000 });
+        if (!qrLoaded && qrVersion == null) {
+          lastQrVersionAttempted = null;
+        }
+      }
+      if (qrLoaded || !shouldPoll) {
+        const qrMessage = connection.meta?.qrMessage
+          ? connection.meta.qrMessage(connection.updatedText)
+          : 'Instância desconectada.';
+        setQrState(connection.meta.qrState, qrMessage);
     const qrMessage = connection.meta?.qrMessage
       ? connection.meta.qrMessage(connection.updatedText)
       : connection.meta?.shouldLoadQr
@@ -275,6 +311,11 @@ export async function refreshSelected(options = {}) {
     } else {
       qrVersionCache.delete(iid);
       toggleHidden(els.qrImg, true);
+      const qrMessage = connection.meta?.qrMessage
+        ? connection.meta.qrMessage(connection.updatedText)
+        : 'Instância conectada.';
+      setQrState(connection.meta?.qrState || 'loading', qrMessage);
+      if (qrVersion != null) lastQrVersionAttempted = qrVersion;
       setQrState(qrState, qrMessage);
     }
 

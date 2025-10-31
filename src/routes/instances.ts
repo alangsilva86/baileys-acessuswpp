@@ -419,8 +419,22 @@ router.post(
       res.status(400).json({ error: 'phoneNumber obrigatório (ex: 5544...)' });
       return;
     }
-    const code = await inst.sock.requestPairingCode(String(phoneNumberRaw));
-    res.json({ pairingCode: code });
+    const phoneNumber = String(phoneNumberRaw).trim();
+    if (!phoneNumber) {
+      res.status(400).json({ error: 'phoneNumber inválido' });
+      return;
+    }
+    const previousPhone = inst.phoneNumber;
+    inst.phoneNumber = phoneNumber;
+    await saveInstancesIndex();
+    try {
+      const code = await inst.sock.requestPairingCode(phoneNumber);
+      res.json({ pairingCode: code });
+    } catch (err) {
+      inst.phoneNumber = previousPhone;
+      await saveInstancesIndex();
+      throw err;
+    }
   }),
 );
 
@@ -1357,6 +1371,9 @@ function serializeInstance(inst: Instance) {
     connectionState: inst.connectionState,
     connectionUpdatedAt: connectionUpdatedAtIso(inst),
     user: connected ? inst.sock?.user ?? null : null,
+    qrVersion: inst.qrVersion,
+    hasLastQr: Boolean(inst.lastQR),
+    hasStoredPhone: Boolean(inst.phoneNumber),
     note: inst.metadata?.note || '',
     metadata: {
       note: inst.metadata?.note || '',
