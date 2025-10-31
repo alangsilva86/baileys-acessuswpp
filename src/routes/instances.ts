@@ -70,18 +70,32 @@ function connectionUpdatedAtIso(inst: Instance | undefined): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function ensureInstanceOnline(inst: Instance | undefined, res: Response): inst is Instance & { sock: WASocket } {
+function ensureInstanceHasSocket(
+  inst: Instance | undefined,
+  res: Response,
+  allowedStates: Instance['connectionState'][] = ['open'],
+): inst is Instance & { sock: WASocket } {
   if (!inst) {
     res.status(404).json({ error: 'instance_not_found' });
     return false;
   }
-  if (!inst.sock || inst.connectionState !== 'open') {
+  if (!inst.sock) {
+    res
+      .status(503)
+      .json({ error: 'instance_offline', state: inst.connectionState, updatedAt: connectionUpdatedAtIso(inst) });
+    return false;
+  }
+  if (!allowedStates.includes(inst.connectionState)) {
     res
       .status(503)
       .json({ error: 'instance_offline', state: inst.connectionState, updatedAt: connectionUpdatedAtIso(inst) });
     return false;
   }
   return true;
+}
+
+function ensureInstanceOnline(inst: Instance | undefined, res: Response): inst is Instance & { sock: WASocket } {
+  return ensureInstanceHasSocket(inst, res, ['open']);
 }
 
 function getErrorMessage(err: unknown): string {
@@ -399,7 +413,7 @@ router.post(
   '/:iid/pair',
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
-    if (!ensureInstanceOnline(inst, res)) return;
+    if (!ensureInstanceHasSocket(inst, res, ['open', 'connecting'])) return;
     const phoneNumberRaw = (req.body as any)?.phoneNumber;
     if (!phoneNumberRaw) {
       res.status(400).json({ error: 'phoneNumber obrigatório (ex: 5544...)' });
