@@ -11,6 +11,9 @@ import {
   resetInstanceSession,
   saveInstancesIndex,
   type Instance,
+  recordNoteRevision,
+  summarizeNoteDiff,
+  MAX_NOTE_REVISIONS,
 } from '../instanceManager.js';
 import { brokerEventStore } from '../broker/eventStore.js';
 import { allowSend, sendWithTimeout, normalizeToE164BR, getSendTimeoutMs } from '../utils.js';
@@ -36,6 +39,10 @@ const API_KEYS = String(process.env.API_KEY || 'change-me')
   .map((s) => s.trim())
   .filter(Boolean);
 
+interface AuthedRequest extends Request {
+  authorizedKeyId?: string;
+}
+
 function safeEquals(a: unknown, b: unknown): boolean {
   const A = Buffer.from(String(a ?? ''));
   const B = Buffer.from(String(b ?? ''));
@@ -43,16 +50,35 @@ function safeEquals(a: unknown, b: unknown): boolean {
   return crypto.timingSafeEqual(A, B);
 }
 
-function isAuthorized(req: Request): boolean {
-  const key = req.header('x-api-key') || '';
-  return API_KEYS.some((k) => safeEquals(k, key));
+function resolveApiKeyMatch(value: string): string | null {
+  for (const candidate of API_KEYS) {
+    if (safeEquals(candidate, value)) return candidate;
+  }
+  return null;
+}
+
+function deriveAuthorizedKeyId(value: string): string {
+  const hash = crypto.createHash('sha256').update(value).digest('hex').slice(0, 12);
+  return `key:${hash}`;
+}
+
+function attachAuthorizedKey(req: Request, key: string | null): void {
+  if (!key) return;
+  (req as AuthedRequest).authorizedKeyId = deriveAuthorizedKeyId(key);
+}
+
+function getAuthorizedKeyId(req: Request): string | null {
+  return (req as AuthedRequest).authorizedKeyId ?? null;
 }
 
 function auth(req: Request, res: Response, next: NextFunction): void {
-  if (!isAuthorized(req)) {
+  const provided = req.header('x-api-key') || '';
+  const matched = resolveApiKeyMatch(provided);
+  if (!matched) {
     res.status(401).json({ error: 'unauthorized' });
     return;
   }
+  attachAuthorizedKey(req, matched);
   next();
 }
 
@@ -318,8 +344,17 @@ router.patch(
       return;
     }
 
+    if (!inst.metadata) {
+      inst.metadata = { note: '', createdAt: null, updatedAt: null, revisions: [] };
+    }
+    if (!Array.isArray(inst.metadata.revisions)) {
+      inst.metadata.revisions = [];
+    }
+
     const body = (req.body || {}) as Record<string, unknown>;
     let touched = false;
+    let noteChanged = false;
+    const previousNote = inst.metadata.note || '';
 
     if (Object.prototype.hasOwnProperty.call(body, 'name')) {
       if (typeof body.name !== 'string') {
@@ -347,8 +382,13 @@ router.patch(
         res.status(400).json({ error: 'note_invalid' });
         return;
       }
-      inst.metadata = inst.metadata || { note: '', createdAt: null, updatedAt: null };
-      inst.metadata.note = String(patchNote).trim().slice(0, 280);
+      const nextNote = String(patchNote).trim().slice(0, 280);
+      if (nextNote !== inst.metadata.note) {
+        noteChanged = true;
+        inst.metadata.note = nextNote;
+      } else {
+        inst.metadata.note = nextNote;
+      }
       touched = true;
     }
 
@@ -357,7 +397,26 @@ router.patch(
       return;
     }
 
-    inst.metadata.updatedAt = new Date().toISOString();
+    const nowIso = new Date().toISOString();
+    if (noteChanged) {
+      const author = getAuthorizedKeyId(req);
+      const diffSummary = summarizeNoteDiff(previousNote, inst.metadata.note || '');
+      recordNoteRevision(inst, {
+        timestamp: nowIso,
+        author,
+        diff: {
+          before: previousNote,
+          after: inst.metadata.note || '',
+          summary: diffSummary,
+        },
+      });
+    }
+
+    if (Array.isArray(inst.metadata.revisions) && inst.metadata.revisions.length > MAX_NOTE_REVISIONS) {
+      inst.metadata.revisions = inst.metadata.revisions.slice(0, MAX_NOTE_REVISIONS);
+    }
+
+    inst.metadata.updatedAt = nowIso;
     await saveInstancesIndex();
     res.json(serializeInstance(inst));
   }),
@@ -1765,6 +1824,7 @@ function serializeInstance(inst: Instance) {
       note: inst.metadata?.note || '',
       createdAt: inst.metadata?.createdAt || null,
       updatedAt: inst.metadata?.updatedAt || null,
+      revisions: Array.isArray(inst.metadata?.revisions) ? inst.metadata.revisions : [],
     },
     counters: {
       sent: inst.metrics.sent,
@@ -1780,6 +1840,7 @@ function serializeInstance(inst: Instance) {
       usage: inst.rateWindow.length / (Number(process.env.RATE_MAX_SENDS || 20) || 1),
     },
     metricsStartedAt: inst.metrics.startedAt,
+    revisions: Array.isArray(inst.metadata?.revisions) ? inst.metadata.revisions : [],
   };
 }
 

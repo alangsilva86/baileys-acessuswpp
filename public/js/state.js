@@ -141,6 +141,9 @@ export const NOTE_STATE = {
   timer: null,
   pending: '',
   saving: false,
+  revisions: [],
+  selectedRevision: 'current',
+  restoring: false,
 };
 
 export const REFRESH_INTERVAL_MS = 5000;
