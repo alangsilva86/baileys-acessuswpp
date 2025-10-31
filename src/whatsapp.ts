@@ -38,24 +38,20 @@ import {
 } from './whatsapp/connectionLifecycle.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
-<<<<<<< Updated upstream
-const PHONE_NUMBER_SHARE_EVENT = 'chats.phoneNumberShare' as const;
-type PhoneNumberSharePayload = {
-  jid?: unknown;
-  lid?: unknown;
-} | null | undefined;
-function extractPhoneNumberShare(payload: PhoneNumberSharePayload): {
-  jid: string | null;
-  lid: string | null;
-} {
+const PHONE_NUMBER_SHARE_EVENT = 'chats.phoneNumberShare';
+type PhoneNumberSharePayload =
+  | {
+      jid?: unknown;
+      lid?: unknown;
+    }
+  | null
+  | undefined;
+
+function extractPhoneNumberShare(payload: PhoneNumberSharePayload): { jid: string | null; lid: string | null } {
   const jid = typeof payload?.jid === 'string' && payload.jid.trim() ? payload.jid : null;
   const lid = typeof payload?.lid === 'string' && payload.lid.trim() ? payload.lid : null;
   return { jid, lid };
 }
-=======
-const PHONE_NUMBER_SHARE_EVENT = 'chats.phoneNumberShare';
-type PhoneNumberSharePayload = { lid?: string; jid?: string };
->>>>>>> Stashed changes
 
 const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
@@ -96,14 +92,9 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   inst.context = null;
 
   sock.ev.on('creds.update', saveCreds);
-<<<<<<< Updated upstream
-  sock.ev.on(PHONE_NUMBER_SHARE_EVENT as unknown as keyof BaileysEventMap, (payload: unknown) => {
-    const { jid, lid } = extractPhoneNumberShare(payload as PhoneNumberSharePayload);
-    const added = inst.lidMapping.rememberMapping(jid, lid);
-=======
   sock.ev.on(PHONE_NUMBER_SHARE_EVENT as any, (payload: PhoneNumberSharePayload) => {
-    const added = inst.lidMapping.rememberMapping(payload?.jid, payload?.lid);
->>>>>>> Stashed changes
+    const { jid, lid } = extractPhoneNumberShare(payload);
+    const added = inst.lidMapping.rememberMapping(jid, lid);
     if (added) {
       logger.debug({ iid: inst.id, jid, lid }, 'lidMapping.share');
     }
