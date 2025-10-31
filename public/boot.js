@@ -64,7 +64,12 @@ async function runRoundSequence(options, controller) {
 
 function startRound(options = {}) {
   const reason = options.reason || 'auto';
-  const hasRunning = schedulerState.runningPromise && !schedulerState.currentController?.signal?.aborted;
+  const controllerInFlight = schedulerState.currentController;
+  const hasRunning =
+    schedulerState.runningPromise &&
+    controllerInFlight &&
+    controllerInFlight.signal &&
+    !controllerInFlight.signal.aborted;
   if (hasRunning) {
     return schedulerState.runningPromise;
   }
@@ -119,6 +124,7 @@ function requestImmediateRound(options = {}) {
 function cancelInFlight() {
   schedulerState.currentController?.abort();
   schedulerState.currentController = null;
+  schedulerState.runningPromise = null;
   clearScheduledRound();
 }
 

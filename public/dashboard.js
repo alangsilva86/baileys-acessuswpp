@@ -801,6 +801,8 @@ function percent(v) {
 let chart;
 let hasLoadedInstances = false;
 let refreshInstancesInFlight = null;
+let refreshInstancesSignal = null;
+let refreshInstancesToken = 0;
 let hasLoadedSelected = false;
 function initChart() {
   const ctx = document.getElementById('metricsChart').getContext('2d');
@@ -892,11 +894,16 @@ function updateKpis(metrics) {
 
 /* ---------- Instâncias ---------- */
 async function refreshInstances(options = {}) {
-  if (refreshInstancesInFlight) return refreshInstancesInFlight;
   const { silent = false, withSkeleton, signal } = options;
+  const dedupeSignal = signal || null;
+  if (refreshInstancesInFlight && refreshInstancesSignal === dedupeSignal) {
+    return refreshInstancesInFlight;
+  }
   const shouldShowSkeleton = withSkeleton ?? (!hasLoadedInstances && !silent);
   if (shouldShowSkeleton || !hasLoadedInstances) setCardsLoading(true);
 
+  const runToken = ++refreshInstancesToken;
+  refreshInstancesSignal = dedupeSignal;
   refreshInstancesInFlight = (async () => {
     try {
       const data = await fetchJSON('/instances', true, { signal });
@@ -1020,7 +1027,10 @@ async function refreshInstances(options = {}) {
       showError('Falha ao carregar instâncias');
     } finally {
       if (!signal?.aborted) setCardsLoading(false);
-      refreshInstancesInFlight = null;
+      if (refreshInstancesToken === runToken) {
+        refreshInstancesInFlight = null;
+        refreshInstancesSignal = null;
+      }
       const currentSelected = els.selInstance.value;
       if (currentSelected) {
         setSelectedInstanceActionsDisabled(currentSelected, isInstanceLocked(currentSelected));
@@ -1609,7 +1619,18 @@ async function refreshLogs(options = {}) {
 }
 
 if (els.btnRefreshLogs) {
-  els.btnRefreshLogs.addEventListener('click', () => refreshLogs({ silent: false }));
+  els.btnRefreshLogs.addEventListener('click', () => {
+    setBusy(els.btnRefreshLogs, true, 'Atualizando…');
+    triggerFullRefresh({ silent: true, withSkeleton: false, reason: 'logs-button' })
+      .catch((err) => {
+        if (isAbortError(err)) return;
+        console.error('[dashboard] erro ao atualizar logs manualmente', err);
+        showError('Falha ao atualizar os eventos recentes');
+      })
+      .finally(() => {
+        setBusy(els.btnRefreshLogs, false);
+      });
+  });
 }
 
 function triggerFullRefresh(options = {}) {
@@ -1620,6 +1641,7 @@ function triggerFullRefresh(options = {}) {
   return (async () => {
     await refreshInstances(options);
     await refreshSelected(options);
+    await refreshLogs({ silent: options.silent ?? false });
   })();
 }
 
