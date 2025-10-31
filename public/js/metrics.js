@@ -23,7 +23,6 @@ let chart;
 let hasLoadedSelected = false;
 let currentInstanceId = null;
 let currentConnectionState = null;
-let lastQrVersionAttempted = null;
 const qrVersionCache = new Map();
 
 function percent(value) {
@@ -235,13 +234,11 @@ export async function refreshSelected(options = {}) {
     hasLoadedSelected = false;
     currentInstanceId = null;
     currentConnectionState = null;
-    lastQrVersionAttempted = null;
     return;
   }
 
   if (iid !== currentInstanceId) {
     currentInstanceId = iid;
-    lastQrVersionAttempted = null;
   }
 
   const shouldShowMetricsSkeleton = withSkeleton ?? (!silent && !hasLoadedSelected);
@@ -262,25 +259,6 @@ export async function refreshSelected(options = {}) {
       applyInstanceNote(data);
     }
 
-    const qrVersionRaw = Number(data?.qrVersion);
-    const qrVersion = Number.isFinite(qrVersionRaw) ? qrVersionRaw : null;
-
-    if (connection.meta?.shouldLoadQr) {
-      const shouldPoll = qrVersion == null || qrVersion !== lastQrVersionAttempted;
-      let qrLoaded = false;
-      if (shouldPoll) {
-        if (qrVersion != null) lastQrVersionAttempted = qrVersion;
-        setQrState('loading', 'Sincronizando QR…');
-        qrLoaded = await loadQRCode(iid, { attempts: 5, delayMs: 2000 });
-        if (!qrLoaded && qrVersion == null) {
-          lastQrVersionAttempted = null;
-        }
-      }
-      if (qrLoaded || !shouldPoll) {
-        const qrMessage = connection.meta?.qrMessage
-          ? connection.meta.qrMessage(connection.updatedText)
-          : 'Instância desconectada.';
-        setQrState(connection.meta.qrState, qrMessage);
     const qrMessage = connection.meta?.qrMessage
       ? connection.meta.qrMessage(connection.updatedText)
       : connection.meta?.shouldLoadQr
@@ -311,11 +289,6 @@ export async function refreshSelected(options = {}) {
     } else {
       qrVersionCache.delete(iid);
       toggleHidden(els.qrImg, true);
-      const qrMessage = connection.meta?.qrMessage
-        ? connection.meta.qrMessage(connection.updatedText)
-        : 'Instância conectada.';
-      setQrState(connection.meta?.qrState || 'loading', qrMessage);
-      if (qrVersion != null) lastQrVersionAttempted = qrVersion;
       setQrState(qrState, qrMessage);
     }
 
