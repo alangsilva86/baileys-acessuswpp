@@ -1,9 +1,6 @@
 import type Long from 'long';
-import {
-  jidDecode,
-  jidEncode,
-  isLidUser,
-} from '@whiskeysockets/baileys/lib/WABinary/jid-utils.js';
+import type { JidServer } from '@whiskeysockets/baileys';
+import { jidDecode, jidEncode, isLidUser } from '@whiskeysockets/baileys/lib/WABinary/jid-utils.js';
 
 function toStringId(value: unknown): string | null {
   if (typeof value === 'string') {
@@ -30,7 +27,7 @@ function toStringId(value: unknown): string | null {
     if ('user' in (value as Record<string, unknown>) && 'server' in (value as Record<string, unknown>)) {
       const user = toStringId((value as Record<string, unknown>).user);
       const server = toStringId((value as Record<string, unknown>).server);
-      if (user && server) return jidEncode(user, server as string);
+      if (user && server) return jidEncode(user, server as JidServer);
     }
   }
   return null;
@@ -46,12 +43,12 @@ function canonicalizeJid(value: unknown, defaultServer?: string): string | null 
   if (decoded?.user) {
     const server = decoded.server || defaultServer;
     if (!server) return null;
-    return jidEncode(decoded.user, server, decoded.device);
+    return jidEncode(decoded.user, server as JidServer, decoded.device);
   }
 
   if (/^[0-9]+$/.test(trimmed)) {
     if (!defaultServer) return trimmed;
-    return jidEncode(trimmed, defaultServer);
+    return jidEncode(trimmed, defaultServer as JidServer);
   }
 
   if (defaultServer && /^[0-9]+@[^@]+$/.test(trimmed)) {

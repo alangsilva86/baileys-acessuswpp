@@ -124,6 +124,20 @@
           </div>
           <img id="qrImg" alt="QR" class="mx-auto hidden" />
           <div id="qrHint" class="text-sm text-slate-500" aria-live="polite">Selecione uma instância desconectada para ver o QR.</div>
+          <div id="qrMeta" class="mt-2 text-xs text-slate-500 space-y-1" aria-live="polite">
+            <div class="flex items-center justify-between">
+              <span class="font-medium text-slate-600">Expira em</span>
+              <span id="qrCountdown">—</span>
+            </div>
+            <div class="flex items-center justify-between">
+              <span class="font-medium text-slate-600">Tentativa atual</span>
+              <span id="qrAttempt">—</span>
+            </div>
+            <div id="qrLastErrorWrap" class="flex items-center justify-between hidden">
+              <span class="font-medium text-rose-600">Último erro</span>
+              <span id="qrLastError" class="text-rose-600 text-right truncate max-w-[12rem]">—</span>
+            </div>
+          </div>
         </div>
         <div class="mt-3 flex gap-2 flex-wrap">
           <button id="btnLogout" class="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg">Desconectar</button>
