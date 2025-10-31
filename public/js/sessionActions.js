@@ -253,9 +253,8 @@ function bindDocumentShortcuts() {
       return;
     }
 
-    let key;
     try {
-      key = requireKey();
+      requireKey();
     } catch {
       return;
     }
@@ -281,11 +280,18 @@ function bindDocumentShortcuts() {
 function bindNewInstance() {
   if (!els.btnNew) return;
   els.btnNew.addEventListener('click', async () => {
-    const name = prompt('Nome da nova instância (ex: suporte-goiania)');
+    const rawName = prompt('Nome da nova instância (ex: suporte-goiania)');
+    const name = rawName ? rawName.trim() : '';
     if (!name) return;
+    try {
+      requireKey();
+    } catch {
+      return;
+    }
     if (els.inpApiKey) {
       localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
     }
+    setBusy(els.btnNew, true, 'Criando…');
     try {
       const payload = await fetchJSON('/instances', true, {
         method: 'POST',
@@ -293,12 +299,25 @@ function bindNewInstance() {
       });
       const label = payload?.name || payload?.id || name;
       setBadgeState('update', 'Instância criada (' + label + ')', 4000);
+      const newId = payload?.id || null;
       await refreshInstances({ withSkeleton: true });
+      if (newId && els.selInstance) {
+        els.selInstance.value = newId;
+        await refreshSelected({ withSkeleton: true });
+      }
     } catch (err) {
+      if (err?.status === 409) {
+        console.warn('[session] instância já existe', { name });
+        showError('Já existe uma instância com esse identificador.');
+        setBadgeState('error', 'Instância já cadastrada (' + name + ')', 6000);
+        return;
+      }
       if (handleInstanceOfflineError(err)) return;
       console.error('[session] erro ao criar instância', err);
       showError('Falha ao criar instância');
       alert('Falha ao criar instância: ' + err.message);
+    } finally {
+      setBusy(els.btnNew, false);
     }
   });
 }
