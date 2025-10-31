@@ -2,13 +2,13 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import type { WASocket } from '@whiskeysockets/baileys';
 import type { WAMessage } from '@whiskeysockets/baileys';
 import crypto from 'node:crypto';
-import { mkdir, rename, rm } from 'fs/promises';
 import QRCode from 'qrcode';
 import {
   createInstance,
   deleteInstance,
   getAllInstances,
   getInstance,
+  resetInstanceSession,
   saveInstancesIndex,
   type Instance,
 } from '../instanceManager.js';
@@ -281,6 +281,8 @@ router.get('/', (_req, res) => {
       notes: serialized.note,
       metadata: serialized.metadata,
       connected: serialized.connected,
+      connectionState: serialized.connectionState,
+      connectionUpdatedAt: serialized.connectionUpdatedAt,
       user: serialized.user,
       counters: { sent: serialized.counters.sent, status: serialized.counters.statusCounts },
       rate: serialized.rate,
@@ -431,52 +433,13 @@ router.post(
       return;
     }
 
-    try {
-      inst.stopping = true;
-      if (inst.sock) {
-        try {
-          await inst.sock.logout().catch(() => undefined);
-        } catch {
-          // ignore
-        }
-        try {
-          inst.sock.end?.(undefined);
-        } catch {
-          // ignore
-        }
-      }
-    } catch {
-      // ignore
-    }
+    void resetInstanceSession(inst).catch((err) => {
+      console.error('[instances] resetInstanceSession.failed', err);
+    });
 
-    try {
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const backupDir = `${inst.dir}.bak-${stamp}`;
-      await rename(inst.dir, backupDir).catch(() => undefined);
-      await mkdir(inst.dir, { recursive: true }).catch(() => undefined);
-
-      res.json({ ok: true, message: 'Sessão isolada. Reiniciando para gerar novo QR.' });
-
-      setTimeout(() => process.exit(0), 200);
-      setTimeout(async () => {
-        try {
-          await rm(backupDir, { recursive: true, force: true });
-        } catch {
-          // ignore
-        }
-      }, 1000);
-    } catch (err) {
-      try {
-        await rm(inst.dir, { recursive: true, force: true });
-        await mkdir(inst.dir, { recursive: true });
-        res.json({ ok: true, message: 'Sessão limpa. Reiniciando para gerar novo QR.' });
-        setTimeout(() => process.exit(0), 200);
-      } catch (innerErr: any) {
-        res
-          .status(500)
-          .json({ error: 'falha ao limpar sessão', detail: innerErr?.message || String(innerErr) });
-      }
-    }
+    res
+      .status(202)
+      .json({ ok: true, message: 'Sessão reiniciando. O QR será regenerado em instantes.' });
   }),
 );
 

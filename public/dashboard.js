@@ -230,6 +230,82 @@ function setBusy(button, busy, label) {
   }
 }
 
+const INSTANCE_LOCK_ACTIONS = ['save', 'qr', 'logout', 'wipe', 'delete'];
+const INSTANCE_LOCK_TIMEOUT_MS = 60_000;
+const instanceActionLocks = new Map();
+
+function escapeSelectorValue(value) {
+  if (typeof CSS !== 'undefined' && CSS?.escape) return CSS.escape(value);
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
+}
+
+function toggleButtonsDisabled(buttons, disabled) {
+  buttons.forEach((btn) => {
+    if (!btn) return;
+    btn.disabled = disabled;
+    btn.classList[disabled ? 'add' : 'remove']('pointer-events-none');
+    btn.classList[disabled ? 'add' : 'remove']('opacity-60');
+  });
+}
+
+function setInstanceActionsDisabled(iid, disabled) {
+  const selectorIid = escapeSelectorValue(iid);
+  const buttons = INSTANCE_LOCK_ACTIONS.flatMap((act) =>
+    Array.from(document.querySelectorAll(`[data-act="${act}"][data-iid="${selectorIid}"]`)),
+  );
+  toggleButtonsDisabled(buttons, disabled);
+}
+
+function setSelectedInstanceActionsDisabled(iid, disabled) {
+  if (els.selInstance?.value !== iid) return;
+  toggleButtonsDisabled(
+    [els.btnLogout, els.btnWipe, els.btnPair, els.btnSend, els.btnRefreshLogs].filter(Boolean),
+    disabled,
+  );
+}
+
+function lockInstanceActions(iid, type = 'restart') {
+  instanceActionLocks.set(iid, { type, startedAt: Date.now() });
+  setInstanceActionsDisabled(iid, true);
+  setSelectedInstanceActionsDisabled(iid, true);
+}
+
+function unlockInstanceActions(iid) {
+  if (!instanceActionLocks.has(iid)) return;
+  instanceActionLocks.delete(iid);
+  setInstanceActionsDisabled(iid, false);
+  setSelectedInstanceActionsDisabled(iid, false);
+}
+
+function isInstanceLocked(iid) {
+  return instanceActionLocks.has(iid);
+}
+
+function shouldUnlockInstance(lock, snapshot, now = Date.now()) {
+  if (!lock || !snapshot) return false;
+  const stateRaw = typeof snapshot.connectionState === 'string' ? snapshot.connectionState : undefined;
+  const state = stateRaw || (snapshot.connected ? 'open' : 'close');
+  if (state === 'open' || state === 'connecting') return true;
+
+  const updatedAt = snapshot.connectionUpdatedAt;
+  const updatedMs = updatedAt ? Date.parse(updatedAt) : null;
+  if (updatedMs && Number.isFinite(updatedMs) && updatedMs > lock.startedAt && state !== 'close') {
+    return true;
+  }
+
+  return now - lock.startedAt > INSTANCE_LOCK_TIMEOUT_MS;
+}
+
+function updateInstanceLocksFromSnapshot(instances = []) {
+  const now = Date.now();
+  instances.forEach((inst) => {
+    const lock = instanceActionLocks.get(inst.id);
+    if (lock && shouldUnlockInstance(lock, inst, now)) {
+      unlockInstanceActions(inst.id);
+    }
+  });
+}
+
 function setCardsLoading(isLoading) {
   toggleHidden(els.cardsSkeleton, !isLoading);
   toggleHidden(els.instanceLoading, !isLoading);
@@ -806,6 +882,7 @@ async function refreshInstances(options = {}) {
   refreshInstancesInFlight = (async () => {
     try {
       const data = await fetchJSON('/instances', true);
+      updateInstanceLocksFromSnapshot(data);
       const prev = els.selInstance.value;
       els.selInstance.textContent = '';
 
@@ -845,6 +922,8 @@ async function refreshInstances(options = {}) {
         const card = document.createElement('article');
         card.className = 'p-4 bg-white rounded-2xl shadow transition ring-emerald-200/50 space-y-3';
         if (i.id === selected) card.classList.add('ring-2', 'ring-emerald-200');
+        const locked = isInstanceLocked(i.id);
+        card.classList.toggle('opacity-75', locked);
         const badgeClass = connection.meta?.badgeClass || 'bg-slate-100 text-slate-700';
         const statusLabel = typeof connection.meta?.cardLabel === 'function'
           ? connection.meta.cardLabel(connection.updatedText)
@@ -912,6 +991,7 @@ async function refreshInstances(options = {}) {
         </div>
       `;
         els.cards.appendChild(card);
+        setInstanceActionsDisabled(i.id, locked);
       });
 
       hasLoadedInstances = true;
@@ -924,6 +1004,10 @@ async function refreshInstances(options = {}) {
     } finally {
       setCardsLoading(false);
       refreshInstancesInFlight = null;
+      const currentSelected = els.selInstance.value;
+      if (currentSelected) {
+        setSelectedInstanceActionsDisabled(currentSelected, isInstanceLocked(currentSelected));
+      }
     }
   })();
 
@@ -1018,8 +1102,10 @@ async function refreshSelected(options = {}) {
 
   try {
     const data = await fetchJSON('/instances/' + iid, true);
+    updateInstanceLocksFromSnapshot([data]);
     const connection = describeConnection(data);
     setStatusBadge(connection, data.name);
+    setSelectedInstanceActionsDisabled(iid, isInstanceLocked(iid));
 
     if (els.noteCard) {
       els.noteCard.classList.remove('hidden');
@@ -1127,6 +1213,7 @@ async function performInstanceAction(action, iid, key, context = {}) {
     wipe: (name) => 'Wipe solicitado (' + name + ')'
   };
   const holdTimes = { logout: 5000, wipe: 7000 };
+  const restartingMessage = (name) => 'Instância reiniciando (' + name + ')';
 
   const url = endpoints[action];
   if (!url) return false;
@@ -1136,6 +1223,14 @@ async function performInstanceAction(action, iid, key, context = {}) {
   if (button) setBusy(button, true, action === 'logout' ? 'Desconectando…' : 'Limpando…');
   try {
     const r = await fetch(url, { method: 'POST', headers: { 'x-api-key': key } });
+    if (action === 'wipe' && r.status === 202) {
+      const payload = await r.json().catch(() => ({}));
+      const message = payload?.message || restartingMessage(name);
+      lockInstanceActions(iid, 'restart');
+      setBadgeState('wipe', message, holdTimes[action]);
+      await refreshInstances({ silent: true, withSkeleton: false });
+      return true;
+    }
     if (!r.ok) {
       const txt = await r.text().catch(() => '');
       alert('Falha ao executar ' + action + ': HTTP ' + r.status + (txt ? ' — ' + txt : ''));
@@ -1148,11 +1243,24 @@ async function performInstanceAction(action, iid, key, context = {}) {
     await refreshInstances({ silent: true, withSkeleton: false });
     return true;
   } catch (err) {
+    if (action === 'wipe') {
+      console.error('[dashboard] erro em ' + action, err);
+      lockInstanceActions(iid, 'restart');
+      setBadgeState('wipe', restartingMessage(name), holdTimes[action]);
+      setTimeout(() => {
+        refreshInstances({ silent: true, withSkeleton: false }).catch(() => undefined);
+      }, 1500);
+      return true;
+    }
     console.error('[dashboard] erro em ' + action, err);
     showError('Erro ao executar ' + action);
     return false;
   } finally {
     if (button) setBusy(button, false);
+    if (isInstanceLocked(iid)) {
+      setInstanceActionsDisabled(iid, true);
+      setSelectedInstanceActionsDisabled(iid, true);
+    }
   }
 }
 

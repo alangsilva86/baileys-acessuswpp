@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rm } from 'fs/promises';
+import { mkdir, readFile, writeFile, rm, rename } from 'fs/promises';
 import path from 'path';
 import pino from 'pino';
 import type { WASocket } from '@whiskeysockets/baileys';
@@ -289,12 +289,63 @@ async function removeInstance(id: string, options: { logout?: boolean; removeDir
   await deleteInstance(id, options);
 }
 
+async function resetInstanceSession(inst: Instance): Promise<void> {
+  const iid = inst.id;
+
+  try {
+    await stopWhatsAppInstance(inst, { logout: true });
+  } catch (err) {
+    logger.warn({ iid, err }, 'instance.reset.stop.failed');
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupDir = `${inst.dir}.bak-${stamp}`;
+  let backupCreated = false;
+
+  try {
+    await rename(inst.dir, backupDir);
+    backupCreated = true;
+  } catch (err: any) {
+    if (err?.code !== 'ENOENT') {
+      logger.warn({ iid, err }, 'instance.reset.backup.failed');
+      try {
+        await rm(inst.dir, { recursive: true, force: true });
+      } catch (rmErr) {
+        logger.warn({ iid, err: rmErr }, 'instance.reset.cleanup.failed');
+      }
+    }
+  }
+
+  try {
+    await mkdir(inst.dir, { recursive: true });
+  } catch (err) {
+    logger.error({ iid, err }, 'instance.reset.dir.create.failed');
+    throw err;
+  }
+
+  if (backupCreated) {
+    setTimeout(() => {
+      rm(backupDir, { recursive: true, force: true }).catch((err) =>
+        logger.warn({ iid, err }, 'instance.reset.backup.cleanup.failed'),
+      );
+    }, 0);
+  }
+
+  try {
+    await startWhatsAppInstance(inst);
+  } catch (err) {
+    logger.error({ iid, err }, 'instance.reset.restart.failed');
+    throw err;
+  }
+}
+
 export {
   loadInstances,
   saveInstancesIndex,
   startAllInstances,
   createInstance,
   deleteInstance,
+  resetInstanceSession,
   getInstance,
   getAllInstances,
   ensureInstance,
