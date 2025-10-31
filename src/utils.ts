@@ -61,14 +61,13 @@ export async function sendWithTimeout(
   ]);
 }
 
-export function waitForAck(inst: Instance, messageId: string, timeoutMs = 10_000): Promise<number | null> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      inst.ackWaiters.delete(messageId);
-      resolve(null);
-    }, timeoutMs);
-    inst.ackWaiters.set(messageId, { resolve, timer });
-  });
+export function waitForAck(inst: Instance, messageId: string): Promise<number | null> {
+  const status = inst.statusMap.get(messageId);
+  if (status != null) {
+    return Promise.resolve(status);
+  }
+  const lastStatus = inst.metrics.last.lastStatusId === messageId ? inst.metrics.last.lastStatusCode : null;
+  return Promise.resolve(lastStatus ?? 0);
 }
 
 export function recordMetricsSnapshot(inst: Instance, force = false): void {

@@ -63,7 +63,7 @@ async function handleQuickSend() {
     return;
   }
 
-  const body = JSON.stringify({ to: phoneNumber, message, waitAckMs: 8000 });
+  const body = JSON.stringify({ to: phoneNumber, message });
   setBusy(els.btnSend, true, 'Enviando…');
   setSendOut('Enviando mensagem…', 'info');
 

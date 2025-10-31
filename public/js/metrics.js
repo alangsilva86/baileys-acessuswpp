@@ -140,15 +140,15 @@ function updateKpis(metrics) {
   els.kpiRateHint.textContent = `${metrics?.rate?.inWindow || 0}/${metrics?.rate?.limit || 0} envios na janela`;
   els.kpiRateValue.className = 'mt-1 text-2xl font-semibold ' + (ratePercent >= 90 ? 'text-rose-600' : ratePercent >= 70 ? 'text-amber-600' : 'text-emerald-600');
 
-  const samples = metrics?.ack?.samples || 0;
-  if (samples) {
-    const avgMs = Math.round(metrics?.ack?.avgMs || 0);
-    els.kpiAckValue.textContent = `${avgMs} ms`;
-    const lastMs = metrics?.ack?.lastMs ? Math.round(metrics.ack.lastMs) + ' ms' : '—';
-    els.kpiAckHint.textContent = `${samples} amostra${samples > 1 ? 's' : ''} • último: ${lastMs}`;
+  const deliveryData = metrics?.delivery || {};
+  const inTransitRaw = Number(deliveryData.inFlight);
+  const inTransit = Number.isFinite(inTransitRaw) ? inTransitRaw : pending + serverAck;
+  if (sent) {
+    els.kpiTransitValue.textContent = String(inTransit);
+    els.kpiTransitHint.textContent = `Status 1: ${pending} • Status 2: ${serverAck}`;
   } else {
-    els.kpiAckValue.textContent = '—';
-    els.kpiAckHint.textContent = 'Envie mensagens com confirmação para ver este indicador.';
+    els.kpiTransitValue.textContent = '0';
+    els.kpiTransitHint.textContent = 'Envie mensagens para acompanhar envios em trânsito.';
   }
 }
 

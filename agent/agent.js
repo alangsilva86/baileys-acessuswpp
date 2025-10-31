@@ -285,12 +285,12 @@ async function n8nPOST(url, body) {
 }
 
 // --------------------- Send helpers (+sanitize) ---------------
-async function sendText(to, message, instanceId, waitAckMs = 8000) {
+async function sendText(to, message, instanceId) {
   const normalized = normalizeBRPhone(to);
   if (!normalized) throw new Error('to inválido');
-  return await baileysPOST('/send-text', { to: normalized, message, waitAckMs }, instanceId);
+  return await baileysPOST('/send-text', { to: normalized, message }, instanceId);
 }
-async function sendButtons(to, text, buttons, instanceId, waitAckMs = 8000) {
+async function sendButtons(to, text, buttons, instanceId) {
   const normalized = normalizeBRPhone(to);
   if (!normalized) throw new Error('to inválido');
   const safe = (buttons || [])
@@ -298,9 +298,9 @@ async function sendButtons(to, text, buttons, instanceId, waitAckMs = 8000) {
     .slice(0, 3)
     .map(b => ({ id: String(b.id || b.text).slice(0,128), text: String(b.text || b.id).slice(0,24) }));
   if (!safe.length) throw new Error('no buttons');
-  return await baileysPOST('/send-buttons', { to: normalized, text, buttons: safe, waitAckMs }, instanceId);
+  return await baileysPOST('/send-buttons', { to: normalized, text, buttons: safe }, instanceId);
 }
-async function sendList(to, text, buttonText, sections, instanceId, footer = 'Acessus', waitAckMs = 8000) {
+async function sendList(to, text, buttonText, sections, instanceId, footer = 'Acessus') {
   const normalized = normalizeBRPhone(to);
   if (!normalized) throw new Error('to inválido');
   const fixed = (sections || [])
@@ -317,7 +317,7 @@ async function sendList(to, text, buttonText, sections, instanceId, footer = 'Ac
     }))
     .filter(s => s.rows && s.rows.length);
   if (!fixed.length) throw new Error('sections sem rows válidas');
-  const payload = { to: normalized, text, buttonText: String(buttonText).slice(0,24), sections: fixed, footer, waitAckMs };
+  const payload = { to: normalized, text, buttonText: String(buttonText).slice(0,24), sections: fixed, footer };
   return await baileysPOST('/send-list', payload, instanceId);
 }
 

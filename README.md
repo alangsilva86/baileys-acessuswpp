@@ -375,8 +375,7 @@ Envie até **3 botões de resposta rápida** para um contato usando `templateBut
     { "id": "opt-1", "title": "Primeira opção" },
     { "id": "opt-2", "title": "Segunda opção" }
   ],
-  "footer": "Texto opcional",
-  "waitAckMs": 1000
+  "footer": "Texto opcional"
 }
 ```
 
@@ -384,7 +383,7 @@ Envie até **3 botões de resposta rápida** para um contato usando `templateBut
 - `text` é obrigatório e será exibido como corpo da mensagem.
 - `options` é obrigatório, aceita de 1 a 3 itens com campos `id` (único) e `title`.
 - `footer` é opcional e aparece abaixo dos botões.
-- `waitAckMs`, quando informado, aguarda o ACK do WhatsApp pelo tempo indicado (em ms) antes de responder.
+- A resposta da API é enviada imediatamente após o Baileys confirmar o envio da mensagem.
 
 Resposta típica:
 
@@ -392,12 +391,9 @@ Resposta típica:
 {
   "id": "BAE5...",
   "messageId": "BAE5...",
-  "status": 1,
-  "ack": 2
+  "status": 1
 }
 ```
-
-O campo `ack` será `null` se `waitAckMs` não for enviado ou se o status não chegar a tempo. O mesmo formato de resposta é adotado pelos endpoints `send-text` e `send-list`.
 
 ##### Enviar listas interativas (`POST /instances/:id/send-list`)
 
@@ -424,8 +420,7 @@ Monte menus com seções usando mensagens do tipo `list` do Baileys. Exemplo de 
         { "id": "cheesecake", "title": "Cheesecake" }
       ]
     }
-  ],
-  "waitAckMs": 1500
+  ]
 }
 ```
 
@@ -433,7 +428,7 @@ Monte menus com seções usando mensagens do tipo `list` do Baileys. Exemplo de 
 - Cada seção pode ter um `title` opcional e precisa de pelo menos uma opção.
 - Cada opção exige `id` (único dentro da mensagem) e `title`; `description` é opcional e aparece como legenda.
 - `text`, `footer` e `title` são exibidos como corpo, rodapé e cabeçalho da mensagem, respectivamente.
-- `waitAckMs` funciona da mesma forma que em `send-text`/`send-buttons`.
+- A confirmação do endpoint ocorre assim que o envio é aceito pelo WhatsApp.
 
 Resposta:
 
@@ -441,8 +436,7 @@ Resposta:
 {
   "id": "BAE6...",
   "messageId": "BAE6...",
-  "status": 1,
-  "ack": null
+  "status": 1
 }
 ```
 
@@ -602,7 +596,6 @@ Envia arquivos de mídia para um contato ou grupo. Os parâmetros aceitos são:
   - `mimetype`: MIME type do arquivo (ex.: `image/jpeg`, `video/mp4`, `audio/mpeg`, `application/pdf`).
   - `fileName`: nome do arquivo (obrigatório para documentos; opcional nos demais tipos).
 - `caption` (string, opcional): legenda a ser anexada à mídia.
-- `waitAckMs` (number, opcional): tempo em milissegundos para aguardar o ACK da mensagem.
 
 > **Limites:** uploads em base64 são limitados a 16 MB por mensagem. Para URLs, apenas protocolos `http` ou `https` são aceitos. Recomenda-se utilizar os MIME types suportados oficialmente pelo WhatsApp (`image/jpeg`, `image/png`, `video/mp4`, `audio/mpeg`, `application/pdf`, entre outros).
 
@@ -618,8 +611,7 @@ POST /instances/meu-bot/send-media
     "base64": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...",
     "fileName": "catalogo.jpg",
     "mimetype": "image/jpeg"
-  },
-  "waitAckMs": 5000
+  }
 }
 ```
 

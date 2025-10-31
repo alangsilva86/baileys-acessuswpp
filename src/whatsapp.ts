@@ -50,7 +50,6 @@ function removeStatus(inst: Instance, messageId: string): void {
   if (prev != null) dec(inst, prev);
   inst.statusMap.delete(messageId);
   inst.statusTimestamps.delete(messageId);
-  inst.ackSentAt.delete(messageId);
 }
 function prune(inst: Instance): void {
   if (!inst.statusMap.size) return;
@@ -271,26 +270,7 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
         let snap = false;
         const ensureSnap = () => { if (!snap) { recordMetricsSnapshot(inst); snap = true; } };
 
-        if (status >= 2 && inst.ackSentAt?.has(mid)) {
-          const sentAt = inst.ackSentAt.get(mid);
-          inst.ackSentAt.delete(mid);
-          if (sentAt) {
-            const delta = Math.max(0, Date.now() - sentAt);
-            inst.metrics.ack.totalMs += delta;
-            inst.metrics.ack.count += 1;
-            inst.metrics.ack.lastMs = delta;
-            inst.metrics.ack.avgMs = Math.round(inst.metrics.ack.totalMs / Math.max(inst.metrics.ack.count, 1));
-          }
-        }
-
         ensureSnap();
-
-        const waiter = inst.ackWaiters.get(mid);
-        if (waiter) {
-          clearTimeout(waiter.timer);
-          inst.ackWaiters.delete(mid);
-          waiter.resolve(status);
-        }
 
         if (isFinal(status)) {
           ensureSnap();

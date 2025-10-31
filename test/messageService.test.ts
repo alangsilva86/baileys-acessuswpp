@@ -402,6 +402,25 @@ test('MessageService emits structured outbound payload for text messages', async
   assert.deepStrictEqual(stored[0]?.payload, payload);
 });
 
+test('MessageService.sendText rejects when Baileys sendMessage times out', async () => {
+  const webhook = new FakeWebhook();
+  const sock = {
+    async sendMessage() {
+      return new Promise<any>(() => {});
+    },
+  } as unknown as WASocket;
+
+  const service = new MessageService(
+    sock,
+    webhook as unknown as WebhookClient,
+    { warn: () => {} } as unknown as pino.Logger,
+    { eventStore: new BrokerEventStore(), instanceId: 'timeout-instance' },
+  );
+
+  await assert.rejects(service.sendText('551199999999@s.whatsapp.net', 'Oi', { timeoutMs: 10 }), /send timeout/);
+  assert.equal(webhook.events.length, 0, 'no webhook event should be emitted when send fails');
+});
+
 test('MessageService inclui metadados de mídia ao enviar para o LeadEngine', async () => {
   const eventStore = new BrokerEventStore();
   const webhook = new FakeWebhook();
