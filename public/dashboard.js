@@ -1351,17 +1351,6 @@ function closeDeleteModal() {
 els.modalDelete.addEventListener('click', (ev) => {
   if (ev.target === els.modalDelete) closeDeleteModal();
 });
-function openPairModal(code) {
-  if (!els.pairModal) return;
-  if (els.pairModalCode) els.pairModalCode.textContent = code || '—';
-  els.pairModal.classList.remove('hidden');
-  els.pairModal.classList.add('flex');
-}
-function closePairModal() {
-  if (!els.pairModal) return;
-  els.pairModal.classList.add('hidden');
-  els.pairModal.classList.remove('flex');
-}
 let pairModalCountdownTimer = null;
 
 function clearPairModalCountdown() {
