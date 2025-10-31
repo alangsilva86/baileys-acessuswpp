@@ -18,8 +18,27 @@ import { PollService } from './baileys/pollService.js';
 import { WebhookClient } from './services/webhook.js';
 import { brokerEventStore } from './broker/eventStore.js';
 import { filterClientMessages } from './baileys/messageUtils.js';
+import {
+  applyStatus,
+  deriveStatusFromReceipt,
+  normalizeStatusCode,
+  clearStatusTimers,
+} from './whatsapp/statusTracker.js';
+import type { MessageReceipt } from './whatsapp/statusTracker.js';
+import {
+  QR_INITIAL_TTL_MS,
+  QR_SUBSEQUENT_TTL_MS,
+  updateConnectionState,
+  updateLastQr,
+  clearPairingState,
+  clearLastError,
+  setLastError,
+  setConnectionDetail,
+  incrementPairingAttempts,
+} from './whatsapp/connectionLifecycle.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+<<<<<<< Updated upstream
 const PHONE_NUMBER_SHARE_EVENT = 'chats.phoneNumberShare' as const;
 type PhoneNumberSharePayload = {
   jid?: unknown;
@@ -33,178 +52,13 @@ function extractPhoneNumberShare(payload: PhoneNumberSharePayload): {
   const lid = typeof payload?.lid === 'string' && payload.lid.trim() ? payload.lid : null;
   return { jid, lid };
 }
+=======
+const PHONE_NUMBER_SHARE_EVENT = 'chats.phoneNumberShare';
+type PhoneNumberSharePayload = { lid?: string; jid?: string };
+>>>>>>> Stashed changes
 
 const RECONNECT_MIN_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
-
-const DEFAULT_STATUS_TTL_MS = 10 * 60_000;
-const DEFAULT_STATUS_SWEEP_INTERVAL_MS = 60_000;
-const FINAL_STATUS_THRESHOLD = 3;
-const FINAL_STATUS_CODES = new Set([0]);
-const QR_INITIAL_TTL_MS = 60_000;
-const QR_SUBSEQUENT_TTL_MS = 20_000;
-
-function dec(inst: Instance, status: number): void {
-  const key = String(status);
-  const cur = inst.metrics.status_counts[key] || 0;
-  inst.metrics.status_counts[key] = cur > 0 ? cur - 1 : 0;
-}
-function inc(inst: Instance, status: number): void {
-  const key = String(status);
-  inst.metrics.status_counts[key] = (inst.metrics.status_counts[key] || 0) + 1;
-}
-function parsePosInt(v: string | undefined, fb: number): number {
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? n : fb;
-}
-const STATUS_TTL_MS = parsePosInt(process.env.STATUS_TTL_MS, DEFAULT_STATUS_TTL_MS);
-const STATUS_SWEEP_INTERVAL_MS = parsePosInt(process.env.STATUS_SWEEP_INTERVAL_MS, DEFAULT_STATUS_SWEEP_INTERVAL_MS);
-
-function isFinal(status: number): boolean {
-  return status >= FINAL_STATUS_THRESHOLD || FINAL_STATUS_CODES.has(status);
-}
-function removeStatus(inst: Instance, messageId: string, options: { record?: boolean } = {}): void {
-  if (!inst.statusMap.has(messageId)) return;
-  const prev = inst.statusMap.get(messageId);
-  if (options.record ?? true) {
-    recordMetricsSnapshot(inst);
-  }
-  if (prev != null) dec(inst, prev);
-  inst.statusMap.delete(messageId);
-  inst.statusTimestamps.delete(messageId);
-}
-function prune(inst: Instance): void {
-  if (!inst.statusMap.size) return;
-  const now = Date.now();
-  for (const [mid, status] of inst.statusMap.entries()) {
-    const updatedAt = inst.statusTimestamps.get(mid) ?? 0;
-    if (isFinal(status) || now - updatedAt >= STATUS_TTL_MS) removeStatus(inst, mid);
-  }
-}
-function ensureCleanup(inst: Instance): void {
-  if (inst.statusCleanupTimer) return;
-  inst.statusCleanupTimer = setInterval(() => prune(inst), STATUS_SWEEP_INTERVAL_MS);
-}
-
-function toNumber(val: unknown): number | null {
-  if (val == null) return null;
-  if (typeof val === 'number') {
-    return Number.isFinite(val) ? val : null;
-  }
-  if (typeof val === 'string' && val.trim()) {
-    const parsed = Number(val);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  if (typeof val === 'object' && typeof (val as { toNumber?: () => number }).toNumber === 'function') {
-    try {
-      const parsed = (val as { toNumber: () => number }).toNumber();
-      return Number.isFinite(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-const STATUS_TEXT_MAP: Record<string, number> = {
-  ERROR: 0,
-  FAILED: 0,
-  PENDING: 1,
-  QUEUED: 1,
-  SENT: 1,
-  SERVER_ACK: 2,
-  ACK: 2,
-  DELIVERY_ACK: 3,
-  DELIVERED: 3,
-  READ: 4,
-  PLAYED: 5,
-};
-
-type ReceiptLike = Partial<{
-  receiptTimestamp: unknown;
-  readTimestamp: unknown;
-  playedTimestamp: unknown;
-  pendingDeviceJid: unknown;
-  deliveredDeviceJid: unknown;
-}>;
-
-function normalizeStatusCode(raw: unknown): number | null {
-  if (raw == null) return null;
-  if (typeof raw === 'number') {
-    const normalized = Math.trunc(raw);
-    return Number.isFinite(normalized) ? normalized : null;
-  }
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim();
-    if (!trimmed) return null;
-    const numeric = Number(trimmed);
-    if (Number.isFinite(numeric)) return Math.trunc(numeric);
-    const mapped = STATUS_TEXT_MAP[trimmed.toUpperCase()];
-    if (mapped != null) return mapped;
-    return null;
-  }
-  if (typeof raw === 'object') {
-    const candidateKeys = ['status', 'code', 'value'];
-    for (const key of candidateKeys) {
-      if (Object.prototype.hasOwnProperty.call(raw, key)) {
-        const result = normalizeStatusCode((raw as Record<string, unknown>)[key]);
-        if (result != null) return result;
-      }
-    }
-  }
-  return null;
-}
-
-function deriveStatusFromReceipt(receipt: ReceiptLike): number | null {
-  if (!receipt) return null;
-  const played = toNumber(receipt.playedTimestamp);
-  if (played && played > 0) return 5;
-  const read = toNumber(receipt.readTimestamp);
-  if (read && read > 0) return 4;
-  const deliveredList = Array.isArray(receipt.deliveredDeviceJid)
-    ? receipt.deliveredDeviceJid.filter(Boolean)
-    : [];
-  if (deliveredList.length > 0) return 3;
-  const receiptTs = toNumber(receipt.receiptTimestamp);
-  if (receiptTs && receiptTs > 0) return 2;
-  const pendingList = Array.isArray(receipt.pendingDeviceJid)
-    ? receipt.pendingDeviceJid.filter(Boolean)
-    : [];
-  if (pendingList.length > 0) return 1;
-  return null;
-}
-
-function applyStatus(inst: Instance, messageId: string, status: number): boolean {
-  if (status == null) return false;
-  const now = Date.now();
-  const prev = inst.statusMap.get(messageId);
-  if (prev != null && status <= prev) {
-    inst.statusTimestamps.set(messageId, now);
-    return false;
-  }
-
-  if (prev != null) {
-    dec(inst, prev);
-  }
-
-  inst.statusMap.set(messageId, status);
-  inst.statusTimestamps.set(messageId, now);
-  ensureCleanup(inst);
-  inc(inst, status);
-
-  inst.metrics.last.lastStatusId = messageId;
-  inst.metrics.last.lastStatusCode = status;
-
-  recordMetricsSnapshot(inst, true);
-  resolveAckWaiters(inst, messageId, status);
-
-  if (isFinal(status)) {
-    removeStatus(inst, messageId, { record: false });
-    recordMetricsSnapshot(inst, true);
-  }
-
-  return true;
-}
 
 const API_KEYS = String(process.env.API_KEY || 'change-me').split(',').map((s) => s.trim()).filter(Boolean);
 
@@ -216,53 +70,6 @@ export interface InstanceContext {
 
 function notifyInstanceEvent(inst: Instance, reason: InstanceEventReason, detail?: Record<string, unknown>): void {
   emitInstanceEvent({ reason, instance: inst, detail: detail ?? null });
-}
-
-function updateConnectionState(inst: Instance, state: Instance['connectionState']): void {
-  inst.connectionState = state;
-  inst.connectionUpdatedAt = Date.now();
-}
-
-function updateLastQr(inst: Instance, qr: string | null): void {
-  if (inst.lastQR === qr) return;
-  inst.lastQR = qr;
-  inst.qrVersion += 1;
-  if (qr) {
-    const now = Date.now();
-    const ttl = inst.qrVersion > 1 ? QR_SUBSEQUENT_TTL_MS : QR_INITIAL_TTL_MS;
-    inst.qrReceivedAt = now;
-    inst.qrExpiresAt = now + ttl;
-    const attempt = incrementPairingAttempts(inst);
-    notifyInstanceEvent(inst, 'qr', {
-      qrVersion: inst.qrVersion,
-      expiresAt: inst.qrExpiresAt,
-      attempt,
-    });
-  } else {
-    inst.qrReceivedAt = null;
-    inst.qrExpiresAt = null;
-  }
-}
-
-function clearPairingState(inst: Instance): void {
-  inst.pairingAttempts = 0;
-}
-
-function clearLastError(inst: Instance): void {
-  inst.lastError = null;
-}
-
-function setLastError(inst: Instance, message: string | null | undefined): void {
-  inst.lastError = message && message.trim() ? message.trim() : null;
-}
-
-function setConnectionDetail(inst: Instance, detail: Instance['connectionStateDetail']): void {
-  inst.connectionStateDetail = detail;
-}
-
-function incrementPairingAttempts(inst: Instance): number {
-  inst.pairingAttempts = Math.max(inst.pairingAttempts + 1, 1);
-  return inst.pairingAttempts;
 }
 
 export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
@@ -289,9 +96,14 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   inst.context = null;
 
   sock.ev.on('creds.update', saveCreds);
+<<<<<<< Updated upstream
   sock.ev.on(PHONE_NUMBER_SHARE_EVENT as unknown as keyof BaileysEventMap, (payload: unknown) => {
     const { jid, lid } = extractPhoneNumberShare(payload as PhoneNumberSharePayload);
     const added = inst.lidMapping.rememberMapping(jid, lid);
+=======
+  sock.ev.on(PHONE_NUMBER_SHARE_EVENT as any, (payload: PhoneNumberSharePayload) => {
+    const added = inst.lidMapping.rememberMapping(payload?.jid, payload?.lid);
+>>>>>>> Stashed changes
     if (added) {
       logger.debug({ iid: inst.id, jid, lid }, 'lidMapping.share');
     }
@@ -345,7 +157,9 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     if (inst.socketId !== currentSocketId) return;
 
     if (qr) {
-      updateLastQr(inst, qr);
+      updateLastQr(inst, qr, {
+        onEvent: (reason, detail) => notifyInstanceEvent(inst, reason, detail),
+      });
       logger.info({ iid }, 'qr.updated');
     }
     if (connection === 'connecting') {
@@ -539,7 +353,7 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
     for (const update of updates) {
       const mid = update?.key?.id ?? null;
       if (!mid) continue;
-      const receipt = update.receipt as ReceiptLike;
+      const receipt = update.receipt as MessageReceipt;
       const status = deriveStatusFromReceipt(receipt);
       const changed = status != null ? applyStatus(inst, mid, status) : false;
 
@@ -565,12 +379,7 @@ export async function stopWhatsAppInstance(inst: Instance | undefined, { logout 
     } catch {}
     inst.reconnectTimer = null;
   }
-  if (inst.statusCleanupTimer) {
-    try {
-      clearInterval(inst.statusCleanupTimer);
-    } catch {}
-    inst.statusCleanupTimer = null;
-  }
+  clearStatusTimers(inst);
 
   if (inst.ackWaiters.size) {
     const pending = [...inst.ackWaiters.keys()];
