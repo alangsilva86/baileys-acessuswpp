@@ -143,10 +143,17 @@
             <div>
               <label class="block text-sm font-medium text-slate-700 mb-1">Telefone (E.164)</label>
               <input id="inpPhone" type="tel" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="+5511999999999" />
+              <p id="phoneError" class="mt-1 text-xs text-rose-600 hidden"></p>
             </div>
             <div>
+              <label class="block text-sm font-medium text-slate-700 mb-1">Template</label>
+              <select id="selTemplate" class="w-full border rounded-lg px-3 py-2 text-sm"></select>
+              <p class="mt-1 text-[11px] text-slate-500">Selecione um modelo ou mantenha mensagem livre.</p>
+            </div>
+            <div class="md:col-span-2">
               <label class="block text-sm font-medium text-slate-700 mb-1">Mensagem</label>
               <textarea id="inpMsg" rows="3" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Sua mensagem aqui"></textarea>
+              <p id="messageError" class="mt-1 text-xs text-rose-600 hidden"></p>
               <div class="mt-1 text-[11px] text-slate-500 text-right">
                 <span id="msgCounter">0</span>/4096
               </div>
@@ -156,6 +163,7 @@
             <button id="btnSend" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Enviar</button>
           </div>
           <div id="sendOut" class="text-xs text-slate-600 bg-slate-50 rounded p-2 min-h-[2rem]" aria-live="polite"></div>
+          <div id="sendHistory" class="space-y-2"></div>
         </div>
       </div>
     </section>

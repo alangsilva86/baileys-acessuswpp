@@ -40,10 +40,14 @@ const els = {
   // Envio rápido
   inpApiKey: document.getElementById('inpApiKey'),
   inpPhone: document.getElementById('inpPhone'),
+  selTemplate: document.getElementById('selTemplate'),
   inpMsg: document.getElementById('inpMsg'),
   btnSend: document.getElementById('btnSend'),
   sendOut: document.getElementById('sendOut'),
   msgCounter: document.getElementById('msgCounter'),
+  phoneError: document.getElementById('phoneError'),
+  messageError: document.getElementById('messageError'),
+  sendHistory: document.getElementById('sendHistory'),
 
   // Logs recentes
   btnRefreshLogs: document.getElementById('btnRefreshLogs'),
@@ -230,6 +234,25 @@ function setBusy(button, busy, label) {
   }
 }
 
+function pushBusy(button, label) {
+  if (!button) return;
+  const count = Number(button.dataset.busyCount || '0');
+  if (count === 0) setBusy(button, true, label);
+  button.dataset.busyCount = String(count + 1);
+}
+
+function popBusy(button) {
+  if (!button) return;
+  const count = Number(button.dataset.busyCount || '0');
+  const next = Math.max(0, count - 1);
+  if (next === 0) {
+    setBusy(button, false);
+    delete button.dataset.busyCount;
+  } else {
+    button.dataset.busyCount = String(next);
+  }
+}
+
 const INSTANCE_LOCK_ACTIONS = ['save', 'qr', 'logout', 'wipe', 'delete'];
 const INSTANCE_LOCK_TIMEOUT_MS = 60_000;
 const instanceActionLocks = new Map();
@@ -347,11 +370,52 @@ const SEND_OUT_CLASSES = {
   info: 'text-slate-600 bg-slate-50',
 };
 
+const TEMPLATE_CONFIG_URL = 'quickSend.templates.json';
+const DEFAULT_TEMPLATE_ID = '__custom__';
+const MAX_HISTORY_ITEMS = 10;
+const MAX_PARALLEL_SENDS = 2;
+
+const quickTemplates = [];
+const lastMessages = [];
+const sendQueue = [];
+let runningSends = 0;
+
 function setSendOut(message, tone = 'info') {
   if (!els.sendOut) return;
   els.sendOut.textContent = message;
   const toneClass = SEND_OUT_CLASSES[tone] || SEND_OUT_CLASSES.info;
   els.sendOut.className = 'text-xs rounded p-2 min-h-[2rem] ' + toneClass;
+}
+
+function setFieldError(inputEl, errorEl, message) {
+  if (!inputEl || !errorEl) return;
+  if (message) {
+    errorEl.textContent = message;
+    errorEl.classList.remove('hidden');
+    inputEl.classList.add('border-rose-500', 'focus:border-rose-500', 'focus:ring-rose-500', 'bg-rose-50');
+  } else {
+    errorEl.textContent = '';
+    errorEl.classList.add('hidden');
+    inputEl.classList.remove('border-rose-500', 'focus:border-rose-500', 'focus:ring-rose-500', 'bg-rose-50');
+  }
+}
+
+function validatePhone(raw) {
+  const value = (raw || '').trim();
+  if (!value) return { error: 'Informe um telefone.' };
+  const sanitized = value.replace(/[^\d+]/g, '');
+  const normalized = sanitized.startsWith('+') ? sanitized : '+' + sanitized.replace(/^\++/, '');
+  if (!validateE164(normalized)) {
+    return { error: 'Telefone inválido. Use o formato E.164 (ex: +5511999999999).' };
+  }
+  return { value: normalized };
+}
+
+function validateMessage(raw) {
+  const value = (raw || '').trim();
+  if (!value) return { error: 'Informe uma mensagem para enviar.' };
+  if (value.length > 4096) return { error: 'Mensagem excede 4096 caracteres.' };
+  return { value };
 }
 
 function updateMsgCounter() {
@@ -710,6 +774,385 @@ function formatTimelineLabel(iso) {
 }
 function option(v, t) { const o = document.createElement('option'); o.value=v; o.textContent=t; return o; }
 
+const HISTORY_STATUS_META = {
+  queued: { label: 'Na fila', className: 'bg-amber-100 text-amber-700' },
+  sending: { label: 'Enviando', className: 'bg-sky-100 text-sky-700' },
+  success: { label: 'Enviado', className: 'bg-emerald-100 text-emerald-700' },
+  error: { label: 'Erro', className: 'bg-rose-100 text-rose-700' },
+};
+
+function enqueueSend(task) {
+  return new Promise((resolve, reject) => {
+    sendQueue.push({ task, resolve, reject });
+    processSendQueue();
+  });
+}
+
+function processSendQueue() {
+  if (runningSends >= MAX_PARALLEL_SENDS) return;
+  const next = sendQueue.shift();
+  if (!next) return;
+  runningSends += 1;
+  const { task, resolve, reject } = next;
+  Promise.resolve()
+    .then(task)
+    .then((result) => resolve(result))
+    .catch((err) => reject(err))
+    .finally(() => {
+      runningSends = Math.max(0, runningSends - 1);
+      processSendQueue();
+    });
+}
+
+function addHistoryEntry(entry) {
+  lastMessages.unshift(entry);
+  if (lastMessages.length > MAX_HISTORY_ITEMS) lastMessages.length = MAX_HISTORY_ITEMS;
+  renderHistory();
+}
+
+function updateHistoryEntry(id, patch) {
+  const item = lastMessages.find((msg) => msg.id === id);
+  if (!item) return;
+  Object.assign(item, patch);
+  renderHistory();
+}
+
+function formatHistoryTime(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return timeLabelFmt.format(d);
+  } catch {
+    return '';
+  }
+}
+
+function renderHistory() {
+  if (!els.sendHistory) return;
+  els.sendHistory.innerHTML = '';
+  if (!lastMessages.length) {
+    const empty = document.createElement('p');
+    empty.className = 'text-xs text-slate-500 text-center';
+    empty.textContent = 'Nenhum envio recente.';
+    els.sendHistory.appendChild(empty);
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  lastMessages.forEach((entry) => {
+    const card = document.createElement('div');
+    card.className = 'border border-slate-200 bg-white rounded-xl p-3 shadow-sm space-y-2';
+
+    const header = document.createElement('div');
+    header.className = 'flex items-center justify-between gap-2 flex-wrap';
+    const title = document.createElement('span');
+    title.className = 'font-medium text-slate-700 break-all';
+    title.textContent = entry.to || '(destinatário)';
+    const ts = document.createElement('span');
+    ts.className = 'text-[10px] text-slate-500';
+    ts.textContent = formatHistoryTime(entry.createdAt);
+    header.appendChild(title);
+    header.appendChild(ts);
+    card.appendChild(header);
+
+    if (entry.instanceLabel) {
+      const instanceInfo = document.createElement('p');
+      instanceInfo.className = 'text-[10px] text-slate-500';
+      instanceInfo.textContent = `Instância: ${entry.instanceLabel}`;
+      card.appendChild(instanceInfo);
+    }
+
+    if (entry.templateLabel && entry.templateId && entry.templateId !== DEFAULT_TEMPLATE_ID) {
+      const tpl = document.createElement('p');
+      tpl.className = 'text-[10px] text-slate-500';
+      tpl.textContent = `Template: ${entry.templateLabel}`;
+      card.appendChild(tpl);
+    }
+
+    const body = document.createElement('p');
+    body.className = 'text-[11px] text-slate-600 whitespace-pre-wrap break-words';
+    body.textContent = entry.message || '';
+    card.appendChild(body);
+
+    const statusRow = document.createElement('div');
+    statusRow.className = 'flex items-center justify-between gap-2 flex-wrap';
+    const statusMeta = HISTORY_STATUS_META[entry.status] || HISTORY_STATUS_META.queued;
+    const statusChip = document.createElement('span');
+    statusChip.className = 'inline-flex items-center px-2 py-1 rounded-full text-[10px] font-medium ' + (statusMeta.className || 'bg-slate-100 text-slate-600');
+    statusChip.textContent = statusMeta.label;
+    statusRow.appendChild(statusChip);
+
+    const actions = document.createElement('div');
+    actions.className = 'flex items-center gap-2';
+    const resend = document.createElement('button');
+    resend.type = 'button';
+    resend.dataset.act = 'history-resend';
+    resend.dataset.id = entry.id;
+    resend.className = 'text-[11px] text-sky-600 hover:underline disabled:text-slate-400';
+    resend.textContent = 'Reenviar';
+    if (entry.status === 'sending' || entry.status === 'queued') resend.disabled = true;
+    actions.appendChild(resend);
+    statusRow.appendChild(actions);
+    card.appendChild(statusRow);
+
+    if (entry.response) {
+      const response = document.createElement('pre');
+      response.className = 'bg-slate-50 border border-slate-100 rounded p-2 text-[10px] text-slate-500 whitespace-pre-wrap break-words';
+      response.textContent = entry.response;
+      card.appendChild(response);
+    }
+
+    frag.appendChild(card);
+  });
+  els.sendHistory.appendChild(frag);
+}
+
+function getTemplateById(id) {
+  return quickTemplates.find((tpl) => tpl.id === id);
+}
+
+function renderTemplateOptions(selectedId = DEFAULT_TEMPLATE_ID) {
+  if (!els.selTemplate) return;
+  els.selTemplate.innerHTML = '';
+  quickTemplates.forEach((tpl) => {
+    const opt = option(tpl.id, tpl.label || tpl.id);
+    if (tpl.id === selectedId) opt.selected = true;
+    els.selTemplate.appendChild(opt);
+  });
+}
+
+async function loadQuickTemplates() {
+  quickTemplates.length = 0;
+  const defaults = [{ id: DEFAULT_TEMPLATE_ID, label: 'Mensagem livre', message: '' }];
+  defaults.forEach((tpl) => quickTemplates.push(tpl));
+  try {
+    const response = await fetch(TEMPLATE_CONFIG_URL, { cache: 'no-store' });
+    if (response.ok) {
+      const data = await response.json().catch(() => []);
+      if (Array.isArray(data)) {
+        data
+          .filter((tpl) => tpl && typeof tpl.id === 'string' && typeof tpl.label === 'string')
+          .forEach((tpl) => {
+            const existing = quickTemplates.find((item) => item.id === tpl.id);
+            const normalized = {
+              id: tpl.id,
+              label: tpl.label,
+              message: typeof tpl.message === 'string' ? tpl.message : '',
+            };
+            if (existing) {
+              Object.assign(existing, normalized);
+            } else {
+              quickTemplates.push(normalized);
+            }
+          });
+      }
+    }
+  } catch (err) {
+    console.debug('[dashboard] falha ao carregar templates rápidos', err);
+  }
+  renderTemplateOptions();
+}
+
+function formatResponseOutput(payload, raw) {
+  if (payload && typeof payload === 'object') {
+    try {
+      const json = JSON.stringify(payload);
+      if (json && json !== '{}') return json;
+      if (!raw) return json;
+    } catch {}
+  }
+  return raw || '';
+}
+
+class QuickSendError extends Error {
+  constructor(message, details) {
+    super(message);
+    this.name = 'QuickSendError';
+    this.details = details || {};
+  }
+}
+
+async function performQuickSendRequest({ instanceId, apiKey, to, message, templateId }) {
+  const body = { to, message, waitAckMs: 8000 };
+  if (templateId && templateId !== DEFAULT_TEMPLATE_ID) body.templateId = templateId;
+  const response = await fetch('/instances/' + instanceId + '/send-text', {
+    method: 'POST',
+    headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const raw = await response.text().catch(() => '');
+  let payload = {};
+  if (raw) {
+    try { payload = JSON.parse(raw); } catch {}
+  }
+  if (!response.ok) {
+    if (response.status === 503 && payload?.error === 'socket_unavailable') {
+      const details = [payload.detail, payload.message]
+        .map((v) => (typeof v === 'string' ? v.trim() : ''))
+        .filter(Boolean);
+      const detailMsg = details.join(' — ') || 'Socket indisponível.';
+      throw new QuickSendError('Instância desconectada: ' + detailMsg, {
+        status: response.status,
+        code: 'socket_unavailable',
+        detailMsg,
+        payload,
+      });
+    }
+    const bodyMsg = payload?.detail || payload?.error || raw;
+    throw new QuickSendError('HTTP ' + response.status + (bodyMsg ? ' — ' + bodyMsg : ''), {
+      status: response.status,
+      payload,
+    });
+  }
+  return {
+    payload,
+    raw,
+    requestBody: body,
+  };
+}
+
+function resolveTemplateLabel(templateId) {
+  const tpl = getTemplateById(templateId);
+  return tpl?.label || '';
+}
+
+function queueQuickMessage({ to, message, templateId, instanceId, instanceLabel, apiKey, origin = 'form', triggerButton }) {
+  const historyEntry = {
+    id: 'msg_' + Date.now() + '_' + Math.random().toString(16).slice(2, 8),
+    to,
+    message,
+    templateId,
+    templateLabel: resolveTemplateLabel(templateId),
+    instanceId,
+    instanceLabel,
+    status: 'queued',
+    createdAt: new Date().toISOString(),
+  };
+  addHistoryEntry(historyEntry);
+  if (origin === 'form') setSendOut('Envio adicionado à fila. Aguarde…', 'info');
+
+  const label = origin === 'history' ? 'Reenviando…' : 'Enviando…';
+  enqueueSend(async () => {
+    updateHistoryEntry(historyEntry.id, { status: 'sending' });
+    pushBusy(triggerButton, label);
+    if (origin === 'form') setSendOut('Enviando mensagem…', 'info');
+    try {
+      const result = await performQuickSendRequest({ instanceId, apiKey, to, message, templateId });
+      const output = formatResponseOutput(result.payload, result.raw) || '(sem retorno)';
+      updateHistoryEntry(historyEntry.id, {
+        status: 'success',
+        response: output,
+        completedAt: new Date().toISOString(),
+      });
+      if (origin === 'form') {
+        setSendOut('Sucesso: ' + output, 'success');
+        setBadgeState('update', 'Mensagem enviada — acompanhe os indicadores.', 3000);
+        if (els.selInstance?.value === instanceId) {
+          refreshSelected({ silent: true }).catch((err) => console.debug('[dashboard] refresh pós-envio falhou', err));
+        }
+      }
+      return result;
+    } catch (err) {
+      console.error('[dashboard] erro ao enviar mensagem', err);
+      const messageOut = err?.message || 'Falha inesperada';
+      updateHistoryEntry(historyEntry.id, {
+        status: 'error',
+        response: messageOut,
+        completedAt: new Date().toISOString(),
+      });
+      if (origin === 'form') {
+        setSendOut('Falha no envio: ' + messageOut, 'error');
+        if (err?.details?.code === 'socket_unavailable') {
+          showError('Instância desconectada. Refaça o pareamento e tente novamente.');
+        } else {
+          showError('Não foi possível enviar a mensagem.');
+        }
+      }
+      return null;
+    } finally {
+      popBusy(triggerButton);
+    }
+  }).catch((err) => {
+    console.error('[dashboard] falha ao processar fila de envio', err);
+    updateHistoryEntry(historyEntry.id, {
+      status: 'error',
+      response: err?.message || 'Falha na fila',
+      completedAt: new Date().toISOString(),
+    });
+    if (origin === 'form') setSendOut('Falha no envio: ' + (err?.message || 'Erro na fila'), 'error');
+    popBusy(triggerButton);
+  });
+}
+
+function queueSendFromForm() {
+  localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+  const instanceId = els.selInstance?.value;
+  if (!instanceId) {
+    setSendOut('Selecione uma instância antes de enviar.', 'error');
+    showError('Selecione uma instância.');
+    return;
+  }
+
+  let apiKey;
+  try {
+    apiKey = requireKey();
+  } catch {
+    setSendOut('Informe a API Key para enviar mensagens.', 'error');
+    return;
+  }
+
+  const phoneResult = validatePhone(els.inpPhone?.value || '');
+  setFieldError(els.inpPhone, els.phoneError, phoneResult.error || '');
+  const messageResult = validateMessage(els.inpMsg?.value || '');
+  setFieldError(els.inpMsg, els.messageError, messageResult.error || '');
+
+  if (phoneResult.error || messageResult.error) {
+    setSendOut('Corrija os campos destacados antes de enviar.', 'error');
+    return;
+  }
+
+  els.inpPhone.value = phoneResult.value;
+  els.inpMsg.value = messageResult.value;
+  updateMsgCounter();
+
+  const templateId = els.selTemplate?.value || DEFAULT_TEMPLATE_ID;
+  const instanceLabel = els.selInstance?.selectedOptions?.[0]?.textContent || instanceId;
+  queueQuickMessage({
+    to: phoneResult.value,
+    message: messageResult.value,
+    templateId,
+    instanceId,
+    instanceLabel,
+    apiKey,
+    origin: 'form',
+    triggerButton: els.btnSend,
+  });
+}
+
+function handleHistoryClick(event) {
+  const target = event.target;
+  if (!target || target.dataset.act !== 'history-resend') return;
+  const id = target.dataset.id;
+  const entry = lastMessages.find((item) => item.id === id);
+  if (!entry || !entry.to || !entry.message || !entry.instanceId) return;
+  let apiKey;
+  try {
+    apiKey = requireKey();
+  } catch {
+    return;
+  }
+  queueQuickMessage({
+    to: entry.to,
+    message: entry.message,
+    templateId: entry.templateId || DEFAULT_TEMPLATE_ID,
+    instanceId: entry.instanceId,
+    instanceLabel: entry.instanceLabel || entry.instanceId,
+    apiKey,
+    origin: 'history',
+    triggerButton: target,
+  });
+}
+
 /* ---------- Persistência local simples ---------- */
 els.inpApiKey.value = localStorage.getItem('x_api_key') || '';
 els.sessionsRoot.textContent = ''; // Será preenchido via API
@@ -734,10 +1177,33 @@ if (els.noteRetry) {
   els.noteRetry.addEventListener('click', () => scheduleNoteAutosave(true));
 }
 
+if (els.inpPhone) {
+  els.inpPhone.addEventListener('input', () => setFieldError(els.inpPhone, els.phoneError, ''));
+}
+
 if (els.inpMsg) {
-  els.inpMsg.addEventListener('input', updateMsgCounter);
+  els.inpMsg.addEventListener('input', () => {
+    updateMsgCounter();
+    setFieldError(els.inpMsg, els.messageError, '');
+  });
   updateMsgCounter();
 }
+
+if (els.selTemplate) {
+  loadQuickTemplates().catch((err) => console.debug('[dashboard] templates não carregados', err));
+  els.selTemplate.addEventListener('change', () => {
+    const tpl = getTemplateById(els.selTemplate.value);
+    if (tpl && tpl.id !== DEFAULT_TEMPLATE_ID && typeof tpl.message === 'string') {
+      els.inpMsg.value = tpl.message;
+      updateMsgCounter();
+      setFieldError(els.inpMsg, els.messageError, '');
+    }
+  });
+} else {
+  renderTemplateOptions();
+}
+
+renderHistory();
 
 setInterval(updateNoteMetaText, 60000);
 setNoteStatus('synced');
@@ -1476,74 +1942,11 @@ els.btnPair.onclick = async () => {
 };
 
 /* Envio rápido */
-if (els.btnSend) els.btnSend.onclick = async () => {
-  localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
-  const iid = els.selInstance.value;
-  if (!iid) { setSendOut('Selecione uma instância antes de enviar.', 'error'); showError('Selecione uma instância.'); return; }
-  let key;
-  try { key = requireKey(); } catch { setSendOut('Informe a API Key para enviar mensagens.', 'error'); return; }
+if (els.btnSend) els.btnSend.addEventListener('click', queueSendFromForm);
 
-  const rawPhone = els.inpPhone.value.trim();
-  const sanitized = rawPhone.replace(/[^\d+]/g, '');
-  const phoneNumber = sanitized.startsWith('+') ? sanitized : '+' + sanitized.replace(/^\++/, '');
-  const message = els.inpMsg.value.trim();
-  updateMsgCounter();
-
-  if (!validateE164(phoneNumber)) {
-    setSendOut('Telefone inválido. Use o formato E.164 (ex: +5511999999999).', 'error');
-    return;
-  }
-  if (!message) {
-    setSendOut('Informe uma mensagem para enviar.', 'error');
-    return;
-  }
-  if (message.length > 4096) {
-    setSendOut('Mensagem excede 4096 caracteres.', 'error');
-    return;
-  }
-
-  const body = JSON.stringify({ to: phoneNumber, message, waitAckMs: 8000 });
-  setBusy(els.btnSend, true, 'Enviando…');
-  setSendOut('Enviando mensagem…', 'info');
-
-  try {
-    const response = await fetch('/instances/' + iid + '/send-text', {
-      method: 'POST',
-      headers: { 'x-api-key': key, 'Content-Type': 'application/json' },
-      body,
-    });
-    if (!response.ok) {
-      const raw = await response.text().catch(() => '');
-      let payload;
-      if (raw) {
-        try { payload = JSON.parse(raw); } catch (err) {
-          console.warn('[dashboard] erro ao interpretar resposta', err);
-        }
-      }
-      if (response.status === 503 && payload?.error === 'socket_unavailable') {
-        const details = [payload.detail, payload.message]
-          .map(v => (typeof v === 'string' ? v.trim() : ''))
-          .filter(Boolean);
-        const detailMsg = details.join(' — ') || 'Socket indisponível.';
-        setSendOut('Instância desconectada: ' + detailMsg, 'error');
-        showError('Instância desconectada. Refaça o pareamento e tente novamente.');
-        return;
-      }
-      const bodyMsg = payload?.detail || payload?.error || raw;
-      throw new Error('HTTP ' + response.status + (bodyMsg ? ' — ' + bodyMsg : ''));
-    }
-    const payload = await response.json().catch(() => ({}));
-    setSendOut('Sucesso: ' + JSON.stringify(payload), 'success');
-    setBadgeState('update', 'Mensagem enviada — acompanhe os indicadores.', 3000);
-    await refreshSelected({ silent: true });
-  } catch (e) {
-    console.error('[dashboard] erro ao enviar mensagem', e);
-    setSendOut('Falha no envio: ' + e.message, 'error');
-    showError('Não foi possível enviar a mensagem.');
-  } finally {
-    setBusy(els.btnSend, false);
-  }
-};
+if (els.sendHistory) {
+  els.sendHistory.addEventListener('click', handleHistoryClick);
+}
 
 async function refreshLogs(options = {}) {
   if (!els.logsList || !els.logsEmpty) return;

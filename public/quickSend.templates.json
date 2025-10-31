@@ -1,0 +1,17 @@
+[
+  {
+    "id": "__custom__",
+    "label": "Mensagem livre",
+    "message": ""
+  },
+  {
+    "id": "boas-vindas",
+    "label": "Boas-vindas padrão",
+    "message": "Olá! Obrigado por entrar em contato com nossa equipe. Como podemos ajudar hoje?"
+  },
+  {
+    "id": "follow-up",
+    "label": "Acompanhamento",
+    "message": "Passando para lembrar que estamos aguardando o retorno sobre o último atendimento. Fique à vontade para responder por aqui."
+  }
+]
