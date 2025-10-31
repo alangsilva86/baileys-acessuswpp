@@ -3,6 +3,7 @@ import path from 'path';
 import pino from 'pino';
 import type { WASocket } from '@whiskeysockets/baileys';
 import { startWhatsAppInstance, stopWhatsAppInstance, type InstanceContext } from './whatsapp.js';
+import { LidMappingStore } from './lidMappingStore.js';
 
 const SESSIONS_ROOT = process.env.SESSION_DIR || './sessions';
 const INSTANCES_INDEX = path.join(SESSIONS_ROOT, 'instances.json');
@@ -84,6 +85,7 @@ export interface Instance {
   connectionState: 'connecting' | 'open' | 'close' | 'qr_timeout';
   connectionUpdatedAt: number | null;
   phoneNumber: string | null;
+  lidMapping: LidMappingStore;
 }
 
 const instances = new Map<string, Instance>();
@@ -138,6 +140,7 @@ function createInstanceRecord(
     connectionState: 'close',
     connectionUpdatedAt: Date.now(),
     phoneNumber: null,
+    lidMapping: new LidMappingStore(),
   };
 }
 

@@ -7,6 +7,7 @@ import { MessageService } from '../src/baileys/messageService.js';
 import { recordVoteSelection } from '../src/baileys/pollMetadata.js';
 import { BrokerEventStore } from '../src/broker/eventStore.js';
 import type { WebhookClient } from '../src/services/webhook.js';
+import { LidMappingStore } from '../src/lidMappingStore.js';
 
 class FakeWebhook {
   public readonly events: Array<{ event: string; payload: unknown }> = [];
@@ -33,7 +34,7 @@ function createMessage(
   } as unknown as WAMessage;
 }
 
-function createService(options: { eventStore?: BrokerEventStore }) {
+function createService(options: { eventStore?: BrokerEventStore; mappingStore?: LidMappingStore | null }) {
   const webhook = new FakeWebhook();
   const eventStore = options.eventStore ?? new BrokerEventStore();
   const logger = { warn() {} } as unknown as pino.Logger;
@@ -44,6 +45,7 @@ function createService(options: { eventStore?: BrokerEventStore }) {
     {
       eventStore,
       instanceId: 'instance-1',
+      mappingStore: options.mappingStore ?? null,
     },
   );
 
@@ -129,7 +131,7 @@ test('MessageService emits structured inbound payload', async () => {
     {} as unknown as WASocket,
     webhook,
     { warn: () => {} } as unknown as pino.Logger,
-    { eventStore, instanceId: 'test-instance' },
+    { eventStore, instanceId: 'test-instance', mappingStore: null },
   );
 
   const inboundMessage = buildInboundMessage();
@@ -172,6 +174,42 @@ test('MessageService emits structured inbound payload', async () => {
   assert.deepStrictEqual(event?.payload, payload);
 });
 
+test('MessageService resolves inbound contact when Baileys provides LID identifiers', async () => {
+  const eventStore = new BrokerEventStore();
+  const webhookEvents: Array<{ event: string; payload: any }> = [];
+  const mappingStore = new LidMappingStore();
+
+  const webhook = {
+    async emit(event: string, payload: unknown) {
+      webhookEvents.push({ event, payload });
+    },
+  } as unknown as WebhookClient;
+
+  const service = new MessageService(
+    {} as unknown as WASocket,
+    webhook,
+    { warn: () => {} } as unknown as pino.Logger,
+    { eventStore, instanceId: 'test-instance', mappingStore },
+  );
+
+  const inboundMessage = buildInboundMessage();
+  inboundMessage.key = {
+    id: inboundMessage.key?.id ?? 'ABC123',
+    remoteJid: '5511987654321@lid',
+    fromMe: false,
+  } as any;
+  (inboundMessage.key as any).remoteJidAlt = '5511987654321@s.whatsapp.net';
+
+  await service.onInbound([inboundMessage]);
+
+  assert.equal(webhookEvents.length, 1);
+  const payload = webhookEvents[0].payload;
+  assert.equal(payload.contact.remoteJid, '5511987654321@s.whatsapp.net');
+  assert.equal(payload.message.chatId, '5511987654321@s.whatsapp.net');
+  assert.equal(payload.contact.phone, '+5511987654321');
+  assert.equal(mappingStore.getPnForLid('5511987654321@lid'), '5511987654321@s.whatsapp.net');
+});
+
 test('MessageService inclui pollChoice nos metadados quando voto decifrado está disponível', async () => {
   const eventStore = new BrokerEventStore();
   const webhookEvents: Array<{ event: string; payload: any }> = [];
@@ -186,7 +224,7 @@ test('MessageService inclui pollChoice nos metadados quando voto decifrado está
     {} as unknown as WASocket,
     webhook,
     { warn: () => {} } as unknown as pino.Logger,
-    { eventStore, instanceId: 'test-instance' },
+    { eventStore, instanceId: 'test-instance', mappingStore: null },
   );
 
   const messageId = 'POLL-VOTE-1';
@@ -243,7 +281,7 @@ test('MessageService maps participant phone for group messages when valid', asyn
     {} as unknown as WASocket,
     webhook,
     { warn: () => {} } as unknown as pino.Logger,
-    { eventStore, instanceId: 'test-instance' },
+    { eventStore, instanceId: 'test-instance', mappingStore: null },
   );
 
   const groupMessage = {
@@ -283,7 +321,7 @@ test('MessageService omits phone for group and broadcast messages without E.164 
     {} as unknown as WASocket,
     webhook,
     { warn: () => {} } as unknown as pino.Logger,
-    { eventStore, instanceId: 'test-instance' },
+    { eventStore, instanceId: 'test-instance', mappingStore: null },
   );
 
   const groupWithoutPhone = {
@@ -356,7 +394,7 @@ test('MessageService emits structured outbound payload for text messages', async
     sock,
     webhook as unknown as WebhookClient,
     { warn: () => {} } as unknown as pino.Logger,
-    { eventStore, instanceId: 'test-instance' },
+    { eventStore, instanceId: 'test-instance', mappingStore: null },
   );
 
   const response = await service.sendText(remoteJid, 'Olá lead!');
@@ -402,6 +440,48 @@ test('MessageService emits structured outbound payload for text messages', async
   assert.deepStrictEqual(stored[0]?.payload, payload);
 });
 
+test('MessageService resolves outbound payload identities using cached PN/LID mapping', async () => {
+  const eventStore = new BrokerEventStore();
+  const webhook = new FakeWebhook();
+  const mappingStore = new LidMappingStore();
+  mappingStore.rememberMapping('551199999999@s.whatsapp.net', '551199999999@lid');
+
+  const sendCalls: Array<{ jid: string; content: any }> = [];
+  const outboundMessage = {
+    key: {
+      id: 'OUT-LID-1',
+      remoteJid: '551199999999@lid',
+      fromMe: true,
+    },
+    messageTimestamp: 1700000200,
+    pushName: 'Agente CS',
+    message: { conversation: 'Mensagem LID' },
+  } as unknown as WAMessage;
+
+  const sock = {
+    async sendMessage(jid: string, content: any) {
+      sendCalls.push({ jid, content });
+      return outboundMessage;
+    },
+  } as unknown as WASocket;
+
+  const service = new MessageService(
+    sock,
+    webhook as unknown as WebhookClient,
+    { warn: () => {} } as unknown as pino.Logger,
+    { eventStore, instanceId: 'test-instance', mappingStore },
+  );
+
+  await service.sendText('551199999999@lid', 'Mensagem LID');
+
+  assert.equal(sendCalls.length, 1);
+  assert.equal(sendCalls[0]?.jid, '551199999999@lid');
+  const payload = webhook.events[0]?.payload as any;
+  assert.equal(payload.contact.remoteJid, '551199999999@s.whatsapp.net');
+  assert.equal(payload.message.chatId, '551199999999@s.whatsapp.net');
+  assert.equal(payload.contact.phone, '+551199999999');
+});
+
 test('MessageService inclui metadados de mídia ao enviar para o LeadEngine', async () => {
   const eventStore = new BrokerEventStore();
   const webhook = new FakeWebhook();
@@ -434,7 +514,7 @@ test('MessageService inclui metadados de mídia ao enviar para o LeadEngine', as
     sock,
     webhook as unknown as WebhookClient,
     { warn: () => {} } as unknown as pino.Logger,
-    { eventStore, instanceId: 'test-instance' },
+    { eventStore, instanceId: 'test-instance', mappingStore: null },
   );
 
   await service.sendMedia(

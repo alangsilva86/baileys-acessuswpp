@@ -1,4 +1,5 @@
 import type { WAMessage } from '@whiskeysockets/baileys';
+import { isLidJid, resolveJid, LidMappingStore } from '../lidMappingStore.js';
 
 export interface LeadInfo {
   owner: 'device' | 'server' | 'user';
@@ -38,9 +39,36 @@ function normalizePhone(jid?: string | null): string | null {
   return `+${digits}`;
 }
 
-export function mapLeadFromMessage(message: WAMessage | null | undefined): LeadInfo {
-  const remoteJid = message?.key?.remoteJid ?? null;
-  const participant = message?.key?.participant ?? null;
+export interface LeadMapperOptions {
+  mappingStore?: LidMappingStore | null;
+}
+
+export function mapLeadFromMessage(
+  message: WAMessage | null | undefined,
+  options: LeadMapperOptions = {},
+): LeadInfo {
+  const mappingStore = options.mappingStore ?? null;
+  const remoteRaw = message?.key?.remoteJid ?? null;
+  const remoteAlt = (message?.key as any)?.remoteJidAlt ?? null;
+  const participantRaw = message?.key?.participant ?? null;
+  const participantAlt = (message?.key as any)?.participantAlt ?? null;
+
+  if (mappingStore) {
+    if (remoteRaw && remoteAlt) {
+      if (isLidJid(remoteRaw)) mappingStore.rememberMapping(remoteAlt, remoteRaw);
+      else if (isLidJid(remoteAlt)) mappingStore.rememberMapping(remoteRaw, remoteAlt);
+    }
+    if (participantRaw && participantAlt) {
+      if (isLidJid(participantRaw)) mappingStore.rememberMapping(participantAlt, participantRaw);
+      else if (isLidJid(participantAlt)) mappingStore.rememberMapping(participantRaw, participantAlt);
+    }
+  }
+
+  const resolvedRemote = resolveJid(remoteRaw, remoteAlt, mappingStore);
+  const resolvedParticipant = resolveJid(participantRaw, participantAlt, mappingStore);
+
+  const remoteJid = resolvedRemote ?? remoteAlt ?? remoteRaw ?? null;
+  const participant = resolvedParticipant ?? participantAlt ?? participantRaw ?? null;
   const isGroup = Boolean(remoteJid && remoteJid.endsWith('@g.us'));
   const fromMe = Boolean(message?.key?.fromMe);
 
