@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
 
 export type BrokerEventDirection = 'inbound' | 'outbound' | 'system';
 
@@ -52,6 +53,13 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 const RETAINED_ACKED_EVENTS = 500;
 
+type BrokerEventEmitterMap = {
+  'broker:event': [BrokerEvent];
+};
+
+export const brokerEventEmitter = new EventEmitter<BrokerEventEmitterMap>();
+brokerEventEmitter.setMaxListeners(0);
+
 export class BrokerEventStore {
   private sequence = 0;
   private readonly events: EventRecord[] = [];
@@ -76,6 +84,7 @@ export class BrokerEventStore {
     this.events.push(record);
     this.index.set(record.id, record);
     this.pruneAcked();
+    brokerEventEmitter.emit('broker:event', { ...record });
     return { ...record };
   }
 
