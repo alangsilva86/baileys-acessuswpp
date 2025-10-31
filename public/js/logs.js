@@ -45,6 +45,16 @@ function summarizeLogMessage(event) {
     return pieces.join(' • ');
   }
 
+  if (event?.type === 'QUICK_SEND_RESULT') {
+    const response = payload.response || {};
+    const summary = typeof response.summary === 'string' ? response.summary.trim() : '';
+    if (summary) return summary;
+    const type = response.type || payload.request?.type || 'rápido';
+    const to = response.to || payload.request?.to;
+    const base = `Envio ${type}`;
+    return to ? `${base} • ${to}` : base;
+  }
+
   const message = payload.message || {};
   if (message.text) return String(message.text).slice(0, 140);
   if (message.media?.caption) return String(message.media.caption).slice(0, 140);

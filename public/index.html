@@ -148,7 +148,7 @@
 
       <div class="p-4 bg-white rounded-2xl shadow md:col-span-2">
         <h2 class="font-semibold mb-2">Envio Rápido</h2>
-        <div class="space-y-3">
+        <div class="space-y-4">
           <div>
             <label class="block text-sm font-medium text-slate-700 mb-1">API Key</label>
             <input id="inpApiKey" type="password" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Sua chave de API" />
@@ -159,17 +159,105 @@
               <input id="inpPhone" type="tel" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="+5511999999999" />
             </div>
             <div>
-              <label class="block text-sm font-medium text-slate-700 mb-1">Mensagem</label>
-              <textarea id="inpMsg" rows="3" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Sua mensagem aqui"></textarea>
-              <div class="mt-1 text-[11px] text-slate-500 text-right">
-                <span id="msgCounter">0</span>/4096
+              <label class="block text-sm font-medium text-slate-700 mb-1">Tipo de mensagem</label>
+              <select id="selQuickType" class="w-full border rounded-lg px-3 py-2 text-sm">
+                <option value="text">Texto</option>
+                <option value="buttons">Botões</option>
+                <option value="list">Lista</option>
+                <option value="media">Mídia</option>
+              </select>
+            </div>
+          </div>
+          <div id="quickMessageGroup" class="space-y-1">
+            <div class="flex items-baseline justify-between gap-3">
+              <label id="quickMsgLabel" class="text-sm font-medium text-slate-700">Mensagem</label>
+              <span class="text-[11px] text-slate-500"><span id="msgCounter">0</span>/4096</span>
+            </div>
+            <textarea id="inpMsg" rows="3" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Sua mensagem aqui"></textarea>
+            <p id="quickMsgHint" class="text-[11px] text-slate-500">Texto simples enviado como mensagem padrão.</p>
+          </div>
+
+          <div id="quickButtonsFields" class="space-y-2 hidden">
+            <div>
+              <label for="quickButtonsFooter" class="block text-sm font-medium text-slate-700 mb-1">Rodapé (opcional)</label>
+              <input id="quickButtonsFooter" type="text" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Texto exibido abaixo dos botões" />
+            </div>
+            <div class="space-y-2">
+              <div class="flex items-center justify-between text-sm text-slate-700">
+                <span>Botões</span>
+                <button type="button" id="quickButtonsAdd" class="text-xs px-2 py-1 border rounded-lg hover:bg-slate-100">Adicionar botão</button>
+              </div>
+              <div id="quickButtonsList" class="space-y-2"></div>
+              <p class="text-[11px] text-slate-500">Máximo de 3 botões. Informe identificador e rótulo.</p>
+            </div>
+          </div>
+
+          <div id="quickListFields" class="space-y-2 hidden">
+            <div>
+              <label for="quickListButtonText" class="block text-sm font-medium text-slate-700 mb-1">Texto do botão</label>
+              <input id="quickListButtonText" type="text" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Ex.: Ver opções" />
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label for="quickListTitle" class="block text-sm font-medium text-slate-700 mb-1">Título (opcional)</label>
+                <input id="quickListTitle" type="text" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Título da lista" />
+              </div>
+              <div>
+                <label for="quickListFooter" class="block text-sm font-medium text-slate-700 mb-1">Rodapé (opcional)</label>
+                <input id="quickListFooter" type="text" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Texto abaixo da lista" />
+              </div>
+            </div>
+            <div class="space-y-2">
+              <div class="flex items-center justify-between text-sm text-slate-700">
+                <span>Seções e opções</span>
+                <button type="button" id="quickListAddSection" class="text-xs px-2 py-1 border rounded-lg hover:bg-slate-100">Adicionar seção</button>
+              </div>
+              <div id="quickListSections" class="space-y-3"></div>
+              <p class="text-[11px] text-slate-500">Inclua ao menos uma seção com opções (ID, título e descrição opcional).</p>
+            </div>
+          </div>
+
+          <div id="quickMediaFields" class="space-y-2 hidden">
+            <div>
+              <label for="quickMediaType" class="block text-sm font-medium text-slate-700 mb-1">Tipo de mídia</label>
+              <select id="quickMediaType" class="w-full border rounded-lg px-3 py-2 text-sm">
+                <option value="image">Imagem</option>
+                <option value="video">Vídeo</option>
+                <option value="audio">Áudio</option>
+                <option value="document">Documento</option>
+              </select>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label for="quickMediaUrl" class="block text-sm font-medium text-slate-700 mb-1">URL da mídia</label>
+                <input id="quickMediaUrl" type="url" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="https://exemplo.com/arquivo.jpg" />
+              </div>
+              <div>
+                <label for="quickMediaBase64" class="block text-sm font-medium text-slate-700 mb-1">Base64 (opcional)</label>
+                <textarea id="quickMediaBase64" rows="3" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="data:mime;base64,AAAA"></textarea>
+              </div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label for="quickMediaMime" class="block text-sm font-medium text-slate-700 mb-1">MIME (opcional)</label>
+                <input id="quickMediaMime" type="text" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="image/jpeg" />
+              </div>
+              <div>
+                <label for="quickMediaFileName" class="block text-sm font-medium text-slate-700 mb-1">Arquivo (opcional)</label>
+                <input id="quickMediaFileName" type="text" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="arquivo.jpg" />
+              </div>
+              <div class="flex items-center gap-4 h-full">
+                <label class="flex items-center gap-2 text-sm text-slate-600"><input id="quickMediaPtt" type="checkbox" class="rounded" /> Áudio PTT</label>
+                <label class="flex items-center gap-2 text-sm text-slate-600"><input id="quickMediaGif" type="checkbox" class="rounded" /> GIF animado</label>
               </div>
             </div>
           </div>
+
           <div class="flex gap-2">
             <button id="btnSend" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Enviar</button>
           </div>
           <div id="sendOut" class="text-xs text-slate-600 bg-slate-50 rounded p-2 min-h-[2rem]" aria-live="polite"></div>
+          <div id="quickResults" class="space-y-3" aria-live="polite"></div>
         </div>
       </div>
     </section>
