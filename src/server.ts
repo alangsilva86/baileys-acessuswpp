@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import pino from 'pino';
 import { getAllInstances, loadInstances, startAllInstances } from './instanceManager.js';
 import instanceRoutes from './routes/instances.js';
-import { brokerEventStore } from './broker/eventStore.js';
+import { brokerEventEmitter, brokerEventStore, type BrokerEvent } from './broker/eventStore.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
@@ -20,6 +20,9 @@ interface RequestWithId extends Request {
 }
 
 const PUBLIC_DIR = path.resolve(process.cwd(), 'public');
+const STREAM_PING_INTERVAL_MS = 15000;
+const STREAM_BACKLOG_LIMIT = 200;
+
 const app = express();
 app.disable('x-powered-by');
 
@@ -87,6 +90,77 @@ app.get('/health', (_req, res) => {
 
 app.get('/', (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+});
+
+const streamClients = new Map<Response, { id: string }>();
+
+app.get('/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  if (typeof req.socket?.setKeepAlive === 'function') {
+    req.socket.setKeepAlive(true);
+  }
+  const serverResponse = res as Response & { flushHeaders?: () => void };
+  if (typeof serverResponse.flushHeaders === 'function') {
+    serverResponse.flushHeaders();
+  }
+
+  const clientId = crypto.randomUUID();
+  streamClients.set(res, { id: clientId });
+  logger.info({ clientId, ip: req.ip, connections: streamClients.size }, 'stream.client.connected');
+
+  const sendEvent = (event: BrokerEvent) => {
+    try {
+      res.write(`id: ${event.id}\n`);
+      res.write('event: broker:event\n');
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    } catch (err) {
+      logger.warn({ clientId, err }, 'stream.client.write_failed');
+    }
+  };
+
+  const lastEventId = req.get('last-event-id') || req.get('Last-Event-ID');
+  const recent = brokerEventStore.recent({ limit: STREAM_BACKLOG_LIMIT });
+  const cutoffSequence = lastEventId
+    ? recent.find((item) => item.id === lastEventId)?.sequence ?? 0
+    : 0;
+  recent
+    .filter((item) => item.sequence > cutoffSequence)
+    .sort((a, b) => a.sequence - b.sequence)
+    .forEach((item) => sendEvent(item));
+
+  const onEvent = (event: BrokerEvent) => {
+    sendEvent(event);
+  };
+
+  brokerEventEmitter.on('broker:event', onEvent);
+
+  res.write(': stream ready\n\n');
+
+  const pingTimer = setInterval(() => {
+    try {
+      res.write(`event: ping\ndata: ${Date.now()}\n\n`);
+    } catch (err) {
+      logger.warn({ clientId, err }, 'stream.client.ping_failed');
+    }
+  }, STREAM_PING_INTERVAL_MS);
+
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(pingTimer);
+    brokerEventEmitter.off('broker:event', onEvent);
+    streamClients.delete(res);
+    logger.info({ clientId, connections: streamClients.size }, 'stream.client.disconnected');
+  };
+
+  req.on('close', cleanup);
+  req.on('end', cleanup);
+  req.on('error', cleanup);
+  res.on('close', cleanup);
+  res.on('error', cleanup);
 });
 
 app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {

@@ -52,6 +52,24 @@ npm start
 
 ## Configuração
 
+### Reverse proxy e Server-Sent Events
+
+Se o serviço estiver atrás de um reverse proxy (Nginx, Traefik, Caddy, etc.), desative qualquer forma de buffering nas rotas SSE
+ (`/stream`) para que os eventos sejam entregues imediatamente. No Nginx, por exemplo:
+
+```nginx
+location /stream {
+  proxy_http_version 1.1;
+  proxy_set_header Connection '';
+  proxy_buffering off;
+  proxy_cache off;
+  add_header X-Accel-Buffering no;
+}
+```
+
+Outros proxies devem aplicar as configurações equivalentes (desligar buffering/caching e manter a conexão aberta) para respeitar os
+headers `Content-Type: text/event-stream`, `Cache-Control: no-cache` e `Connection: keep-alive` enviados pelo backend.
+
 ### Variáveis de Ambiente
 
 - `PORT`: Porta do servidor (padrão: 3000)
