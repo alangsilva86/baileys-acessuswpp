@@ -121,6 +121,20 @@ const NOTE_STATE = {
 
 const REFRESH_INTERVAL_MS = 5000;
 
+const sharedState = window.dashboardSharedState || {
+  telemetry: {
+    lastRoundStartedAt: null,
+    lastRoundCompletedAt: null,
+    lastRoundDurationMs: null,
+  },
+  scheduler: {
+    currentTimer: null,
+    currentController: null,
+    runningPromise: null,
+  },
+};
+window.dashboardSharedState = sharedState;
+
 const LOG_DIRECTION_META = {
   inbound: { label: 'Inbound', className: 'bg-emerald-100 text-emerald-700' },
   outbound: { label: 'Outbound', className: 'bg-sky-100 text-sky-700' },
@@ -722,7 +736,7 @@ if (els.selRange) {
   if (values.includes(savedRange)) els.selRange.value = savedRange;
   els.selRange.addEventListener('change', () => {
     localStorage.setItem('metrics_range', els.selRange.value);
-    refreshSelected({ withSkeleton: true });
+    triggerFullRefresh({ withSkeleton: true });
   });
 }
 
@@ -770,6 +784,10 @@ async function fetchJSON(path, auth=true, opts={}) {
     throw new Error('HTTP ' + r.status + (txt ? ' — ' + txt : ''));
   }
   try { return await r.json(); } catch { return {}; }
+}
+
+function isAbortError(err) {
+  return err?.name === 'AbortError';
 }
 
 /* ---------- KPI helpers ---------- */
@@ -875,13 +893,14 @@ function updateKpis(metrics) {
 /* ---------- Instâncias ---------- */
 async function refreshInstances(options = {}) {
   if (refreshInstancesInFlight) return refreshInstancesInFlight;
-  const { silent = false, withSkeleton, skipSelected = false } = options;
+  const { silent = false, withSkeleton, signal } = options;
   const shouldShowSkeleton = withSkeleton ?? (!hasLoadedInstances && !silent);
   if (shouldShowSkeleton || !hasLoadedInstances) setCardsLoading(true);
 
   refreshInstancesInFlight = (async () => {
     try {
-      const data = await fetchJSON('/instances', true);
+      const data = await fetchJSON('/instances', true, { signal });
+      if (signal?.aborted) return;
       updateInstanceLocksFromSnapshot(data);
       const prev = els.selInstance.value;
       els.selInstance.textContent = '';
@@ -995,14 +1014,12 @@ async function refreshInstances(options = {}) {
       });
 
       hasLoadedInstances = true;
-      if (!skipSelected) {
-        await refreshSelected({ silent, withSkeleton: !silent && !hasLoadedSelected });
-      }
     } catch (err) {
+      if (isAbortError(err) || signal?.aborted) return;
       console.error('[dashboard] erro ao buscar instâncias', err);
       showError('Falha ao carregar instâncias');
     } finally {
-      setCardsLoading(false);
+      if (!signal?.aborted) setCardsLoading(false);
       refreshInstancesInFlight = null;
       const currentSelected = els.selInstance.value;
       if (currentSelected) {
@@ -1080,7 +1097,7 @@ async function loadQRCode(iid, options = {}) {
 }
 
 async function refreshSelected(options = {}) {
-  const { silent = false, withSkeleton } = options;
+  const { silent = false, withSkeleton, signal } = options;
   const iid = els.selInstance.value;
 
   if (!iid) {
@@ -1101,7 +1118,13 @@ async function refreshSelected(options = {}) {
   }
 
   try {
-    const data = await fetchJSON('/instances/' + iid, true);
+    const [data, metrics] = await Promise.all([
+      fetchJSON('/instances/' + iid, true, { signal }),
+      fetchJSON('/instances/' + iid + '/metrics', true, { signal }),
+    ]);
+
+    if (signal?.aborted) return;
+
     updateInstanceLocksFromSnapshot([data]);
     const connection = describeConnection(data);
     setStatusBadge(connection, data.name);
@@ -1118,6 +1141,8 @@ async function refreshSelected(options = {}) {
       updateNoteMetaText();
       setNoteStatus('synced');
     }
+
+    if (signal?.aborted) return;
 
     if (connection.meta?.shouldLoadQr) {
       setQrState('loading', 'Sincronizando QR…');
@@ -1136,7 +1161,8 @@ async function refreshSelected(options = {}) {
       setQrState(connection.meta?.qrState || 'loading', qrMessage);
     }
 
-    const metrics = await fetchJSON('/instances/' + iid + '/metrics', true);
+    if (signal?.aborted) return;
+
     updateKpis(metrics);
 
     const rangeMins = Number(els.selRange.value) || 240;
@@ -1156,14 +1182,13 @@ async function refreshSelected(options = {}) {
       resetChart();
     }
 
-    await refreshLogs({ silent: true });
-
     hasLoadedSelected = true;
   } catch (err) {
+    if (isAbortError(err) || signal?.aborted) return;
     console.error('[dashboard] erro ao buscar detalhes da instância', err);
     showError('Falha ao carregar detalhes da instância');
   } finally {
-    setMetricsLoading(false);
+    if (!signal?.aborted) setMetricsLoading(false);
   }
 }
 
@@ -1193,7 +1218,7 @@ async function handleSaveMetadata(iid) {
       updateNoteMetaText();
       setNoteStatus('synced');
     }
-    await refreshInstances({ silent: true, withSkeleton: false });
+    await triggerFullRefresh({ silent: true, withSkeleton: false });
   } catch (err) {
     console.error('[dashboard] erro ao salvar metadados', err);
     showError('Falha ao salvar dados da instância');
@@ -1228,7 +1253,7 @@ async function performInstanceAction(action, iid, key, context = {}) {
       const message = payload?.message || restartingMessage(name);
       lockInstanceActions(iid, 'restart');
       setBadgeState('wipe', message, holdTimes[action]);
-      await refreshInstances({ silent: true, withSkeleton: false });
+      await triggerFullRefresh({ silent: true, withSkeleton: false });
       return true;
     }
     if (!r.ok) {
@@ -1240,7 +1265,7 @@ async function performInstanceAction(action, iid, key, context = {}) {
     const payload = await r.json().catch(() => ({}));
     const message = payload?.message || fallbackMessages[action](name);
     setBadgeState(badgeTypes[action], message, holdTimes[action]);
-    await refreshInstances({ silent: true, withSkeleton: false });
+    await triggerFullRefresh({ silent: true, withSkeleton: false });
     return true;
   } catch (err) {
     if (action === 'wipe') {
@@ -1248,7 +1273,7 @@ async function performInstanceAction(action, iid, key, context = {}) {
       lockInstanceActions(iid, 'restart');
       setBadgeState('wipe', restartingMessage(name), holdTimes[action]);
       setTimeout(() => {
-        refreshInstances({ silent: true, withSkeleton: false }).catch(() => undefined);
+        triggerFullRefresh({ silent: true, withSkeleton: false }).catch(() => undefined);
       }, 1500);
       return true;
     }
@@ -1347,7 +1372,7 @@ document.addEventListener('click', async (ev) => {
       const name = els.modalDelete.dataset.name || iidTarget;
       setBadgeState('delete', payload?.message || ('Instância removida (' + name + ')'), 7000);
       closeDeleteModal();
-      await refreshInstances({ withSkeleton: true });
+      await triggerFullRefresh({ withSkeleton: true });
     } catch (err) {
       console.error('[dashboard] erro ao excluir instância', err);
       showError('Erro ao excluir instância');
@@ -1364,13 +1389,13 @@ document.addEventListener('click', async (ev) => {
   // ações simples que não alteram servidor
   if (act === 'select') {
     els.selInstance.value = iid;
-    await refreshSelected({ withSkeleton: true });
+    await triggerFullRefresh({ withSkeleton: true });
     return;
   }
   if (act === 'qr') {
     try { requireKey(); } catch { return; }
     if (iid) els.selInstance.value = iid;
-    await refreshSelected({ withSkeleton: true });
+    await triggerFullRefresh({ withSkeleton: true });
     setBadgeState('info', 'QR atualizado', 3000);
     return;
   }
@@ -1407,7 +1432,7 @@ els.btnNew.onclick = async () => {
   try {
     const payload = await fetchJSON('/instances', true, { method:'POST', body: JSON.stringify({ name }) });
     setBadgeState('update', 'Instância criada (' + (payload?.name || payload?.id || name) + ')', 4000);
-    await refreshInstances({ withSkeleton: true });
+    await triggerFullRefresh({ withSkeleton: true });
   } catch (err) {
     console.error('[dashboard] erro ao criar instância', err);
     showError('Falha ao criar instância');
@@ -1416,7 +1441,9 @@ els.btnNew.onclick = async () => {
 };
 
 /* Select change */
-els.selInstance.onchange = () => refreshSelected({ withSkeleton: true });
+els.selInstance.onchange = () => {
+  triggerFullRefresh({ withSkeleton: true });
+};
 
 /* Logout/Wipe (header) */
 els.btnLogout.onclick = async () => {
@@ -1535,7 +1562,7 @@ if (els.btnSend) els.btnSend.onclick = async () => {
     const payload = await response.json().catch(() => ({}));
     setSendOut('Sucesso: ' + JSON.stringify(payload), 'success');
     setBadgeState('update', 'Mensagem enviada — acompanhe os indicadores.', 3000);
-    await refreshSelected({ silent: true });
+    await triggerFullRefresh({ silent: true, withSkeleton: false });
   } catch (e) {
     console.error('[dashboard] erro ao enviar mensagem', e);
     setSendOut('Falha no envio: ' + e.message, 'error');
@@ -1547,7 +1574,7 @@ if (els.btnSend) els.btnSend.onclick = async () => {
 
 async function refreshLogs(options = {}) {
   if (!els.logsList || !els.logsEmpty) return;
-  const { silent = false } = options;
+  const { silent = false, signal } = options;
   const iid = els.selInstance?.value;
   if (!iid) {
     resetLogs();
@@ -1558,7 +1585,8 @@ async function refreshLogs(options = {}) {
 
   try {
     const params = new URLSearchParams({ limit: '20' });
-    const data = await fetchJSON('/instances/' + iid + '/logs?' + params.toString(), true);
+    const data = await fetchJSON('/instances/' + iid + '/logs?' + params.toString(), true, { signal });
+    if (signal?.aborted) return;
     const events = Array.isArray(data?.events) ? data.events : [];
     const signature = events
       .map((ev) => {
@@ -1572,10 +1600,11 @@ async function refreshLogs(options = {}) {
       lastLogsSignature = signature;
     }
   } catch (err) {
+    if (isAbortError(err) || signal?.aborted) return;
     console.error('[dashboard] erro ao carregar logs', err);
     if (!silent) showError('Falha ao carregar eventos recentes');
   } finally {
-    if (!silent && els.btnRefreshLogs) setBusy(els.btnRefreshLogs, false);
+    if (!silent && els.btnRefreshLogs && !signal?.aborted) setBusy(els.btnRefreshLogs, false);
   }
 }
 
@@ -1583,10 +1612,25 @@ if (els.btnRefreshLogs) {
   els.btnRefreshLogs.addEventListener('click', () => refreshLogs({ silent: false }));
 }
 
+function triggerFullRefresh(options = {}) {
+  const scheduler = window.dashboardAppScheduler;
+  if (scheduler?.requestImmediateRound) {
+    return scheduler.requestImmediateRound(options);
+  }
+  return (async () => {
+    await refreshInstances(options);
+    await refreshSelected(options);
+  })();
+}
+
 /* Boot do dashboard */
 initChart();
-refreshInstances({ withSkeleton: true });
-setInterval(() => {
-  refreshInstances({ silent: true }).catch(err => console.debug('[dashboard] auto-refresh falhou', err));
-  refreshLogs({ silent: true }).catch(err => console.debug('[dashboard] auto-refresh logs falhou', err));
-}, REFRESH_INTERVAL_MS);
+
+window.dashboardApp = {
+  refreshInstances,
+  refreshSelected,
+  refreshLogs,
+  triggerFullRefresh,
+  REFRESH_INTERVAL_MS,
+  state: sharedState,
+};
