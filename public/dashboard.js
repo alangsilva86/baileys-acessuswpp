@@ -1,3 +1,13 @@
+import {
+  STATUS_META,
+  STATUS_CODES,
+  TIMELINE_FIELDS,
+  LOG_DIRECTION_META,
+  DELIVERY_STATE_META,
+  CONNECTION_STATE_META,
+} from './js/constants.js';
+import { createInstancesManager } from './js/instances.js';
+
 /* ---------- DOM refs ---------- */
 const els = {
   badge: document.getElementById('badge'),
@@ -63,52 +73,6 @@ const els = {
   pairModalCopy: document.getElementById('pairModalCopy'),
 };
 
-const STATUS_META = {
-  '1': {
-    name: 'Pendentes',
-    description: 'A mensagem saiu do app, mas ainda não foi entregue ao servidor do WhatsApp.',
-    textClass: 'text-amber-600',
-    chartColor: '#f59e0b',
-    chartBackground: 'rgba(245,158,11,0.15)',
-  },
-  '2': {
-    name: 'Servidor recebeu',
-    description: 'O servidor do WhatsApp confirmou o recebimento (✔ cinza).',
-    textClass: 'text-sky-600',
-    chartColor: '#3b82f6',
-    chartBackground: 'rgba(59,130,246,0.15)',
-  },
-  '3': {
-    name: 'Entregues',
-    description: 'A mensagem chegou ao dispositivo do destinatário (✔✔ cinza).',
-    textClass: 'text-emerald-600',
-    chartColor: '#22c55e',
-    chartBackground: 'rgba(34,197,94,0.15)',
-  },
-  '4': {
-    name: 'Lidas',
-    description: 'O destinatário visualizou a mensagem (✔✔ azul).',
-    textClass: 'text-indigo-600',
-    chartColor: '#6366f1',
-    chartBackground: 'rgba(99,102,241,0.15)',
-  },
-  '5': {
-    name: 'Reproduzidas',
-    description: 'Áudio ou mensagem de voz reproduzidos (ícone play azul).',
-    textClass: 'text-pink-600',
-    chartColor: '#ec4899',
-    chartBackground: 'rgba(236,72,153,0.15)',
-  },
-};
-
-const STATUS_CODES = ['1', '2', '3', '4', '5'];
-const TIMELINE_FIELDS = {
-  '1': 'pending',
-  '2': 'serverAck',
-  '3': 'delivered',
-  '4': 'read',
-  '5': 'played',
-};
 
 const NOTE_STATE = {
   lastSaved: '',
@@ -121,18 +85,6 @@ const NOTE_STATE = {
 
 const REFRESH_INTERVAL_MS = 5000;
 
-const LOG_DIRECTION_META = {
-  inbound: { label: 'Inbound', className: 'bg-emerald-100 text-emerald-700' },
-  outbound: { label: 'Outbound', className: 'bg-sky-100 text-sky-700' },
-  system: { label: 'System', className: 'bg-slate-200 text-slate-700' },
-};
-
-const DELIVERY_STATE_META = {
-  pending: { label: 'Webhook pendente', className: 'bg-amber-100 text-amber-700' },
-  retry: { label: 'Reenvio agendado', className: 'bg-amber-100 text-amber-700' },
-  success: { label: 'Webhook entregue', className: 'bg-emerald-100 text-emerald-700' },
-  failed: { label: 'Webhook falhou', className: 'bg-rose-100 text-rose-700' },
-};
 
 let lastLogsSignature = '';
 
@@ -150,42 +102,24 @@ const BADGE_STYLES = {
 };
 let badgeLockUntil = 0;
 
-const CONNECTION_STATE_META = {
-  open: {
-    label: 'Conectado',
-    badgeType: 'status-connected',
-    badgeClass: 'bg-emerald-100 text-emerald-700',
-    optionSuffix: ' • on-line',
-    cardLabel: (ts) => (ts ? `Conectado • ${ts}` : 'Conectado'),
-    badgeText: (name, ts) => (ts ? `Conectado (${name}) • ${ts}` : `Conectado (${name})`),
-    qrState: 'connected',
-    qrMessage: (ts) => (ts ? `Instância conectada. Atualizado em ${ts}.` : 'Instância conectada.'),
-    shouldLoadQr: false,
-  },
-  connecting: {
-    label: 'Reconectando…',
-    badgeType: 'status-connecting',
-    badgeClass: 'bg-amber-100 text-amber-700',
-    optionSuffix: ' • reconectando',
-    cardLabel: (ts) => (ts ? `Reconectando… • ${ts}` : 'Reconectando…'),
-    badgeText: (name, ts) => (ts ? `Reconectando (${name}) • ${ts}` : `Reconectando (${name})`),
-    qrState: 'loading',
-    qrMessage: (ts) => (ts ? `Reconectando… Atualizado em ${ts}.` : 'Reconectando…'),
-    shouldLoadQr: false,
-  },
-  close: {
-    label: 'Desconectado',
-    badgeType: 'status-disconnected',
-    badgeClass: 'bg-rose-100 text-rose-700',
-    optionSuffix: ' • off-line',
-    cardLabel: (ts) => (ts ? `Desconectado • ${ts}` : 'Desconectado'),
-    badgeText: (name, ts) => (ts ? `Desconectado (${name}) • ${ts}` : `Desconectado (${name})`),
-    qrState: 'disconnected',
-    qrMessage: (ts) =>
-      ts ? `Instância desconectada. Atualizado em ${ts}.` : 'Instância desconectada. Aponte o WhatsApp para o QR code.',
-    shouldLoadQr: true,
-  },
+const instanceFilters = {
+  search: '',
+  status: 'all',
+  sortBy: 'name',
+  sortDir: 'asc',
 };
+
+const instancesView = createInstancesManager(els.cards, {
+  onSelect: handleCardSelect,
+  onSave: handleCardSave,
+  onQr: handleCardQr,
+  onLogout: (instance, ctx) => handleCardAction('logout', instance, ctx),
+  onWipe: (instance, ctx) => handleCardAction('wipe', instance, ctx),
+  onDelete: handleCardDelete,
+});
+
+let currentInstances = [];
+
 
 function applyBadge(type, msg) {
   const cls = BADGE_STYLES[type] || BADGE_STYLES.info;
@@ -230,14 +164,8 @@ function setBusy(button, busy, label) {
   }
 }
 
-const INSTANCE_LOCK_ACTIONS = ['save', 'qr', 'logout', 'wipe', 'delete'];
 const INSTANCE_LOCK_TIMEOUT_MS = 60_000;
 const instanceActionLocks = new Map();
-
-function escapeSelectorValue(value) {
-  if (typeof CSS !== 'undefined' && CSS?.escape) return CSS.escape(value);
-  return String(value).replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
-}
 
 function toggleButtonsDisabled(buttons, disabled) {
   buttons.forEach((btn) => {
@@ -246,14 +174,6 @@ function toggleButtonsDisabled(buttons, disabled) {
     btn.classList[disabled ? 'add' : 'remove']('pointer-events-none');
     btn.classList[disabled ? 'add' : 'remove']('opacity-60');
   });
-}
-
-function setInstanceActionsDisabled(iid, disabled) {
-  const selectorIid = escapeSelectorValue(iid);
-  const buttons = INSTANCE_LOCK_ACTIONS.flatMap((act) =>
-    Array.from(document.querySelectorAll(`[data-act="${act}"][data-iid="${selectorIid}"]`)),
-  );
-  toggleButtonsDisabled(buttons, disabled);
 }
 
 function setSelectedInstanceActionsDisabled(iid, disabled) {
@@ -266,14 +186,14 @@ function setSelectedInstanceActionsDisabled(iid, disabled) {
 
 function lockInstanceActions(iid, type = 'restart') {
   instanceActionLocks.set(iid, { type, startedAt: Date.now() });
-  setInstanceActionsDisabled(iid, true);
+  renderCards();
   setSelectedInstanceActionsDisabled(iid, true);
 }
 
 function unlockInstanceActions(iid) {
   if (!instanceActionLocks.has(iid)) return;
   instanceActionLocks.delete(iid);
-  setInstanceActionsDisabled(iid, false);
+  renderCards();
   setSelectedInstanceActionsDisabled(iid, false);
 }
 
@@ -304,6 +224,89 @@ function updateInstanceLocksFromSnapshot(instances = []) {
       unlockInstanceActions(inst.id);
     }
   });
+}
+
+function renderCards() {
+  if (!Array.isArray(currentInstances) || !currentInstances.length) return;
+  instancesView.update(currentInstances, {
+    selectedId: els.selInstance?.value || null,
+    lockedIds: instanceActionLocks,
+    filters: instanceFilters,
+    describeConnection,
+  });
+}
+
+async function handleCardSelect(instance) {
+  const iid = instance?.id;
+  if (!iid) return;
+  els.selInstance.value = iid;
+  renderCards();
+  setSelectedInstanceActionsDisabled(iid, isInstanceLocked(iid));
+  await refreshSelected({ withSkeleton: true });
+}
+
+async function handleCardQr(instance) {
+  const iid = instance?.id;
+  if (!iid) return;
+  try { requireKey(); } catch { return; }
+  els.selInstance.value = iid;
+  renderCards();
+  setSelectedInstanceActionsDisabled(iid, isInstanceLocked(iid));
+  await refreshSelected({ withSkeleton: true });
+  setBadgeState('info', 'QR atualizado', 3000);
+}
+
+async function handleCardSave(instance, ctx = {}) {
+  const iid = instance?.id;
+  if (!iid) return;
+  const name = ctx.name?.trim();
+  const note = ctx.note?.trim() ?? '';
+  if (!name) {
+    showError('O nome não pode estar vazio.');
+    return;
+  }
+
+  const button = ctx.button;
+  setBusy(button, true, 'Salvando…');
+  try {
+    const key = requireKey();
+    localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+    const payload = await fetchJSON('/instances/' + iid, true, {
+      method: 'PATCH',
+      body: JSON.stringify({ name, note }),
+    });
+    setBadgeState('update', 'Dados salvos (' + payload.name + ')', 4000);
+    if (iid === els.selInstance.value) {
+      NOTE_STATE.lastSaved = (note || '').trim();
+      NOTE_STATE.pending = note || '';
+      NOTE_STATE.updatedAt = payload?.metadata?.updatedAt || NOTE_STATE.updatedAt;
+      NOTE_STATE.createdAt = payload?.metadata?.createdAt || NOTE_STATE.createdAt;
+      updateNoteMetaText();
+      setNoteStatus('synced');
+    }
+    await refreshInstances({ silent: true, withSkeleton: false });
+  } catch (err) {
+    console.error('[dashboard] erro ao salvar metadados', err);
+    showError('Falha ao salvar dados da instância');
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function handleCardDelete(instance, ctx = {}) {
+  const iid = instance?.id;
+  if (!iid) return;
+  const name = ctx?.name?.trim() || instance?.name || iid;
+  openDeleteModal(iid, name);
+}
+
+async function handleCardAction(action, instance, ctx = {}) {
+  const iid = instance?.id;
+  if (!iid) return;
+  let key;
+  try { key = requireKey(); } catch { return; }
+  localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+  await performInstanceAction(action, iid, key, ctx);
 }
 
 function setCardsLoading(isLoading) {
@@ -874,21 +877,23 @@ function updateKpis(metrics) {
 
 /* ---------- Instâncias ---------- */
 async function refreshInstances(options = {}) {
+  const { skipSelected = false, silent = false, withSkeleton = true } = options;
   if (refreshInstancesInFlight) return refreshInstancesInFlight;
-  const { silent = false, withSkeleton, skipSelected = false } = options;
-  const shouldShowSkeleton = withSkeleton ?? (!hasLoadedInstances && !silent);
+  const shouldShowSkeleton = withSkeleton && !silent;
+
   if (shouldShowSkeleton || !hasLoadedInstances) setCardsLoading(true);
 
   refreshInstancesInFlight = (async () => {
     try {
       const data = await fetchJSON('/instances', true);
       updateInstanceLocksFromSnapshot(data);
+      currentInstances = Array.isArray(data) ? data : [];
       const prev = els.selInstance.value;
       els.selInstance.textContent = '';
 
-      if (!Array.isArray(data) || !data.length) {
+      if (!currentInstances.length) {
         els.selInstance.value = '';
-        els.cards.innerHTML = '<div class="p-4 bg-white rounded-2xl shadow text-sm text-slate-500">Nenhuma instância cadastrada ainda. Clique em “+ Nova instância”.</div>';
+        instancesView.showEmptyState('<div class="p-4 bg-white rounded-2xl shadow text-sm text-slate-500">Nenhuma instância cadastrada ainda. Clique em “+ Nova instância”.</div>');
         if (els.noteCard) els.noteCard.classList.add('hidden');
         NOTE_STATE.lastSaved = '';
         NOTE_STATE.createdAt = null;
@@ -905,7 +910,7 @@ async function refreshInstances(options = {}) {
       }
 
       let keepPrev = false;
-      data.forEach(inst => {
+      currentInstances.forEach((inst) => {
         const connection = describeConnection(inst);
         const suffix = connection.meta?.optionSuffix || '';
         const label = `${inst.name}${suffix}`;
@@ -913,86 +918,9 @@ async function refreshInstances(options = {}) {
         if (inst.id === prev) { opt.selected = true; keepPrev = true; }
         els.selInstance.appendChild(opt);
       });
-      if (!keepPrev && data[0]) els.selInstance.value = data[0].id;
+      if (!keepPrev && currentInstances[0]) els.selInstance.value = currentInstances[0].id;
 
-      els.cards.innerHTML = '';
-      const selected = els.selInstance.value;
-      data.forEach(i => {
-        const connection = describeConnection(i);
-        const card = document.createElement('article');
-        card.className = 'p-4 bg-white rounded-2xl shadow transition ring-emerald-200/50 space-y-3';
-        if (i.id === selected) card.classList.add('ring-2', 'ring-emerald-200');
-        const locked = isInstanceLocked(i.id);
-        card.classList.toggle('opacity-75', locked);
-        const badgeClass = connection.meta?.badgeClass || 'bg-slate-100 text-slate-700';
-        const statusLabel = typeof connection.meta?.cardLabel === 'function'
-          ? connection.meta.cardLabel(connection.updatedText)
-          : connection.meta?.label || 'Desconhecido';
-        const sent = i.counters?.sent || 0;
-        const statusCounts = getStatusCounts(i.counters?.statusCounts || i.counters?.status || {});
-        const statusCardsHtml = STATUS_CODES.map(code => {
-          const meta = STATUS_META[code] || {};
-          const titleAttr = meta.description ? ` title="${escapeHtml(meta.description)}"` : '';
-          const label = escapeHtml(meta.name || `Status ${code}`);
-          return `
-          <div class="rounded-lg bg-slate-50 p-2"${titleAttr}>
-            <span class="block text-[11px] uppercase tracking-wide text-slate-400">Status ${code} • ${label}</span>
-            <span class="text-sm font-semibold ${meta.textClass || 'text-slate-600'}">${statusCounts[code] || 0}</span>
-          </div>`;
-        }).join('');
-        const usagePercent = percent(i.rate?.usage || 0);
-        const meterColor = usagePercent >= 90 ? 'bg-rose-400' : usagePercent >= 70 ? 'bg-amber-400' : 'bg-emerald-400';
-        const userId = i.user?.id ? escapeHtml(i.user.id) : '—';
-        const noteVal = (i.note || i.notes || '').trim();
-
-        card.innerHTML = `
-        <div class="flex items-start justify-between gap-3">
-          <div class="flex-1">
-            <label class="text-xs font-medium text-slate-500">Nome</label>
-            <input data-field="name" data-iid="${i.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" value="${escapeHtml(i.name)}" />
-          </div>
-          <span class="px-2 py-0.5 rounded text-xs ${badgeClass}">
-            ${escapeHtml(statusLabel)}
-          </span>
-        </div>
-
-        <div class="text-xs text-slate-500 break-all">WhatsApp: ${userId}</div>
-
-        <div class="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
-          <div class="rounded-lg bg-slate-50 p-2">
-            <span class="block text-[11px] uppercase tracking-wide text-slate-400">Enviadas</span>
-            <span class="text-sm font-semibold text-slate-700">${sent}</span>
-          </div>
-          ${statusCardsHtml}
-          <div class="col-span-2 md:col-span-3 space-y-1">
-            <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
-              <span>Uso do limite</span>
-              <span>${usagePercent}%</span>
-            </div>
-            <div class="h-2 bg-slate-100 rounded-full overflow-hidden">
-              <div class="h-full ${meterColor}" style="width:${Math.min(usagePercent, 100)}%"></div>
-            </div>
-            <div class="text-[11px] text-slate-400">Status 1: ${statusCounts['1'] || 0} • Status 2: ${statusCounts['2'] || 0} • Status 3: ${statusCounts['3'] || 0} • Status 4: ${statusCounts['4'] || 0} • Status 5: ${statusCounts['5'] || 0}</div>
-          </div>
-        </div>
-
-        <div>
-          <label class="text-xs font-medium text-slate-500">Notas</label>
-          <textarea data-field="note" data-iid="${i.id}" rows="3" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm">${escapeHtml(noteVal)}</textarea>
-        </div>
-
-        <div class="flex items-center justify-end gap-2 flex-wrap">
-          <button data-act="save" data-iid="${i.id}" class="px-3 py-1.5 text-sm bg-sky-600 hover:bg-sky-700 text-white rounded-lg">Salvar</button>
-          <button data-act="select" data-iid="${i.id}" class="px-3 py-1.5 text-sm border rounded-lg">Selecionar</button>
-          <button data-act="qr" data-iid="${i.id}" class="px-3 py-1.5 text-sm border rounded-lg">Ver QR</button>
-          <button data-act="logout" data-iid="${i.id}" class="px-3 py-1.5 text-sm border rounded-lg">Logout</button>
-          <button data-act="wipe" data-iid="${i.id}" class="px-3 py-1.5 text-sm border rounded-lg">Wipe</button>
-          <button data-act="delete" data-iid="${i.id}" class="px-3 py-1.5 text-sm bg-rose-500 hover:bg-rose-600 text-white rounded-lg">Excluir</button>
-        </div>
-      `;
-        els.cards.appendChild(card);
-        setInstanceActionsDisabled(i.id, locked);
-      });
+      renderCards();
 
       hasLoadedInstances = true;
       if (!skipSelected) {
@@ -1167,41 +1095,6 @@ async function refreshSelected(options = {}) {
   }
 }
 
-function findCardByIid(iid) {
-  return document.querySelector(`[data-iid="${iid}"]`)?.closest('article');
-}
-
-async function handleSaveMetadata(iid) {
-  const card = findCardByIid(iid);
-  if (!card) return;
-  const name = card.querySelector('[data-field="name"]')?.value?.trim();
-  const note = card.querySelector('[data-field="note"]')?.value?.trim();
-  if (!name) { showError('O nome não pode estar vazio.'); return; }
-
-  const btn = card.querySelector('[data-act="save"][data-iid="' + iid + '"]');
-  setBusy(btn, true, 'Salvando…');
-  try {
-    const key = requireKey();
-    localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
-    const payload = await fetchJSON('/instances/' + iid, true, { method: 'PATCH', body: JSON.stringify({ name, note }) });
-    setBadgeState('update', 'Dados salvos (' + payload.name + ')', 4000);
-    if (iid === els.selInstance.value) {
-      NOTE_STATE.lastSaved = (note || '').trim();
-      NOTE_STATE.pending = note || '';
-      NOTE_STATE.updatedAt = payload?.metadata?.updatedAt || NOTE_STATE.updatedAt;
-      NOTE_STATE.createdAt = payload?.metadata?.createdAt || NOTE_STATE.createdAt;
-      updateNoteMetaText();
-      setNoteStatus('synced');
-    }
-    await refreshInstances({ silent: true, withSkeleton: false });
-  } catch (err) {
-    console.error('[dashboard] erro ao salvar metadados', err);
-    showError('Falha ao salvar dados da instância');
-  } finally {
-    setBusy(btn, false);
-  }
-}
-
 async function performInstanceAction(action, iid, key, context = {}) {
   const endpoints = {
     logout: '/instances/' + iid + '/logout',
@@ -1258,7 +1151,7 @@ async function performInstanceAction(action, iid, key, context = {}) {
   } finally {
     if (button) setBusy(button, false);
     if (isInstanceLocked(iid)) {
-      setInstanceActionsDisabled(iid, true);
+      renderCards();
       setSelectedInstanceActionsDisabled(iid, true);
     }
   }
@@ -1323,6 +1216,10 @@ document.addEventListener('click', async (ev) => {
   if (!btn) return;
   const act = btn.dataset.act;
 
+  if (btn.closest('[data-component="instance-card"]')) {
+    return;
+  }
+
   if (act === 'modal-cancel') {
     ev.preventDefault();
     closeDeleteModal();
@@ -1357,46 +1254,6 @@ document.addEventListener('click', async (ev) => {
     return;
   }
 
-  // demais ações precisam de iid
-  const iid = btn.dataset.iid;
-  if (!iid) return;
-
-  // ações simples que não alteram servidor
-  if (act === 'select') {
-    els.selInstance.value = iid;
-    await refreshSelected({ withSkeleton: true });
-    return;
-  }
-  if (act === 'qr') {
-    try { requireKey(); } catch { return; }
-    if (iid) els.selInstance.value = iid;
-    await refreshSelected({ withSkeleton: true });
-    setBadgeState('info', 'QR atualizado', 3000);
-    return;
-  }
-  if (act === 'delete') {
-    const name = findCardByIid(iid)?.querySelector('[data-field="name"]')?.value?.trim() || iid;
-    openDeleteModal(iid, name);
-    return;
-  }
-
-  // ações que usam API Key
-  let key;
-  try { key = requireKey(); } catch { return; }
-  localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
-
-  if (act === 'logout') {
-    await performInstanceAction('logout', iid, key, { button: btn });
-    return;
-  }
-  if (act === 'wipe') {
-    await performInstanceAction('wipe', iid, key, { button: btn });
-    return;
-  }
-  if (act === 'save') {
-    await handleSaveMetadata(iid);
-    return;
-  }
 });
 
 /* Novo */
@@ -1416,7 +1273,12 @@ els.btnNew.onclick = async () => {
 };
 
 /* Select change */
-els.selInstance.onchange = () => refreshSelected({ withSkeleton: true });
+els.selInstance.onchange = () => {
+  renderCards();
+  const iid = els.selInstance.value;
+  if (iid) setSelectedInstanceActionsDisabled(iid, isInstanceLocked(iid));
+  refreshSelected({ withSkeleton: true });
+};
 
 /* Logout/Wipe (header) */
 els.btnLogout.onclick = async () => {
