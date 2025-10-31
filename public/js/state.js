@@ -8,6 +8,10 @@ export const els = {
   cards: q('cards'),
   cardsSkeleton: q('cardsSkeleton'),
   instanceLoading: q('instanceLoading'),
+  instanceSearch: q('instanceSearch'),
+  instanceFilterState: q('instanceFilterState'),
+  instanceSort: q('instanceSort'),
+  instanceCounter: q('instanceCounter'),
 
   // Note card
   noteCard: q('noteCard'),
@@ -36,6 +40,11 @@ export const els = {
   qrImg: q('qrImg'),
   qrHint: q('qrHint'),
   qrLoader: q('qrLoader'),
+  qrMeta: q('qrMeta'),
+  qrCountdown: q('qrCountdown'),
+  qrAttempt: q('qrAttempt'),
+  qrLastError: q('qrLastError'),
+  qrLastErrorWrap: q('qrLastErrorWrap'),
   btnLogout: q('btnLogout'),
   btnWipe: q('btnWipe'),
   btnPair: q('btnPair'),
@@ -44,9 +53,32 @@ export const els = {
   inpApiKey: q('inpApiKey'),
   inpPhone: q('inpPhone'),
   inpMsg: q('inpMsg'),
+  quickMessageGroup: q('quickMessageGroup'),
+  quickType: q('selQuickType'),
+  quickMsgLabel: q('quickMsgLabel'),
+  quickMsgHint: q('quickMsgHint'),
+  quickButtonsFields: q('quickButtonsFields'),
+  quickButtonsList: q('quickButtonsList'),
+  quickButtonsAdd: q('quickButtonsAdd'),
+  quickButtonsFooter: q('quickButtonsFooter'),
+  quickListFields: q('quickListFields'),
+  quickListButtonText: q('quickListButtonText'),
+  quickListTitle: q('quickListTitle'),
+  quickListFooter: q('quickListFooter'),
+  quickListSections: q('quickListSections'),
+  quickListAddSection: q('quickListAddSection'),
+  quickMediaFields: q('quickMediaFields'),
+  quickMediaType: q('quickMediaType'),
+  quickMediaUrl: q('quickMediaUrl'),
+  quickMediaBase64: q('quickMediaBase64'),
+  quickMediaMime: q('quickMediaMime'),
+  quickMediaFileName: q('quickMediaFileName'),
+  quickMediaPtt: q('quickMediaPtt'),
+  quickMediaGif: q('quickMediaGif'),
   btnSend: q('btnSend'),
   sendOut: q('sendOut'),
   msgCounter: q('msgCounter'),
+  quickResults: q('quickResults'),
 
   // Logs recentes
   btnRefreshLogs: q('btnRefreshLogs'),
@@ -149,6 +181,30 @@ export const NOTE_STATE = {
   timer: null,
   pending: '',
   saving: false,
+  revisions: [],
+  selectedRevision: 'current',
+  restoring: false,
+};
+
+export const INSTANCE_FILTERS = {
+  search: '',
+  status: 'all',
+  sort: 'name',
+};
+
+export const INSTANCE_VIEW = {
+  total: 0,
+  filtered: 0,
+  virtualization: {
+    ready: false,
+    columns: 1,
+    rowHeight: 0,
+    rowGap: 16,
+    paddingTop: 0,
+    paddingBottom: 0,
+    startIndex: 0,
+    endIndex: 0,
+  },
 };
 
 export const REFRESH_INTERVAL_MS = 5000;

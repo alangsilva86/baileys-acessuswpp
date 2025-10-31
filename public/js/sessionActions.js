@@ -1,6 +1,6 @@
 import { fetchJSON, requireKey } from './api.js';
 import { handleSaveMetadata, refreshInstances } from './instances.js';
-import { refreshSelected } from './metrics.js';
+import { refreshSelected, onInstanceEvent } from './metrics.js';
 import {
   els,
   formatDateTime,
@@ -387,6 +387,31 @@ function bindSelectionChange() {
   els.selInstance.addEventListener('change', () => refreshSelected({ withSkeleton: true }));
 }
 
+function initStreamReactions() {
+  onInstanceEvent((event) => {
+    const selected = els.selInstance?.value;
+    if (!selected || event?.instance?.id !== selected) return;
+    const reason = event?.reason || event?.type;
+    const detail = event?.detail || {};
+
+    if (reason === 'pairing') {
+      const attempt = detail?.attempt ? `#${detail.attempt}` : '';
+      if (detail?.status === 'ok') {
+        setBadgeState('update', `Pareamento solicitado ${attempt || ''}`.trim(), 4000);
+      } else if (detail?.status === 'error') {
+        const message = detail?.message || 'Falha ao solicitar pareamento';
+        setBadgeState('error', `${message}${attempt ? ` (${attempt})` : ''}`, 6000);
+      } else {
+        setBadgeState('info', `Solicitando pareamento ${attempt || ''}`.trim(), 3000);
+      }
+    }
+
+    if (reason === 'error' && detail?.message) {
+      setBadgeState('error', detail.message, 6000);
+    }
+  });
+}
+
 export function initSessionActions() {
   bindModalEvents();
   bindPairModal();
@@ -394,4 +419,5 @@ export function initSessionActions() {
   bindNewInstance();
   bindHeaderActions();
   bindSelectionChange();
+  initStreamReactions();
 }

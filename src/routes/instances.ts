@@ -12,6 +12,12 @@ import {
   saveInstancesIndex,
   type Instance,
   type MetricsTimelineEntry,
+  emitInstanceEvent,
+  onInstanceEvent,
+  type InstanceEventPayload,
+  recordNoteRevision,
+  summarizeNoteDiff,
+  MAX_NOTE_REVISIONS,
 } from '../instanceManager.js';
 import { brokerEventStore } from '../broker/eventStore.js';
 import { allowSend, sendWithTimeout, normalizeToE164BR, getSendTimeoutMs } from '../utils.js';
@@ -37,6 +43,10 @@ const API_KEYS = String(process.env.API_KEY || 'change-me')
   .map((s) => s.trim())
   .filter(Boolean);
 
+interface AuthedRequest extends Request {
+  authorizedKeyId?: string;
+}
+
 function safeEquals(a: unknown, b: unknown): boolean {
   const A = Buffer.from(String(a ?? ''));
   const B = Buffer.from(String(b ?? ''));
@@ -44,24 +54,111 @@ function safeEquals(a: unknown, b: unknown): boolean {
   return crypto.timingSafeEqual(A, B);
 }
 
+function extractApiKey(req: Request): string {
+  const headerKey = req.header('x-api-key');
+  if (headerKey && headerKey.trim()) return headerKey.trim();
+  const queryKey = req.query.apiKey;
+  if (typeof queryKey === 'string' && queryKey.trim()) return queryKey.trim();
+  if (Array.isArray(queryKey)) {
+    const [first] = queryKey;
+    if (typeof first === 'string') {
+      const trimmed = first.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return '';
+}
+
 function isAuthorized(req: Request): boolean {
-  const key = req.header('x-api-key') || '';
+  const key = extractApiKey(req);
+  if (!key) return false;
   return API_KEYS.some((k) => safeEquals(k, key));
+function resolveApiKeyMatch(value: string): string | null {
+  for (const candidate of API_KEYS) {
+    if (safeEquals(candidate, value)) return candidate;
+  }
+  return null;
+}
+
+function deriveAuthorizedKeyId(value: string): string {
+  const hash = crypto.createHash('sha256').update(value).digest('hex').slice(0, 12);
+  return `key:${hash}`;
+}
+
+function attachAuthorizedKey(req: Request, key: string | null): void {
+  if (!key) return;
+  (req as AuthedRequest).authorizedKeyId = deriveAuthorizedKeyId(key);
+}
+
+function getAuthorizedKeyId(req: Request): string | null {
+  return (req as AuthedRequest).authorizedKeyId ?? null;
 }
 
 function auth(req: Request, res: Response, next: NextFunction): void {
-  if (!isAuthorized(req)) {
+  const provided = req.header('x-api-key') || '';
+  const matched = resolveApiKeyMatch(provided);
+  if (!matched) {
     res.status(401).json({ error: 'unauthorized' });
     return;
   }
+  attachAuthorizedKey(req, matched);
   next();
 }
 
 router.use(auth);
 
-function connectionUpdatedAtIso(inst: Instance | undefined): string | null {
-  if (!inst?.connectionUpdatedAt) return null;
-  const date = new Date(inst.connectionUpdatedAt);
+router.get('/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  res.write(`retry: 5000\n\n`);
+
+  const iidFilterRaw = req.query.iid;
+  const iidFilter = typeof iidFilterRaw === 'string' && iidFilterRaw.trim() ? iidFilterRaw.trim() : null;
+
+  const send = (event: InstanceEventPayload) => {
+    try {
+      if (iidFilter && event.instance.id !== iidFilter) return;
+      const payload = {
+        type: event.reason,
+        reason: event.reason,
+        detail: event.detail ?? null,
+        instance: serializeInstance(event.instance),
+      };
+      res.write('event: instance\n');
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    } catch (err) {
+      console.error('[instances] sse.write.failed', err);
+    }
+  };
+
+  const unsubscribe = onInstanceEvent(send);
+  const keepAlive = setInterval(() => {
+    try {
+      res.write('event: ping\n');
+      res.write('data: {}\n\n');
+    } catch (err) {
+      console.error('[instances] sse.keepalive.failed', err);
+    }
+  }, 25_000);
+
+  const initial = iidFilter ? getInstance(iidFilter) : null;
+  if (initial) {
+    send({ reason: 'connection', instance: initial, detail: null });
+  } else if (!iidFilter) {
+    getAllInstances().forEach((inst) => send({ reason: 'connection', instance: inst, detail: null }));
+  }
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    unsubscribe();
+  });
+});
+
+function toIsoFromMs(value: number | null | undefined): string | null {
+  if (value == null) return null;
+  const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
@@ -271,6 +368,8 @@ function buildMetricsPayload(inst: Instance, range: MetricsRange) {
     },
     aggregates,
   };
+function connectionUpdatedAtIso(inst: Instance | undefined): string | null {
+  return toIsoFromMs(inst?.connectionUpdatedAt ?? null);
 }
 
 function ensureInstanceHasSocket(
@@ -527,8 +626,17 @@ router.patch(
       return;
     }
 
+    if (!inst.metadata) {
+      inst.metadata = { note: '', createdAt: null, updatedAt: null, revisions: [] };
+    }
+    if (!Array.isArray(inst.metadata.revisions)) {
+      inst.metadata.revisions = [];
+    }
+
     const body = (req.body || {}) as Record<string, unknown>;
     let touched = false;
+    let noteChanged = false;
+    const previousNote = inst.metadata.note || '';
 
     if (Object.prototype.hasOwnProperty.call(body, 'name')) {
       if (typeof body.name !== 'string') {
@@ -556,8 +664,13 @@ router.patch(
         res.status(400).json({ error: 'note_invalid' });
         return;
       }
-      inst.metadata = inst.metadata || { note: '', createdAt: null, updatedAt: null };
-      inst.metadata.note = String(patchNote).trim().slice(0, 280);
+      const nextNote = String(patchNote).trim().slice(0, 280);
+      if (nextNote !== inst.metadata.note) {
+        noteChanged = true;
+        inst.metadata.note = nextNote;
+      } else {
+        inst.metadata.note = nextNote;
+      }
       touched = true;
     }
 
@@ -566,7 +679,26 @@ router.patch(
       return;
     }
 
-    inst.metadata.updatedAt = new Date().toISOString();
+    const nowIso = new Date().toISOString();
+    if (noteChanged) {
+      const author = getAuthorizedKeyId(req);
+      const diffSummary = summarizeNoteDiff(previousNote, inst.metadata.note || '');
+      recordNoteRevision(inst, {
+        timestamp: nowIso,
+        author,
+        diff: {
+          before: previousNote,
+          after: inst.metadata.note || '',
+          summary: diffSummary,
+        },
+      });
+    }
+
+    if (Array.isArray(inst.metadata.revisions) && inst.metadata.revisions.length > MAX_NOTE_REVISIONS) {
+      inst.metadata.revisions = inst.metadata.revisions.slice(0, MAX_NOTE_REVISIONS);
+    }
+
+    inst.metadata.updatedAt = nowIso;
     await saveInstancesIndex();
     res.json(serializeInstance(inst));
   }),
@@ -630,12 +762,37 @@ router.post(
     const previousPhone = inst.phoneNumber;
     inst.phoneNumber = phoneNumber;
     await saveInstancesIndex();
+    const maskedPhone = phoneNumber.replace(/.(?=.{4})/g, '*');
+    const attempt = Math.max(inst.pairingAttempts + 1, 1);
+    inst.pairingAttempts = attempt;
+    inst.lastError = null;
+    emitInstanceEvent({
+      reason: 'pairing',
+      instance: inst,
+      detail: { via: 'manual', attempt, maskedPhone },
+    });
     try {
       const code = await inst.sock.requestPairingCode(phoneNumber);
+      emitInstanceEvent({
+        reason: 'pairing',
+        instance: inst,
+        detail: { via: 'manual', attempt, maskedPhone, status: 'ok' },
+      });
       res.json({ pairingCode: code });
     } catch (err) {
       inst.phoneNumber = previousPhone;
       await saveInstancesIndex();
+      inst.lastError = getErrorMessage(err);
+      emitInstanceEvent({
+        reason: 'pairing',
+        instance: inst,
+        detail: { via: 'manual', attempt, status: 'error', message: inst.lastError },
+      });
+      emitInstanceEvent({
+        reason: 'error',
+        instance: inst,
+        detail: { source: 'pairing', attempt, message: inst.lastError },
+      });
       throw err;
     }
   }),
@@ -1057,6 +1214,439 @@ router.post(
     }
     const results = await inst.sock.onWhatsApp(normalized);
     res.json({ results });
+  }),
+);
+
+router.post(
+  '/:iid/send-quick',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!ensureInstanceOnline(inst, res)) return;
+    if (!allowSend(inst)) {
+      res.status(429).json({ error: 'rate limit exceeded' });
+      return;
+    }
+
+    const body = (req.body || {}) as Record<string, unknown>;
+    const typeRaw = typeof body.type === 'string' ? body.type.trim().toLowerCase() : 'text';
+    const allowedTypes = ['text', 'buttons', 'list', 'media'] as const;
+    const isAllowedType = (allowedTypes as readonly string[]).includes(typeRaw);
+    if (!isAllowedType) {
+      res.status(400).json({ error: 'type_invalid', allowed: allowedTypes });
+      return;
+    }
+    const type = typeRaw as (typeof allowedTypes)[number];
+
+    const toRaw = typeof body.to === 'string' ? body.to : '';
+    if (!toRaw.trim()) {
+      res.status(400).json({ error: 'parâmetro to é obrigatório' });
+      return;
+    }
+
+    const normalized = normalizeToE164BR(toRaw);
+    if (!normalized) {
+      res.status(400).json({ error: 'to inválido. Use E.164: 55DDDNUMERO' });
+      return;
+    }
+
+    const check = await inst.sock.onWhatsApp(normalized);
+    const entry = Array.isArray(check) ? check[0] : null;
+    if (!entry || !entry.exists) {
+      res.status(404).json({ error: 'whatsapp_not_found' });
+      return;
+    }
+
+    const targetJid = entry?.jid ?? `${normalized}@s.whatsapp.net`;
+    const timeoutMs = getSendTimeoutMs();
+    const digits = normalized.replace(/\D/g, '');
+    const quickLinks = [
+      digits
+        ? {
+            rel: 'chat',
+            label: 'Abrir conversa',
+            href: `https://wa.me/${digits}`,
+          }
+        : null,
+      digits
+        ? {
+            rel: 'web',
+            label: 'Abrir no WhatsApp Web',
+            href: `https://web.whatsapp.com/send?phone=${digits}`,
+          }
+        : null,
+      {
+        rel: 'logs',
+        label: 'Ver eventos recentes',
+        href: `/instances/${inst.id}/logs?limit=20&direction=outbound`,
+      },
+    ].filter((link): link is { rel: string; label: string; href: string } => Boolean(link));
+
+    const requestLog: Record<string, unknown> = { type, to: normalized };
+    const meta: Record<string, unknown> = {};
+
+    const respondSocketUnavailable = (err: unknown): boolean => {
+      if (!isSocketUnavailableError(err)) return false;
+      const message = getErrorMessage(err);
+      res.status(503).json({
+        error: 'socket_unavailable',
+        detail: 'Conexão com o WhatsApp indisponível. Refaça o pareamento e tente novamente.',
+        message,
+      });
+      return true;
+    };
+
+    let sent: WAMessage | undefined;
+    let messageId: string | null = null;
+    let status: number | null = null;
+    let summary = '';
+    const preview: Record<string, unknown> = {};
+
+    if (type === 'text') {
+        const rawMessage =
+          typeof body.text === 'string'
+            ? body.text
+            : typeof body.message === 'string'
+            ? body.message
+            : '';
+        const messageText = rawMessage.trim();
+        if (!messageText) {
+          res.status(400).json({ error: 'message_required' });
+          return;
+        }
+        if (messageText.length > 4096) {
+          res.status(400).json({ error: 'message_too_long', max: 4096 });
+          return;
+        }
+
+        requestLog.messageLength = messageText.length;
+
+        try {
+          sent = inst.context?.messageService
+            ? await inst.context.messageService.sendText(targetJid, messageText, { timeoutMs })
+            : ((await sendWithTimeout(inst, targetJid, { text: messageText })) as WAMessage);
+        } catch (err) {
+          if (respondSocketUnavailable(err)) return;
+          res.status(500).json({ error: 'send_failed', detail: getErrorMessage(err) });
+          return;
+        }
+
+        inst.metrics.sent += 1;
+        inst.metrics.sent_by_type.text += 1;
+
+        const snippet = messageText.length > 120 ? `${messageText.slice(0, 117)}…` : messageText;
+        summary = snippet ? `Texto enviado para ${normalized}: ${snippet}` : `Texto enviado para ${normalized}.`;
+        if (snippet) preview.text = snippet;
+        meta.length = messageText.length;
+    } else if (type === 'buttons') {
+        const messageText = typeof body.text === 'string' ? body.text.trim() : '';
+        if (!messageText) {
+          res.status(400).json({ error: 'text inválido' });
+          return;
+        }
+
+        const rawOptions = Array.isArray((body as any).buttons)
+          ? ((body as any).buttons as unknown[])
+          : Array.isArray((body as any).options)
+          ? ((body as any).options as unknown[])
+          : [];
+        const sanitizedButtons: { id: string; title: string }[] = [];
+        const seenIds = new Set<string>();
+        for (const option of rawOptions) {
+          if (!option || typeof option !== 'object') continue;
+          const idRaw = (option as any).id ?? (option as any).buttonId;
+          const titleRaw =
+            (option as any).title ??
+            (option as any).text ??
+            (option as any).label ??
+            (option as any)?.buttonText?.displayText;
+          const id = typeof idRaw === 'string' ? idRaw.trim() : '';
+          const title = typeof titleRaw === 'string' ? titleRaw.trim() : '';
+          if (!id || !title || seenIds.has(id)) continue;
+          seenIds.add(id);
+          sanitizedButtons.push({ id, title });
+          if (sanitizedButtons.length >= 3) break;
+        }
+        if (!sanitizedButtons.length) {
+          res.status(400).json({ error: 'options inválidas (mínimo 1 botão com id e title)' });
+          return;
+        }
+
+        const footerText = typeof body.footer === 'string' ? body.footer.trim() : '';
+        const sanitizedFooter = footerText ? footerText : undefined;
+
+        requestLog.buttonsCount = sanitizedButtons.length;
+        requestLog.buttons = sanitizedButtons.map((button) => button.id);
+        if (sanitizedFooter) requestLog.footer = sanitizedFooter;
+        meta.buttonsCount = sanitizedButtons.length;
+        if (sanitizedFooter) meta.footer = sanitizedFooter;
+
+        try {
+          if (inst.context?.messageService) {
+            sent = await inst.context.messageService.sendButtons(
+              targetJid,
+              { text: messageText, footer: sanitizedFooter, buttons: sanitizedButtons },
+              { timeoutMs },
+            );
+          } else {
+            const templateButtons = sanitizedButtons.map((button, index) => ({
+              index: index + 1,
+              quickReplyButton: { id: button.id, displayText: button.title },
+            }));
+            const content = {
+              text: messageText,
+              footer: sanitizedFooter,
+              templateButtons,
+            } as unknown as SocketMessageContent;
+            sent = (await sendWithTimeout(inst, targetJid, content)) as WAMessage;
+          }
+        } catch (err) {
+          if (respondSocketUnavailable(err)) return;
+          res.status(500).json({ error: 'send_failed', detail: getErrorMessage(err) });
+          return;
+        }
+
+        inst.metrics.sent += 1;
+        inst.metrics.sent_by_type.buttons += 1;
+
+        summary = `Botões (${sanitizedButtons.length}) enviados para ${normalized}.`;
+        preview.text = messageText;
+        preview.buttons = sanitizedButtons;
+    } else if (type === 'list') {
+        const messageText = typeof body.text === 'string' ? body.text.trim() : '';
+        if (!messageText) {
+          res.status(400).json({ error: 'text inválido' });
+          return;
+        }
+
+        const buttonText = typeof body.buttonText === 'string' ? body.buttonText.trim() : '';
+        if (!buttonText) {
+          res.status(400).json({ error: 'buttonText inválido' });
+          return;
+        }
+
+        const rawSections = Array.isArray(body.sections) ? (body.sections as unknown[]) : [];
+        const sanitizedSections: { title?: string; options: { id: string; title: string; description?: string }[] }[] = [];
+        const seenIds = new Set<string>();
+
+        for (const section of rawSections) {
+          if (!section || typeof section !== 'object') continue;
+          const sectionTitle = typeof (section as any).title === 'string' ? (section as any).title.trim() : '';
+          const rawOptions = Array.isArray((section as any).options)
+            ? ((section as any).options as unknown[])
+            : Array.isArray((section as any).rows)
+            ? ((section as any).rows as unknown[])
+            : [];
+          const sectionOptions: { id: string; title: string; description?: string }[] = [];
+          for (const option of rawOptions) {
+            if (!option || typeof option !== 'object') continue;
+            const idRaw = (option as any).id ?? (option as any).rowId;
+            const titleRaw = (option as any).title ?? (option as any).text;
+            const descriptionRaw = (option as any).description ?? (option as any).subtitle;
+            const id = typeof idRaw === 'string' ? idRaw.trim() : '';
+            const title = typeof titleRaw === 'string' ? titleRaw.trim() : '';
+            const description = typeof descriptionRaw === 'string' ? descriptionRaw.trim() : '';
+            if (!id || !title || seenIds.has(id)) continue;
+            seenIds.add(id);
+            const optionEntry: { id: string; title: string; description?: string } = { id, title };
+            if (description) optionEntry.description = description;
+            sectionOptions.push(optionEntry);
+          }
+          if (sectionOptions.length) {
+            const normalizedSection: { title?: string; options: { id: string; title: string; description?: string }[] } = {
+              options: sectionOptions,
+            };
+            if (sectionTitle) normalizedSection.title = sectionTitle;
+            sanitizedSections.push(normalizedSection);
+          }
+        }
+
+        if (!sanitizedSections.length) {
+          res.status(400).json({ error: 'sections inválidas (mínimo 1 opção com id e title)' });
+          return;
+        }
+
+        const footerText = typeof body.footer === 'string' ? body.footer.trim() : '';
+        const sanitizedFooter = footerText ? footerText : undefined;
+        const titleText = typeof body.title === 'string' ? body.title.trim() : '';
+        const sanitizedTitle = titleText ? titleText : undefined;
+
+        requestLog.buttonText = buttonText;
+        requestLog.sectionsCount = sanitizedSections.length;
+        requestLog.optionsCount = sanitizedSections.reduce((acc, section) => acc + section.options.length, 0);
+        meta.sectionsCount = requestLog.sectionsCount;
+        meta.optionsCount = requestLog.optionsCount;
+
+        try {
+          if (inst.context?.messageService) {
+            sent = await inst.context.messageService.sendList(
+              targetJid,
+              {
+                text: messageText,
+                buttonText,
+                title: sanitizedTitle,
+                footer: sanitizedFooter,
+                sections: sanitizedSections,
+              },
+              { timeoutMs },
+            );
+          } else {
+            const sectionsPayload = sanitizedSections.map((section) => ({
+              title: section.title,
+              rows: section.options.map((option) => ({
+                rowId: option.id,
+                title: option.title,
+                description: option.description,
+              })),
+            }));
+            const content = {
+              text: messageText,
+              footer: sanitizedFooter,
+              list: {
+                title: sanitizedTitle,
+                buttonText,
+                description: messageText,
+                footer: sanitizedFooter,
+                sections: sectionsPayload,
+              },
+            } as unknown as SocketMessageContent;
+            sent = (await sendWithTimeout(inst, targetJid, content)) as WAMessage;
+          }
+        } catch (err) {
+          if (respondSocketUnavailable(err)) return;
+          res.status(500).json({ error: 'send_failed', detail: getErrorMessage(err) });
+          return;
+        }
+
+        inst.metrics.sent += 1;
+        inst.metrics.sent_by_type.lists += 1;
+
+        const totalOptions = sanitizedSections.reduce((acc, section) => acc + section.options.length, 0);
+        summary = `Lista enviada para ${normalized} (${totalOptions} opções).`;
+        preview.text = messageText;
+        preview.buttonText = buttonText;
+        preview.sections = sanitizedSections.map((section) => ({
+          title: section.title,
+          options: section.options.map((option) => option.title),
+        }));
+        if (sanitizedTitle) meta.title = sanitizedTitle;
+        if (sanitizedFooter) meta.footer = sanitizedFooter;
+    } else if (type === 'media') {
+        const mediaTypeRaw = typeof body.mediaType === 'string' ? body.mediaType.trim().toLowerCase() : '';
+        const allowedMediaTypes: MediaMessageType[] = ['image', 'video', 'audio', 'document'];
+        if (!allowedMediaTypes.includes(mediaTypeRaw as MediaMessageType)) {
+          res.status(400).json({ error: 'type_invalid', allowed: allowedMediaTypes });
+          return;
+        }
+
+        if (!body.media || typeof body.media !== 'object') {
+          res.status(400).json({ error: 'media_invalid' });
+          return;
+        }
+
+        const captionRaw =
+          typeof body.caption === 'string'
+            ? body.caption
+            : typeof body.text === 'string'
+            ? body.text
+            : '';
+
+        const mediaPayload: MediaPayload = {
+          url: typeof (body.media as any).url === 'string' ? (body.media as any).url : undefined,
+          base64: typeof (body.media as any).base64 === 'string' ? (body.media as any).base64 : undefined,
+          mimetype: typeof (body.media as any).mimetype === 'string' ? (body.media as any).mimetype : undefined,
+          fileName: typeof (body.media as any).fileName === 'string' ? (body.media as any).fileName : undefined,
+          ptt: typeof (body.media as any).ptt === 'boolean' ? (body.media as any).ptt : undefined,
+          gifPlayback: typeof (body.media as any).gifPlayback === 'boolean' ? (body.media as any).gifPlayback : undefined,
+        };
+
+        let built: BuiltMediaContent;
+        try {
+          built = buildMediaMessageContent(mediaTypeRaw as MediaMessageType, mediaPayload, {
+            caption: captionRaw || undefined,
+          });
+        } catch (err) {
+          const code = (err as Error & { code?: string }).code ?? 'media_invalid';
+          const detail = (err as Error).message;
+          const response: Record<string, unknown> = { error: code, detail };
+          if (code === 'media_too_large') {
+            response.maxBytes = MAX_MEDIA_BYTES;
+          }
+          res.status(400).json(response);
+          return;
+        }
+
+        requestLog.mediaType = mediaTypeRaw;
+        if (mediaPayload.mimetype) requestLog.mimetype = mediaPayload.mimetype;
+        if (captionRaw) requestLog.captionLength = captionRaw.length;
+
+        try {
+          if (inst.context?.messageService) {
+            sent = await inst.context.messageService.sendMedia(targetJid, mediaTypeRaw as MediaMessageType, mediaPayload, {
+              caption: captionRaw || undefined,
+              timeoutMs,
+            });
+          } else {
+            sent = (await sendWithTimeout(inst, targetJid, built.content)) as WAMessage;
+          }
+        } catch (err) {
+          if (respondSocketUnavailable(err)) return;
+          res.status(500).json({ error: 'send_failed', detail: getErrorMessage(err) });
+          return;
+        }
+
+        inst.metrics.sent += 1;
+        const counterKey = MEDIA_TYPE_COUNTER[mediaTypeRaw as MediaMessageType];
+        inst.metrics.sent_by_type[counterKey] += 1;
+
+        const caption = captionRaw.trim();
+        summary = `Mídia (${mediaTypeRaw}) enviada para ${normalized}${caption ? `: ${caption}` : ''}`;
+        if (caption) preview.text = caption;
+        preview.mediaType = mediaTypeRaw;
+        if (built.fileName) preview.fileName = built.fileName;
+        if (built.mimetype) preview.mimetype = built.mimetype;
+
+        meta.media = {
+          type: mediaTypeRaw,
+          mimetype: built.mimetype,
+          size: built.size,
+          fileName: built.fileName,
+          source: built.source,
+        };
+    }
+
+    const timestampIso = new Date().toISOString();
+    status = sent?.status ?? null;
+    messageId = sent?.key?.id ?? null;
+
+    inst.metrics.last.sentId = messageId;
+
+    const responsePayload: Record<string, unknown> = {
+      messageId,
+      type,
+      to: normalized,
+      status,
+      summary,
+      preview,
+      links: quickLinks,
+      timestamp: timestampIso,
+    };
+    if (Object.keys(meta).length) {
+      responsePayload.meta = meta;
+    }
+
+    res.json(responsePayload);
+
+    brokerEventStore.enqueue({
+      instanceId: inst.id,
+      direction: 'system',
+      type: 'QUICK_SEND_RESULT',
+      payload: {
+        request: requestLog,
+        response: responsePayload,
+        meta,
+        timestamp: timestampIso,
+      },
+    });
   }),
 );
 
@@ -1585,15 +2175,23 @@ function serializeInstance(inst: Instance) {
     connected,
     connectionState: inst.connectionState,
     connectionUpdatedAt: connectionUpdatedAtIso(inst),
+    connectionStateDetail: inst.connectionStateDetail
+      ? { ...inst.connectionStateDetail }
+      : null,
     user: connected ? inst.sock?.user ?? null : null,
     qrVersion: inst.qrVersion,
     hasLastQr: Boolean(inst.lastQR),
+    qrReceivedAt: toIsoFromMs(inst.qrReceivedAt),
+    qrExpiresAt: toIsoFromMs(inst.qrExpiresAt),
+    pairingAttempts: inst.pairingAttempts,
+    lastError: inst.lastError,
     hasStoredPhone: Boolean(inst.phoneNumber),
     note: inst.metadata?.note || '',
     metadata: {
       note: inst.metadata?.note || '',
       createdAt: inst.metadata?.createdAt || null,
       updatedAt: inst.metadata?.updatedAt || null,
+      revisions: Array.isArray(inst.metadata?.revisions) ? inst.metadata.revisions : [],
     },
     counters: {
       sent: inst.metrics.sent,
@@ -1610,6 +2208,7 @@ function serializeInstance(inst: Instance) {
       usage: inst.rateWindow.length / (Number(process.env.RATE_MAX_SENDS || 20) || 1),
     },
     metricsStartedAt: inst.metrics.startedAt,
+    revisions: Array.isArray(inst.metadata?.revisions) ? inst.metadata.revisions : [],
   };
 }
 

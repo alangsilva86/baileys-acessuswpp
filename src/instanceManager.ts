@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile, rm, rename } from 'fs/promises';
 import path from 'path';
+import { EventEmitter } from 'events';
 import pino from 'pino';
 import type { WASocket } from '@whiskeysockets/baileys';
 import { startWhatsAppInstance, stopWhatsAppInstance, type InstanceContext } from './whatsapp.js';
@@ -21,10 +22,23 @@ export interface MetricsTimelineEntry {
   rateInWindow: number;
 }
 
+export interface NoteRevisionDiff {
+  before: string;
+  after: string;
+  summary: string;
+}
+
+export interface NoteRevision {
+  timestamp: string;
+  author: string | null;
+  diff: NoteRevisionDiff;
+}
+
 export interface InstanceMetadata {
   note: string;
   createdAt: string | null;
   updatedAt: string | null;
+  revisions: NoteRevision[];
 }
 
 export interface InstanceMetrics {
@@ -70,11 +84,138 @@ export interface Instance {
   context: InstanceContext | null;
   connectionState: 'connecting' | 'open' | 'close' | 'qr_timeout';
   connectionUpdatedAt: number | null;
+  connectionStateDetail: {
+    statusCode: number | null;
+    reason: string | null;
+    isLoggedOut: boolean;
+    isTimedOut: boolean;
+  } | null;
+  qrReceivedAt: number | null;
+  qrExpiresAt: number | null;
+  pairingAttempts: number;
+  lastError: string | null;
   phoneNumber: string | null;
   lidMapping: LidMappingStore;
 }
 
 const instances = new Map<string, Instance>();
+
+export type InstanceEventReason = 'connection' | 'qr' | 'pairing' | 'error' | 'metadata';
+
+export interface InstanceEventPayload {
+  reason: InstanceEventReason;
+  instance: Instance;
+  detail?: Record<string, unknown> | null;
+}
+
+const instanceEventEmitter = new EventEmitter<{ event: [InstanceEventPayload] }>();
+instanceEventEmitter.setMaxListeners(0);
+
+function emitInstanceEvent(event: InstanceEventPayload): void {
+  instanceEventEmitter.emit('event', event);
+}
+
+function onInstanceEvent(listener: (event: InstanceEventPayload) => void): () => void {
+  instanceEventEmitter.on('event', listener);
+  return () => {
+    instanceEventEmitter.off('event', listener);
+  };
+const MAX_NOTE_REVISIONS = 20;
+const NOTE_MAX_LENGTH = 280;
+
+function sanitizeNote(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, NOTE_MAX_LENGTH);
+}
+
+function toIsoTimestamp(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function sanitizeRevisionAuthor(author: unknown): string | null {
+  if (typeof author !== 'string') return null;
+  const trimmed = author.trim();
+  if (!trimmed) return null;
+  return trimmed.slice(0, 120);
+}
+
+function sanitizeRevisionDiff(raw: any): NoteRevisionDiff {
+  const before = sanitizeNote(raw?.before);
+  const after = sanitizeNote(raw?.after);
+  const summary = typeof raw?.summary === 'string' ? raw.summary.trim().slice(0, 400) : '';
+  return { before, after, summary };
+}
+
+function normalizeRevision(raw: any): NoteRevision | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const timestamp = toIsoTimestamp((raw as NoteRevision)?.timestamp ?? (raw as any)?.timestamp);
+  if (!timestamp) return null;
+  const author = sanitizeRevisionAuthor((raw as NoteRevision)?.author ?? (raw as any)?.author);
+  const diff = sanitizeRevisionDiff((raw as NoteRevision)?.diff ?? (raw as any)?.diff ?? {});
+  return { timestamp, author, diff };
+}
+
+function normalizeRevisions(raw: any): NoteRevision[] {
+  if (!Array.isArray(raw)) return [];
+  const normalized: NoteRevision[] = [];
+  for (const entry of raw) {
+    const norm = normalizeRevision(entry);
+    if (norm) normalized.push(norm);
+  }
+  normalized.sort((a, b) => {
+    const aTs = new Date(a.timestamp).getTime();
+    const bTs = new Date(b.timestamp).getTime();
+    return Number.isNaN(bTs) ? -1 : Number.isNaN(aTs) ? 1 : bTs - aTs;
+  });
+  return normalized.slice(0, MAX_NOTE_REVISIONS);
+}
+
+function summarizeNoteDiff(before: string, after: string): string {
+  if (before === after) return 'sem alterações';
+  const beforeLines = before.split(/\r?\n/);
+  const afterLines = after.split(/\r?\n/);
+  const result: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < beforeLines.length || j < afterLines.length) {
+    const prevLine = beforeLines[i] ?? null;
+    const nextLine = afterLines[j] ?? null;
+    if (prevLine !== null && nextLine !== null && prevLine === nextLine) {
+      result.push(` ${prevLine}`);
+      i += 1;
+      j += 1;
+      continue;
+    }
+    const nextIndex = nextLine !== null ? beforeLines.indexOf(nextLine, i) : -1;
+    const prevIndex = prevLine !== null ? afterLines.indexOf(prevLine, j) : -1;
+    if (nextIndex === -1 && prevIndex === -1) {
+      if (prevLine !== null) result.push(`-${prevLine}`);
+      if (nextLine !== null) result.push(`+${nextLine}`);
+      i += 1;
+      j += 1;
+      continue;
+    }
+    if (nextIndex !== -1 && (prevIndex === -1 || nextIndex - i <= prevIndex - j)) {
+      if (nextLine !== null) result.push(`+${nextLine}`);
+      j += 1;
+      continue;
+    }
+    if (prevLine !== null) result.push(`-${prevLine}`);
+    i += 1;
+  }
+  const joined = result.join('\n').trim();
+  return joined.slice(0, 400) || 'alteração registrada';
+}
+
+function recordNoteRevision(instance: Instance, revision: NoteRevision): void {
+  const normalized = normalizeRevision(revision);
+  if (!normalized) return;
+  const current = Array.isArray(instance.metadata.revisions) ? instance.metadata.revisions : [];
+  instance.metadata.revisions = normalizeRevisions([normalized, ...current]);
+}
 
 function createEmptyMetrics(): InstanceMetrics {
   return {
@@ -89,11 +230,13 @@ function createEmptyMetrics(): InstanceMetrics {
 
 function createMetadata(base?: Partial<InstanceMetadata>): InstanceMetadata {
   const nowIso = new Date().toISOString();
-  return {
-    note: base?.note?.slice(0, 280) || '',
-    createdAt: base?.createdAt ?? nowIso,
-    updatedAt: base?.updatedAt ?? nowIso,
-  };
+  const note = sanitizeNote(base?.note ?? '');
+  const createdAt =
+    base?.createdAt === null ? null : toIsoTimestamp(base?.createdAt) ?? (base ? nowIso : null);
+  const updatedAt =
+    base?.updatedAt === null ? null : toIsoTimestamp(base?.updatedAt) ?? (base ? nowIso : null);
+  const revisions = normalizeRevisions(base?.revisions ?? []);
+  return { note, createdAt: createdAt ?? nowIso, updatedAt: updatedAt ?? nowIso, revisions };
 }
 
 function createInstanceRecord(
@@ -123,23 +266,33 @@ function createInstanceRecord(
     context: null,
     connectionState: 'close',
     connectionUpdatedAt: Date.now(),
+    connectionStateDetail: null,
+    qrReceivedAt: null,
+    qrExpiresAt: null,
+    pairingAttempts: 0,
+    lastError: null,
     phoneNumber: null,
     lidMapping: new LidMappingStore(),
   };
 }
 
 async function saveInstancesIndex(): Promise<void> {
-  const index = [...instances.values()].map((instance) => ({
-    id: instance.id,
-    name: instance.name,
-    dir: instance.dir,
-    phoneNumber: instance.phoneNumber,
-    metadata: {
-      note: instance.metadata?.note || '',
-      createdAt: instance.metadata?.createdAt || null,
-      updatedAt: instance.metadata?.updatedAt || null,
-    },
-  }));
+  const index = [...instances.values()].map((instance) => {
+    const metadata = createMetadata(instance.metadata);
+    instance.metadata = metadata;
+    return {
+      id: instance.id,
+      name: instance.name,
+      dir: instance.dir,
+      phoneNumber: instance.phoneNumber,
+      metadata: {
+        note: metadata.note,
+        createdAt: metadata.createdAt || null,
+        updatedAt: metadata.updatedAt || null,
+        revisions: metadata.revisions,
+      },
+    };
+  });
 
   try {
     await mkdir(SESSIONS_ROOT, { recursive: true });
@@ -347,4 +500,9 @@ export {
   ensureInstance,
   ensureInstanceStarted,
   removeInstance,
+  emitInstanceEvent,
+  onInstanceEvent,
+  recordNoteRevision,
+  summarizeNoteDiff,
+  MAX_NOTE_REVISIONS,
 };

@@ -1,6 +1,6 @@
 import { REFRESH_INTERVAL_MS, els } from './state.js';
 import { refreshInstances } from './instances.js';
-import { initMetrics } from './metrics.js';
+import { initMetrics, refreshSelected } from './metrics.js';
 import { initNotes } from './notes.js';
 import { initLogs, refreshLogs } from './logs.js';
 import { initQuickSend } from './quickSend.js';
@@ -8,13 +8,23 @@ import { initSessionActions } from './sessionActions.js';
 
 const MIN_REFRESH_INTERVAL_MS = REFRESH_INTERVAL_MS;
 const MAX_REFRESH_INTERVAL_MS = REFRESH_INTERVAL_MS * 6;
+const MIN_SELECTED_REFRESH_INTERVAL_MS = 2500;
+const SELECTED_REFRESH_DELAY_MS = 400;
+const STREAM_ERROR_THRESHOLD = 3;
 
 let autoRefreshTimerId = null;
 let autoRefreshInterval = MIN_REFRESH_INTERVAL_MS;
 let autoRefreshInFlight = false;
 let lastChangeAt = Date.now();
+let autoRefreshSuspended = false;
+let selectedRefreshTimerId = null;
+let lastSelectedRefreshAt = 0;
+let eventSource = null;
+let streamErrorCount = 0;
+let streamFallbackActive = false;
 
 function scheduleAutoRefresh(delayMs = autoRefreshInterval) {
+  if (autoRefreshSuspended) return;
   if (autoRefreshTimerId) {
     clearTimeout(autoRefreshTimerId);
   }
@@ -22,6 +32,13 @@ function scheduleAutoRefresh(delayMs = autoRefreshInterval) {
     autoRefreshTimerId = null;
     void performAutoRefresh();
   }, delayMs);
+}
+
+function stopAutoRefresh() {
+  if (autoRefreshTimerId) {
+    clearTimeout(autoRefreshTimerId);
+    autoRefreshTimerId = null;
+  }
 }
 
 function registerChange() {
@@ -73,6 +90,23 @@ async function performAutoRefresh() {
   scheduleAutoRefresh(autoRefreshInterval);
 }
 
+function suspendAutoRefresh() {
+  if (autoRefreshSuspended) return;
+  autoRefreshSuspended = true;
+  stopAutoRefresh();
+}
+
+function resumeAutoRefresh() {
+  if (!autoRefreshSuspended) return false;
+  autoRefreshSuspended = false;
+  registerChange();
+  if (!autoRefreshInFlight) {
+    void performAutoRefresh();
+  }
+  scheduleAutoRefresh(autoRefreshInterval);
+  return true;
+}
+
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
@@ -81,6 +115,99 @@ if (typeof document !== 'undefined') {
         void performAutoRefresh();
       }
     }
+  });
+}
+
+function scheduleSelectedRefresh() {
+  if (typeof window === 'undefined') return;
+  if (selectedRefreshTimerId) return;
+  const now = Date.now();
+  const elapsed = now - lastSelectedRefreshAt;
+  const delay =
+    elapsed >= MIN_SELECTED_REFRESH_INTERVAL_MS
+      ? SELECTED_REFRESH_DELAY_MS
+      : Math.max(SELECTED_REFRESH_DELAY_MS, MIN_SELECTED_REFRESH_INTERVAL_MS - elapsed);
+  selectedRefreshTimerId = setTimeout(() => {
+    selectedRefreshTimerId = null;
+    lastSelectedRefreshAt = Date.now();
+    void refreshSelected({ silent: true });
+  }, delay);
+}
+
+function handleActivityEvent(event) {
+  registerChange();
+  const selected = els.selInstance?.value || null;
+  const matchesSelected = Boolean(selected && event?.instanceId === selected);
+  void refreshInstances({ silent: true, skipSelected: matchesSelected });
+  if (matchesSelected) {
+    scheduleSelectedRefresh();
+  }
+}
+
+const streamHandlers = {
+  MESSAGE_INBOUND: handleActivityEvent,
+  MESSAGE_OUTBOUND: handleActivityEvent,
+  POLL_CHOICE: handleActivityEvent,
+  WEBHOOK_DELIVERY: handleActivityEvent,
+  default: () => {
+    registerChange();
+  },
+};
+
+function routeStreamEvent(event) {
+  if (!event || typeof event !== 'object') return;
+  const handler = streamHandlers[event.type] || streamHandlers.default;
+  if (typeof handler === 'function') {
+    handler(event);
+  }
+}
+
+function parseStreamData(data) {
+  if (typeof data !== 'string' || !data) return null;
+  try {
+    return JSON.parse(data);
+  } catch (err) {
+    console.debug('[boot] falha ao decodificar evento SSE', err);
+    return null;
+  }
+}
+
+function startEventStream() {
+  if (typeof window === 'undefined' || typeof EventSource === 'undefined') return;
+  if (eventSource) return;
+
+  eventSource = new EventSource('/stream');
+
+  const handleOpen = () => {
+    streamErrorCount = 0;
+    streamFallbackActive = false;
+    suspendAutoRefresh();
+  };
+
+  const handleBrokerEvent = (event) => {
+    streamErrorCount = 0;
+    const payload = parseStreamData(event.data);
+    if (payload) routeStreamEvent(payload);
+  };
+
+  const handlePing = () => {
+    streamErrorCount = 0;
+  };
+
+  eventSource.addEventListener('open', handleOpen);
+  eventSource.addEventListener('broker:event', handleBrokerEvent);
+  eventSource.addEventListener('ping', handlePing);
+  eventSource.onerror = () => {
+    streamErrorCount += 1;
+    if (streamErrorCount >= STREAM_ERROR_THRESHOLD && !streamFallbackActive) {
+      if (resumeAutoRefresh()) {
+        streamFallbackActive = true;
+      }
+    }
+  };
+
+  window.addEventListener('beforeunload', () => {
+    eventSource?.close();
   });
 }
 
@@ -103,6 +230,10 @@ export function bootDashboard() {
   initSessionActions();
 
   registerChange();
+
+  if (typeof window !== 'undefined') {
+    startEventStream();
+  }
 
   refreshInstances({ withSkeleton: true })
     .then((result) => {

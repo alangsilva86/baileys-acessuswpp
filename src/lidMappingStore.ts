@@ -1,9 +1,15 @@
 import type Long from 'long';
+import type { JidServer } from '@whiskeysockets/baileys';
+import { jidDecode, jidEncode, isLidUser } from '@whiskeysockets/baileys/lib/WABinary/jid-utils.js';
 import {
   jidDecode,
   jidEncode,
   isLidUser,
 } from '@whiskeysockets/baileys/lib/WABinary/jid-utils.js';
+import type { JidServer } from '@whiskeysockets/baileys/lib/WABinary/jid-utils.js';
+
+const S_WHATSAPP_NET_SERVER: JidServer = 's.whatsapp.net';
+const LID_SERVER: JidServer = 'lid';
 
 function toStringId(value: unknown): string | null {
   if (typeof value === 'string') {
@@ -30,13 +36,13 @@ function toStringId(value: unknown): string | null {
     if ('user' in (value as Record<string, unknown>) && 'server' in (value as Record<string, unknown>)) {
       const user = toStringId((value as Record<string, unknown>).user);
       const server = toStringId((value as Record<string, unknown>).server);
-      if (user && server) return jidEncode(user, server as string);
+      if (user && server) return jidEncode(user, server as JidServer);
     }
   }
   return null;
 }
 
-function canonicalizeJid(value: unknown, defaultServer?: string): string | null {
+function canonicalizeJid(value: unknown, defaultServer?: JidServer | null): string | null {
   const asString = toStringId(value);
   if (!asString) return null;
   const trimmed = asString.trim();
@@ -44,14 +50,14 @@ function canonicalizeJid(value: unknown, defaultServer?: string): string | null 
 
   const decoded = jidDecode(trimmed);
   if (decoded?.user) {
-    const server = decoded.server || defaultServer;
+    const server = decoded.server ?? defaultServer ?? null;
     if (!server) return null;
-    return jidEncode(decoded.user, server, decoded.device);
+    return jidEncode(decoded.user, server as JidServer, decoded.device);
   }
 
   if (/^[0-9]+$/.test(trimmed)) {
     if (!defaultServer) return trimmed;
-    return jidEncode(trimmed, defaultServer);
+    return jidEncode(trimmed, defaultServer as JidServer);
   }
 
   if (defaultServer && /^[0-9]+@[^@]+$/.test(trimmed)) {
@@ -69,10 +75,10 @@ function resolveJidInternal(
   primary: string | null | undefined,
   alternate: string | null | undefined,
   store: LidMappingStore | null | undefined,
-  defaultServer: string | null,
+  defaultServer: JidServer | null,
 ): string | null {
-  const primaryNormalized = canonicalizeJid(primary ?? undefined, defaultServer ?? undefined);
-  const alternateNormalized = canonicalizeJid(alternate ?? undefined, defaultServer ?? undefined);
+  const primaryNormalized = canonicalizeJid(primary ?? undefined, defaultServer);
+  const alternateNormalized = canonicalizeJid(alternate ?? undefined, defaultServer);
 
   if (isMeaningfulJid(alternateNormalized) && !isLidUser(alternateNormalized)) {
     return alternateNormalized;
@@ -144,10 +150,10 @@ function extractFromObject(entry: Record<string, unknown>): Array<{ pn: unknown;
   }
 
   const pnCandidate = pnCandidates
-    .map((candidate) => canonicalizeJid(candidate, 's.whatsapp.net'))
+    .map((candidate) => canonicalizeJid(candidate, S_WHATSAPP_NET_SERVER))
     .find(isMeaningfulJid);
   const lidCandidate = lidCandidates
-    .map((candidate) => canonicalizeJid(candidate, 'lid'))
+    .map((candidate) => canonicalizeJid(candidate, LID_SERVER))
     .find(isMeaningfulJid);
 
   if (pnCandidate && lidCandidate) {
@@ -162,8 +168,8 @@ export class LidMappingStore {
   private readonly lidToPn = new Map<string, string>();
 
   rememberMapping(pnJid: unknown, lidJid: unknown): boolean {
-    const pn = canonicalizeJid(pnJid, 's.whatsapp.net');
-    const lid = canonicalizeJid(lidJid, 'lid');
+    const pn = canonicalizeJid(pnJid, S_WHATSAPP_NET_SERVER);
+    const lid = canonicalizeJid(lidJid, LID_SERVER);
     if (!pn || !lid) return false;
     this.pnToLid.set(pn, lid);
     this.lidToPn.set(lid, pn);
@@ -198,23 +204,23 @@ export class LidMappingStore {
   }
 
   getPnForLid(lidJid: unknown): string | null {
-    const normalized = canonicalizeJid(lidJid, 'lid');
+    const normalized = canonicalizeJid(lidJid, LID_SERVER);
     if (!normalized) return null;
     return this.lidToPn.get(normalized) ?? null;
   }
 
   getLidForPn(pnJid: unknown): string | null {
-    const normalized = canonicalizeJid(pnJid, 's.whatsapp.net');
+    const normalized = canonicalizeJid(pnJid, S_WHATSAPP_NET_SERVER);
     if (!normalized) return null;
     return this.pnToLid.get(normalized) ?? null;
   }
 
   resolveRemoteJid(primary: string | null | undefined, alternate?: string | null | undefined): string | null {
-    return resolveJidInternal(primary, alternate, this, 's.whatsapp.net');
+    return resolveJidInternal(primary, alternate, this, S_WHATSAPP_NET_SERVER);
   }
 
   resolveParticipantJid(primary: string | null | undefined, alternate?: string | null | undefined): string | null {
-    return resolveJidInternal(primary, alternate, this, 's.whatsapp.net');
+    return resolveJidInternal(primary, alternate, this, S_WHATSAPP_NET_SERVER);
   }
 }
 
@@ -222,7 +228,7 @@ export function resolveJid(
   primary: string | null | undefined,
   alternate: string | null | undefined,
   store: LidMappingStore | null | undefined,
-  defaultServer: string | null = 's.whatsapp.net',
+  defaultServer: JidServer | null = S_WHATSAPP_NET_SERVER,
 ): string | null {
   return resolveJidInternal(primary, alternate, store ?? null, defaultServer);
 }
