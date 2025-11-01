@@ -434,17 +434,25 @@ async function loadQRCode(iid, options = {}) {
       const blob = await response.blob();
       const imageUrl = URL.createObjectURL(blob);
       if (els.qrImg) {
-        els.qrImg.src = imageUrl;
-        toggleHidden(els.qrImg, false);
-        els.qrImg.onload = () => {
+        const revokePreviousImageUrl = () => {
           if (els.qrImg.previousImageUrl) {
             URL.revokeObjectURL(els.qrImg.previousImageUrl);
           }
           els.qrImg.previousImageUrl = imageUrl;
+          els.qrImg.removeEventListener('load', revokePreviousImageUrl);
         };
+
+        els.qrImg.addEventListener('load', revokePreviousImageUrl, { once: true });
+        els.qrImg.src = imageUrl;
+        toggleHidden(els.qrImg, false);
       }
       if (version) qrVersionCache.set(iid, version);
-      setQrState(qrState, qrMessage);
+      const nextState = qrState && qrState !== 'loading' ? qrState : 'disconnected';
+      const nextMessage =
+        nextState !== 'loading' && qrMessage === 'Sincronizando QR…'
+          ? 'Instância desconectada. Aponte o WhatsApp para o QR code.'
+          : qrMessage;
+      setQrState(nextState, nextMessage);
       return true;
     }
 
