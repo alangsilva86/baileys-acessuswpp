@@ -283,7 +283,7 @@ const CONNECTION_STATE_META = {
     badgeText: (name, ts) => (ts ? `Reconectando (${name}) • ${ts}` : `Reconectando (${name})`),
     qrState: 'loading',
     qrMessage: (ts) => (ts ? `Reconectando… Atualizado em ${ts}.` : 'Reconectando…'),
-    shouldLoadQr: false,
+    shouldLoadQr: true,
   },
   close: {
     label: 'Desconectado',
