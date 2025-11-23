@@ -32,6 +32,7 @@ export interface WebhookClientOptions {
   url?: string | null;
   apiKey?: string | null;
   hmacSecret?: string | null;
+  authToken?: string | null;
   logger?: Logger;
   instanceId?: string;
   httpClient?: HttpClient;
@@ -48,6 +49,7 @@ export class WebhookClient {
   private readonly url?: string | null;
   private readonly apiKey?: string | null;
   private readonly hmacSecret?: string | null;
+  private readonly authToken?: string | null;
   private readonly logger: Logger;
   private readonly http: HttpClient;
   private readonly instanceId?: string;
@@ -63,6 +65,7 @@ export class WebhookClient {
       this.apiKey = DEFAULT_WEBHOOK_API_KEY;
     }
     this.hmacSecret = options.hmacSecret ?? process.env.WEBHOOK_HMAC_SECRET ?? null;
+    this.authToken = options.authToken ?? process.env.WEBHOOK_BEARER_TOKEN ?? null;
     this.logger = options.logger ?? pino({ level: process.env.LOG_LEVEL ?? 'info' });
     this.instanceId = options.instanceId;
     this.http = options.httpClient ?? axios.create({ timeout: 5000 });
@@ -87,6 +90,7 @@ export class WebhookClient {
       'content-type': 'application/json',
     };
     if (this.apiKey) headers['x-api-key'] = this.apiKey;
+    if (this.authToken) headers.Authorization = `Bearer ${this.authToken}`;
     const signatureSecret = this.hmacSecret ?? this.apiKey ?? null;
     if (signatureSecret) {
       headers['x-signature'] = buildSignature(serialized, signatureSecret);

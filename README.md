@@ -79,6 +79,7 @@ headers `Content-Type: text/event-stream`, `Cache-Control: no-cache` e `Connecti
 - `SERVICE_NAME`: Nome do serviço para logs (padrão: baileys-api)
 - `WEBHOOK_URL`: URL para receber webhooks de eventos
 - `WEBHOOK_API_KEY`: Chave para autenticar o webhook (padrão: `57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce`)
+- `WEBHOOK_BEARER_TOKEN`: Token opcional para autenticação via header `Authorization: Bearer <token>`
 - Logs de falha do webhook registram apenas status, mensagem e URL para evitar exposição de segredos
 - `WEBHOOK_HMAC_SECRET`: Segredo opcional para assinar os eventos via HMAC
 - `RATE_MAX_SENDS`: Máximo de mensagens por janela de tempo (padrão: 20)
@@ -99,8 +100,11 @@ Defina `WEBHOOK_URL` (e opcionalmente substitua `WEBHOOK_API_KEY` / `WEBHOOK_HMA
 
 Cada chamada é um `POST` com `Content-Type: application/json` e os seguintes headers:
 
-- `x-api-key`: obrigatório. Usa `WEBHOOK_API_KEY` (ou o valor padrão `57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce`).
+- `x-api-key`: enviado por padrão para compatibilidade. Usa `WEBHOOK_API_KEY` (ou o valor padrão `57c1acd47dc2524ab06dc4640443d755072565ebed06e1a7cc6d27ab4986e0ce`).
+- `Authorization: Bearer <token>`: opcional. Enviado quando `WEBHOOK_BEARER_TOKEN` (ou `authToken` no construtor) é definido.
 - `x-signature`: opcional. HMAC-SHA256 de `JSON.stringify(body)` usando `WEBHOOK_HMAC_SECRET` (ou, se ausente, o próprio `WEBHOOK_API_KEY`).
+
+É possível combinar os headers: se o bearer estiver configurado ele será incluído junto ao `x-api-key`, que continua sendo utilizado também como fallback do segredo HMAC quando `WEBHOOK_HMAC_SECRET` não for informado.
 
 O envelope padrão enviado é:
 
