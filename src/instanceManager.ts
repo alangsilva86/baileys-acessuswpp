@@ -96,6 +96,9 @@ export interface Instance {
   lastError: string | null;
   phoneNumber: string | null;
   lidMapping: LidMappingStore;
+  network: InstanceNetworkConfig;
+  pairedAt: number | null;
+  risk: InstanceRiskConfig;
 }
 
 const instances = new Map<string, Instance>();
@@ -124,6 +127,26 @@ function onInstanceEvent(listener: (event: InstanceEventPayload) => void): () =>
 
 const MAX_NOTE_REVISIONS = 20;
 const NOTE_MAX_LENGTH = 280;
+
+export type NetworkStatus = 'unknown' | 'ok' | 'blocked' | 'failed';
+
+export interface InstanceNetworkConfig {
+  proxyUrl: string | null;
+  ip: string | null;
+  asn: string | null;
+  isp: string | null;
+  latencyMs: number | null;
+  status: NetworkStatus;
+  blockReason: string | null;
+  lastCheckAt: number | null;
+  validatedAt: number | null;
+}
+
+export interface InstanceRiskConfig {
+  threshold: number;
+  interleaveEvery: number;
+  safeContacts: string[];
+}
 
 function sanitizeNote(value: unknown): string {
   if (typeof value !== 'string') return '';
@@ -247,6 +270,22 @@ function createInstanceRecord(
   dir: string,
   meta?: Partial<InstanceMetadata>,
 ): Instance {
+  const network: InstanceNetworkConfig = {
+    proxyUrl: null,
+    ip: null,
+    asn: null,
+    isp: null,
+    latencyMs: null,
+    status: 'unknown',
+    blockReason: null,
+    lastCheckAt: null,
+    validatedAt: null,
+  };
+  const risk: InstanceRiskConfig = {
+    threshold: 0.7,
+    interleaveEvery: 5,
+    safeContacts: [],
+  };
   return {
     id,
     name,
@@ -275,6 +314,9 @@ function createInstanceRecord(
     lastError: null,
     phoneNumber: null,
     lidMapping: new LidMappingStore(),
+    network,
+    pairedAt: null,
+    risk,
   };
 }
 
@@ -293,6 +335,9 @@ async function saveInstancesIndex(): Promise<void> {
         updatedAt: metadata.updatedAt || null,
         revisions: metadata.revisions,
       },
+      network: instance.network,
+      pairedAt: instance.pairedAt,
+      risk: instance.risk,
     };
   });
 
@@ -322,6 +367,33 @@ async function loadInstances(): Promise<void> {
       );
       if (typeof item.phoneNumber === 'string' && item.phoneNumber.trim()) {
         instance.phoneNumber = item.phoneNumber.trim();
+      }
+      if (item.pairedAt != null && Number.isFinite(Number(item.pairedAt))) {
+        instance.pairedAt = Number(item.pairedAt);
+      }
+      if (item.network && typeof item.network === 'object') {
+        instance.network = {
+          proxyUrl: typeof item.network.proxyUrl === 'string' && item.network.proxyUrl.trim() ? item.network.proxyUrl.trim() : null,
+          ip: typeof item.network.ip === 'string' && item.network.ip.trim() ? item.network.ip.trim() : null,
+          asn: typeof item.network.asn === 'string' && item.network.asn.trim() ? item.network.asn.trim() : null,
+          isp: typeof item.network.isp === 'string' && item.network.isp.trim() ? item.network.isp.trim() : null,
+          latencyMs: Number.isFinite(Number(item.network.latencyMs)) ? Number(item.network.latencyMs) : null,
+          status: ['ok', 'blocked', 'failed', 'unknown'].includes(String(item.network.status)) ? (item.network.status as any) : 'unknown',
+          blockReason: typeof item.network.blockReason === 'string' && item.network.blockReason.trim() ? item.network.blockReason.trim() : null,
+          lastCheckAt: Number.isFinite(Number(item.network.lastCheckAt)) ? Number(item.network.lastCheckAt) : null,
+          validatedAt: Number.isFinite(Number(item.network.validatedAt)) ? Number(item.network.validatedAt) : null,
+        };
+      }
+      if (item.risk && typeof item.risk === 'object') {
+        instance.risk = {
+          threshold: Number.isFinite(Number(item.risk.threshold)) ? Number(item.risk.threshold) : 0.7,
+          interleaveEvery: Number.isFinite(Number(item.risk.interleaveEvery)) && Number(item.risk.interleaveEvery) > 0 ? Number(item.risk.interleaveEvery) : 5,
+          safeContacts: Array.isArray(item.risk.safeContacts)
+            ? item.risk.safeContacts
+                .map((v: unknown) => (typeof v === 'string' ? v.trim() : ''))
+                .filter(Boolean)
+            : [],
+        };
       }
       instances.set(item.id, instance);
     }

@@ -150,13 +150,16 @@ export class PollService {
   private readonly aggregateVotes: typeof getAggregateVotesInPollMessage;
   private readonly decryptPollVote: typeof defaultDecryptPollVote;
   private readonly receiptHints = new Map<string, Set<string>>();
+  private readonly logger: pino.Logger;
 
   constructor(
     private readonly sock: WASocket,
     private readonly webhook: WebhookClient,
-    private readonly logger: pino.Logger,
+    logger: pino.Logger | Partial<pino.Logger>,
     options: PollServiceOptions = {},
   ) {
+    const safeLogger = logger && typeof (logger as any).info === 'function' ? (logger as pino.Logger) : pino({ level: 'silent' });
+    this.logger = safeLogger;
     this.store = options.store ?? new PollMessageStore();
     this.feedbackTemplate = options.feedbackTemplate ?? process.env.POLL_FEEDBACK_TEMPLATE ?? null;
     this.messageService = options.messageService;
@@ -166,11 +169,13 @@ export class PollService {
     this.aggregateVotes = options.aggregateVotesFn ?? getAggregateVotesInPollMessage;
     this.decryptPollVote = options.decryptPollVoteFn ?? defaultDecryptPollVote;
 
-    this.sock.ev.on('message-receipt.update', (updates) => {
-      for (const update of updates) {
-        const messageId = update?.key?.id ?? null;
-        if (!messageId) continue;
-        const bucket = this.ensureReceiptBucket(messageId);
+    const emitter = this.sock?.ev;
+    if (emitter?.on) {
+      emitter.on('message-receipt.update', (updates) => {
+        for (const update of updates) {
+          const messageId = update?.key?.id ?? null;
+          if (!messageId) continue;
+          const bucket = this.ensureReceiptBucket(messageId);
 
         const rawReceipt = update.receipt as Partial<{
           userJid?: string | null;
@@ -194,8 +199,11 @@ export class PollService {
         for (const source of hintSources) {
           this.noteReceiptHint(bucket, messageId, source.label, source.value);
         }
-      }
-    });
+        }
+      });
+    } else {
+      this.logger?.warn?.({ instanceId: this.instanceId }, 'pollService.sock.ev.missing');
+    }
   }
 
   async sendPoll(
@@ -755,6 +763,12 @@ export class PollService {
       ...orderedSelectedOptions,
       ...Array.from(remainingSelectedOptions.values()),
     ];
+    const filteredSelectedOptions = selectedOptions.filter((opt) => {
+      const text = opt.text?.toLowerCase() ?? '';
+      const id = opt.id?.toLowerCase() ?? '';
+      if (text === 'unknown' && id === 'unknown') return false;
+      return true;
+    });
 
     const question = extractPollQuestion(pollMessage) || pollMetadata?.question || '';
 
@@ -897,7 +911,7 @@ export class PollService {
       messageId,
       timestamp,
       voterJid,
-      selectedOptions,
+      selectedOptions: filteredSelectedOptions,
       optionsAggregates: optionTotals,
       aggregates: {
         totalVoters,
@@ -925,14 +939,14 @@ export class PollService {
     await this.webhook.emit('POLL_CHOICE', payload, { eventId: queued?.id });
     await this.maybeSendFeedback(voterJid, payload);
 
-    if (selectedOptions.length) {
-      recordVoteSelection(messageId, { pollId, question, selectedOptions });
+    if (filteredSelectedOptions.length) {
+      recordVoteSelection(messageId, { pollId, question, selectedOptions: filteredSelectedOptions });
       this.logger.info(
         {
           messageId,
           pollId,
           voterJid,
-          selected: selectedOptions.map((opt) => opt.text ?? opt.id ?? 'misterioso'),
+          selected: filteredSelectedOptions.map((opt) => opt.text ?? opt.id ?? 'misterioso'),
           clue: 'registramos o voto e avisamos o MessageService — hora do webhook sorrir',
         },
         'poll.vote.selection.recorded',

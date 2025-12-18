@@ -28,6 +28,8 @@ import {
   type MediaPayload,
   MAX_MEDIA_BYTES,
 } from '../baileys/messageService.js';
+import { riskGuardian } from '../risk/guardian.js';
+import { enqueueSendJob, getQueueMetrics, isSendQueueEnabled } from '../queue/sendQueue.js';
 
 const router = Router();
 
@@ -246,6 +248,26 @@ function filterTimeline(entries: MetricsTimelineEntry[], range: MetricsRange): M
     .map((entry) => normalizeTimelineEntry(entry));
 }
 
+function normalizeSafeContact(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const digits = value.replace(/\D+/g, '');
+  return digits ? digits : null;
+}
+
+function sanitizeSafeContacts(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of input) {
+    const normalized = normalizeSafeContact(item);
+    if (normalized && !seen.has(normalized)) {
+      seen.add(normalized);
+      result.push(normalized);
+    }
+  }
+  return result;
+}
+
 function summarizeTimeline(timeline: MetricsTimelineEntry[]): TimelineSummary {
   if (!timeline.length) {
     return {
@@ -297,6 +319,22 @@ function summarizeTimeline(timeline: MetricsTimelineEntry[]): TimelineSummary {
     },
     latest,
     averages: { rateInWindow: avgRate },
+  };
+}
+
+function buildRiskSnapshot(inst: Instance) {
+  const state = riskGuardian.getState(inst.id);
+  const total = Math.max(1, state.unknownCount + state.knownCount + state.responses);
+  const ratio = state.unknownCount / total;
+  return {
+    config: { ...inst.risk },
+    runtime: {
+      ratio,
+      unknown: state.unknownCount,
+      known: state.knownCount,
+      responses: state.responses,
+      paused: state.paused,
+    },
   };
 }
 
@@ -606,6 +644,10 @@ router.get('/', (_req, res) => {
       user: serialized.user,
       counters: { sent: serialized.counters.sent, status: serialized.counters.statusCounts },
       rate: serialized.rate,
+      network: serialized.network,
+      risk: serialized.risk,
+      queue: serialized.queue,
+      pairedAt: serialized.pairedAt,
     };
   });
   res.json(list);
@@ -849,6 +891,112 @@ router.get('/:iid/status', (req, res) => {
   const status = inst.statusMap.get(id) ?? null;
   res.json({ id, status });
 });
+
+router.get('/:iid/risk', (req, res) => {
+  const inst = getInstance(req.params.iid);
+  if (!inst) {
+    res.status(404).json({ error: 'instance_not_found' });
+    return;
+  }
+  res.json(buildRiskSnapshot(inst));
+});
+
+router.get('/queue/metrics', asyncHandler(async (_req, res) => {
+  const metrics = await getQueueMetrics();
+  res.json(metrics ?? { enabled: false });
+}));
+
+router.post(
+  '/:iid/risk',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!inst) {
+      res.status(404).json({ error: 'instance_not_found' });
+      return;
+    }
+
+    const body = (req.body || {}) as Record<string, unknown>;
+    const thresholdRaw = body.threshold ?? body.riskThreshold;
+    const interleaveRaw = body.interleaveEvery ?? body.safeEvery ?? body.safeInterval;
+    const safeContacts = sanitizeSafeContacts(body.safeContacts ?? (body as any)?.safe_contacts ?? (body as any)?.safe);
+
+    const threshold = Number(thresholdRaw);
+    const interleave = Number(interleaveRaw);
+
+    if (Number.isFinite(threshold) && threshold > 0) {
+      inst.risk.threshold = threshold;
+    }
+    if (Number.isFinite(interleave) && interleave > 0) {
+      inst.risk.interleaveEvery = interleave;
+    }
+    if (safeContacts.length) {
+      inst.risk.safeContacts = safeContacts;
+    }
+
+    riskGuardian.setConfig(inst.id, inst.risk);
+    await saveInstancesIndex();
+    res.json({ ok: true, risk: buildRiskSnapshot(inst) });
+  }),
+);
+
+router.post(
+  '/:iid/risk/resume',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!inst) {
+      res.status(404).json({ error: 'instance_not_found' });
+      return;
+    }
+    riskGuardian.resume(inst.id);
+    res.json({ ok: true, risk: buildRiskSnapshot(inst) });
+  }),
+);
+
+router.get('/:iid/proxy', (req, res) => {
+  const inst = getInstance(req.params.iid);
+  if (!inst) {
+    res.status(404).json({ error: 'instance_not_found' });
+    return;
+  }
+  res.json(inst.network);
+});
+
+router.post(
+  '/:iid/proxy',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!inst) {
+      res.status(404).json({ error: 'instance_not_found' });
+      return;
+    }
+    const proxyUrlRaw = (req.body as any)?.proxyUrl ?? (req.body as any)?.proxy;
+    const proxyUrl = typeof proxyUrlRaw === 'string' ? proxyUrlRaw.trim() : '';
+    if (!proxyUrl) {
+      res.status(400).json({ error: 'proxyUrl_required' });
+      return;
+    }
+
+    try {
+      const result = await import('../network/proxyValidator.js').then((m) => m.validateProxyUrl(proxyUrl));
+      inst.network.proxyUrl = proxyUrl;
+      inst.network.ip = result.ip;
+      inst.network.asn = result.asn;
+      inst.network.isp = result.isp;
+      inst.network.latencyMs = result.latencyMs;
+      inst.network.status = result.status === 'ok' ? 'ok' : result.status === 'blocked' ? 'blocked' : 'failed';
+      inst.network.blockReason = result.blockReason;
+      inst.network.lastCheckAt = result.lastCheckAt;
+      inst.network.validatedAt = result.status === 'ok' ? result.lastCheckAt : inst.network.validatedAt;
+      await saveInstancesIndex();
+      if (inst.sock && result.status !== 'ok') {
+        await stopWhatsAppInstance(inst, { logout: false });
+      }
+      res.json({ ok: true, network: inst.network });
+    } catch (err: any) {
+      res.status(500).json({ error: 'proxy_validation_failed', detail: err?.message });
+    }
+  }),
+);
 
 router.get(
   '/:iid/groups',
@@ -1309,6 +1457,13 @@ router.post(
     let summary = '';
     const preview: Record<string, unknown> = {};
 
+    const enqueueIfPossible = async (jobPayload: any) => {
+      if (!isSendQueueEnabled()) return false;
+      const jobId = await enqueueSendJob(jobPayload, { removeOnComplete: true, attempts: 3, backoff: { type: 'exponential', delay: 2000 } });
+      res.status(202).json({ enqueued: true, jobId, quickLinks });
+      return true;
+    };
+
     if (type === 'text') {
         const rawMessage =
           typeof body.text === 'string'
@@ -1327,6 +1482,10 @@ router.post(
         }
 
         requestLog.messageLength = messageText.length;
+
+        if (await enqueueIfPossible({ iid: inst.id, type: 'text', jid: targetJid, content: { text: messageText }, options: { timeoutMs } })) {
+          return;
+        }
 
         try {
           sent = inst.context?.messageService
@@ -1387,6 +1546,10 @@ router.post(
         if (sanitizedFooter) requestLog.footer = sanitizedFooter;
         meta.buttonsCount = sanitizedButtons.length;
         if (sanitizedFooter) meta.footer = sanitizedFooter;
+
+        if (await enqueueIfPossible({ iid: inst.id, type: 'buttons', jid: targetJid, content: { text: messageText, footer: sanitizedFooter, buttons: sanitizedButtons }, options: { timeoutMs } })) {
+          return;
+        }
 
         try {
           if (inst.context?.messageService) {
@@ -1484,19 +1647,21 @@ router.post(
         meta.sectionsCount = requestLog.sectionsCount;
         meta.optionsCount = requestLog.optionsCount;
 
+        const listPayload = {
+          text: messageText,
+          buttonText,
+          title: sanitizedTitle,
+          footer: sanitizedFooter,
+          sections: sanitizedSections,
+        };
+
+        if (await enqueueIfPossible({ iid: inst.id, type: 'list', jid: targetJid, content: listPayload, options: { timeoutMs } })) {
+          return;
+        }
+
         try {
           if (inst.context?.messageService) {
-            sent = await inst.context.messageService.sendList(
-              targetJid,
-              {
-                text: messageText,
-                buttonText,
-                title: sanitizedTitle,
-                footer: sanitizedFooter,
-                sections: sanitizedSections,
-              },
-              { timeoutMs },
-            );
+            sent = await inst.context.messageService.sendList(targetJid, listPayload, { timeoutMs });
           } else {
             const sectionsPayload = sanitizedSections.map((section) => ({
               title: section.title,
@@ -1586,6 +1751,17 @@ router.post(
         requestLog.mediaType = mediaTypeRaw;
         if (mediaPayload.mimetype) requestLog.mimetype = mediaPayload.mimetype;
         if (captionRaw) requestLog.captionLength = captionRaw.length;
+
+        const mediaJobPayload = {
+          iid: inst.id,
+          type: 'media' as const,
+          jid: targetJid,
+          content: { type: mediaTypeRaw, media: mediaPayload },
+          options: { caption: captionRaw || undefined, timeoutMs },
+        };
+        if (await enqueueIfPossible(mediaJobPayload)) {
+          return;
+        }
 
         try {
           if (inst.context?.messageService) {
@@ -2217,6 +2393,12 @@ function serializeInstance(inst: Instance) {
     },
     metricsStartedAt: inst.metrics.startedAt,
     revisions: Array.isArray(inst.metadata?.revisions) ? inst.metadata.revisions : [],
+    risk: buildRiskSnapshot(inst),
+    network: inst.network,
+    pairedAt: inst.pairedAt,
+    queue: {
+      enabled: isSendQueueEnabled(),
+    },
   };
 }
 

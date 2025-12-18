@@ -1,0 +1,30 @@
+{
+  "556299999999@g.us#poll-123": {
+    "pollKey": "556299999999@g.us#poll-123",
+    "pollId": "poll-123",
+    "remoteJid": "556299999999@g.us",
+    "encKeyHex": "0505050505050505050505050505050505050505050505050505050505050505",
+    "question": "Qual produto?",
+    "options": [
+      "Produto A",
+      "Produto B",
+      "Unknown",
+      "Produto Especial",
+      "Produto Especial"
+    ],
+    "selectableCount": null,
+    "updatedAt": 1766085475207
+  },
+  "556200000000@g.us#poll-message-id": {
+    "pollKey": "556200000000@g.us#poll-message-id",
+    "pollId": "poll-message-id",
+    "remoteJid": "556200000000@g.us",
+    "encKeyHex": null,
+    "question": "Qual produto?",
+    "options": [
+      "Produto A"
+    ],
+    "selectableCount": null,
+    "updatedAt": 1766085475209
+  }
+}

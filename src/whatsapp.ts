@@ -6,6 +6,7 @@ import {
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import type { BaileysEventMap } from '@whiskeysockets/baileys';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { recordMetricsSnapshot, resolveAckWaiters } from './utils.js';
 import {
   type Instance,
@@ -17,6 +18,7 @@ import { MessageService } from './baileys/messageService.js';
 import { PollService } from './baileys/pollService.js';
 import { WebhookClient } from './services/webhook.js';
 import { brokerEventStore } from './broker/eventStore.js';
+import { riskGuardian } from './risk/guardian.js';
 import { filterClientMessages } from './baileys/messageUtils.js';
 import {
   applyStatus,
@@ -36,6 +38,8 @@ import {
   setConnectionDetail,
   incrementPairingAttempts,
 } from './whatsapp/connectionLifecycle.js';
+import { validateProxyUrl } from './network/proxyValidator.js';
+import { createBrightDataProxyUrl } from './network/brightData.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 const PHONE_NUMBER_SHARE_EVENT = 'chats.phoneNumberShare';
@@ -87,7 +91,56 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   updateConnectionState(inst, 'connecting');
   let resetScheduledForSocket = false;
 
-  const sock = makeWASocket({ version, auth: state, logger });
+  let agent: ReturnType<typeof HttpsProxyAgent> | undefined;
+  // Se a instância não tem proxy, tenta montar via Bright Data a partir das envs
+  if (!inst.network?.proxyUrl) {
+    const bdUrl = createBrightDataProxyUrl(inst.id);
+    if (bdUrl) {
+      inst.network.proxyUrl = bdUrl;
+    }
+  }
+
+  if (inst.network?.proxyUrl) {
+    try {
+      const validation = await validateProxyUrl(inst.network.proxyUrl);
+      inst.network = {
+        ...inst.network,
+        ip: validation.ip,
+        isp: validation.isp,
+        asn: validation.asn,
+        latencyMs: validation.latencyMs,
+        status: validation.status === 'ok' ? 'ok' : validation.status === 'blocked' ? 'blocked' : 'failed',
+        blockReason: validation.blockReason,
+        lastCheckAt: validation.lastCheckAt,
+        validatedAt: validation.status === 'ok' ? validation.lastCheckAt : inst.network.validatedAt,
+      };
+      if (validation.status === 'blocked') {
+        setLastError(inst, validation.blockReason);
+        updateConnectionState(inst, 'close');
+        throw new Error(validation.blockReason || 'proxy_blocked_datacenter');
+      }
+      if (validation.status === 'failed') {
+        setLastError(inst, validation.blockReason);
+        logger.warn({ iid: inst.id, reason: validation.blockReason }, 'network.proxy.validation_failed');
+      }
+      agent = new HttpsProxyAgent(inst.network.proxyUrl);
+      logger.info(
+        { iid: inst.id, proxy: inst.network.proxyUrl, asn: validation.asn, isp: validation.isp, latencyMs: validation.latencyMs },
+        'network.proxy.enabled',
+      );
+    } catch (err: any) {
+      logger.error({ iid: inst.id, err: err?.message }, 'network.proxy.invalid');
+    }
+  }
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    logger,
+    agent,
+    browser: ['Windows', 'Chrome', '10.0.0'],
+    connectTimeoutMs: 60_000,
+  });
   inst.sock = sock;
   inst.context = null;
 
@@ -131,6 +184,11 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
 
   inst.context = { messageService, pollService, webhook };
   inst.stopping = false;
+  try {
+    riskGuardian.setConfig(inst.id, inst.risk || {});
+  } catch (err) {
+    logger.warn({ iid: inst.id, err }, 'risk.guardian.config.failed');
+  }
 
   const hasEnc =
     !!process.env.POLL_METADATA_ENCRYPTION_KEY ||
@@ -166,6 +224,9 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
       clearPairingState(inst);
       clearLastError(inst);
       setConnectionDetail(inst, null);
+      if (!inst.pairedAt) {
+        inst.pairedAt = Date.now();
+      }
       logger.info({ iid, receivedPendingNotifications }, 'whatsapp.connected');
       notifyInstanceEvent(inst, 'connection', {
         connection: 'open',

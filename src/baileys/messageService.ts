@@ -5,7 +5,9 @@ import type {
   WASocket,
 } from '@whiskeysockets/baileys';
 import type Long from 'long';
+import axios from 'axios';
 import pino from 'pino';
+import sharp from 'sharp';
 
 import { buildContactPayload, mapLeadFromMessage } from '../services/leadMapper.js';
 import type { ContactPayload } from '../services/leadMapper.js';
@@ -32,6 +34,7 @@ import {
   recordVoteSelection,
 } from './pollMetadata.js';
 import type { LidMappingStore } from '../lidMappingStore.js';
+import { riskGuardian } from '../risk/guardian.js';
 
 export interface SendTextOptions {
   timeoutMs?: number;
@@ -133,6 +136,9 @@ export interface MessageServiceOptions {
 /* --------------------------------- helpers -------------------------------- */
 
 const DEFAULT_DOCUMENT_MIMETYPE = 'application/octet-stream';
+const HUMANIZE_SENDS = process.env.HUMANIZE_SENDS !== '0';
+const HASH_BUST_IMAGES = process.env.HASH_BUST_IMAGES !== '0';
+const TYPING_MS_PER_CHAR = 200;
 
 function createError(code: string, message?: string): Error {
   const err = new Error(message ?? code);
@@ -142,6 +148,66 @@ function createError(code: string, message?: string): Error {
 
 function sanitizeString(v: unknown): string {
   return typeof v === 'string' ? v.trim() : '';
+}
+
+function applySpintax(text: string): string {
+  const regex = /\{([^{}]+?)\}/g;
+  return text.replace(regex, (_, group) => {
+    const variants = String(group)
+      .split('|')
+      .map((v: string) => v.trim())
+      .filter(Boolean);
+    if (!variants.length) return group;
+    const pick = variants[Math.floor(Math.random() * variants.length)];
+    return pick;
+  });
+}
+
+async function humanDelay(minMs: number, maxMs: number): Promise<void> {
+  const min = Math.max(0, Math.floor(minMs));
+  const max = Math.max(min, Math.floor(maxMs));
+  const jitter = Math.floor(Math.random() * (max - min + 1) + min);
+  await new Promise((resolve) => setTimeout(resolve, jitter));
+}
+
+function estimatePresenceProfile(content: Parameters<WASocket['sendMessage']>[1]): {
+  type: 'composing' | 'recording';
+  min: number;
+  max: number;
+} {
+  let textLength = 24;
+  if (typeof (content as any)?.text === 'string') {
+    textLength = (content as any).text.length || 1;
+  } else if (typeof (content as any)?.caption === 'string') {
+    textLength = (content as any).caption.length || 1;
+  }
+  const base = textLength * TYPING_MS_PER_CHAR;
+  const extra = 1000 + Math.random() * 2000; // 1-3s extra reação
+  const duration = Math.min(20_000, base + extra);
+  return {
+    type: (content as any)?.audio ? 'recording' : 'composing',
+    min: duration * 0.8,
+    max: duration * 1.2,
+  };
+}
+
+async function hashBusterImage(buffer: Buffer): Promise<Buffer> {
+  try {
+    const brightness = 1 + Math.random() * 0.01;
+    const saturation = 1 + Math.random() * 0.01;
+    return await sharp(buffer)
+      .modulate({ brightness, saturation })
+      .withMetadata({
+        exif: {
+          IFD0: {
+            Copyright: `aegis-${Date.now()}-${Math.random()}`,
+          },
+        },
+      })
+      .toBuffer();
+  } catch {
+    return buffer;
+  }
 }
 
 function extractBase64(value: string): { buffer: Buffer; mimetype: string | null } {
@@ -446,44 +512,75 @@ export class MessageService {
   }
 
   async sendText(jid: string, text: string, options: SendTextOptions = {}): Promise<WAMessage> {
-    const message = await this.sendMessageWithTimeout(jid, { text }, options);
-    await this.emitOutboundMessage(message, { text, type: 'text' });
+    const risk = riskGuardian.beforeSend(this.instanceId, jid);
+    if (!risk.allowed) throw createError('risk_paused', 'envios pausados por risco elevado');
+    if (risk.injectSafeJid) {
+      await this.sendSafeInterleave(risk.injectSafeJid);
+      riskGuardian.afterSend(this.instanceId, risk.injectSafeJid, true);
+    }
+    const processed = applySpintax(text);
+    const message = await this.sendMessageWithTimeout(jid, { text: processed }, options);
+    await this.emitOutboundMessage(message, { text: processed, type: 'text' });
+    riskGuardian.afterSend(this.instanceId, jid, risk.isKnown);
     return message;
   }
 
   async sendButtons(jid: string, payload: SendButtonsPayload, options: SendTextOptions = {}): Promise<WAMessage> {
+    const risk = riskGuardian.beforeSend(this.instanceId, jid);
+    if (!risk.allowed) throw createError('risk_paused', 'envios pausados por risco elevado');
+    if (risk.injectSafeJid) {
+      await this.sendSafeInterleave(risk.injectSafeJid);
+      riskGuardian.afterSend(this.instanceId, risk.injectSafeJid, true);
+    }
+    const processedText = applySpintax(payload.text);
+    const processedFooter = payload.footer ? applySpintax(payload.footer) : undefined;
     const templateButtons = payload.buttons.map((button, i) => ({
       index: i + 1,
       quickReplyButton: { id: button.id, displayText: button.title },
     }));
 
-    const content = { text: payload.text, footer: payload.footer, templateButtons } as const;
+    const content = { text: processedText, footer: processedFooter, templateButtons } as const;
     const message = await this.sendMessageWithTimeout(jid, content, options);
 
     const interactive: InteractivePayload = {
       type: 'buttons',
       buttons: payload.buttons.map((b) => ({ ...b })),
-      ...(payload.footer ? { footer: payload.footer } : {}),
+      ...(processedFooter ? { footer: processedFooter } : {}),
     };
 
-    await this.emitOutboundMessage(message, { text: payload.text, interactive, type: 'buttons' });
+    await this.emitOutboundMessage(message, { text: processedText, interactive, type: 'buttons' });
+    riskGuardian.afterSend(this.instanceId, jid, risk.isKnown);
     return message;
   }
 
   async sendList(jid: string, payload: SendListPayload, options: SendTextOptions = {}): Promise<WAMessage> {
+    const risk = riskGuardian.beforeSend(this.instanceId, jid);
+    if (!risk.allowed) throw createError('risk_paused', 'envios pausados por risco elevado');
+    if (risk.injectSafeJid) {
+      await this.sendSafeInterleave(risk.injectSafeJid);
+      riskGuardian.afterSend(this.instanceId, risk.injectSafeJid, true);
+    }
+    const processedText = applySpintax(payload.text);
+    const processedFooter = payload.footer ? applySpintax(payload.footer) : undefined;
+    const processedTitle = payload.title ? applySpintax(payload.title) : undefined;
+    const processedButton = applySpintax(payload.buttonText);
     const sections = payload.sections.map((section) => ({
-      title: section.title,
-      rows: section.options.map((o) => ({ rowId: o.id, title: o.title, description: o.description })),
+      title: section.title ? applySpintax(section.title) : section.title,
+      rows: section.options.map((o) => ({
+        rowId: o.id,
+        title: applySpintax(o.title),
+        description: o.description ? applySpintax(o.description) : o.description,
+      })),
     }));
 
     const content = {
-      text: payload.text,
-      footer: payload.footer,
+      text: processedText,
+      footer: processedFooter,
       list: {
-        title: payload.title,
-        buttonText: payload.buttonText,
-        description: payload.text,
-        footer: payload.footer,
+        title: processedTitle,
+        buttonText: processedButton,
+        description: processedText,
+        footer: processedFooter,
         sections,
       },
     } as const;
@@ -492,23 +589,37 @@ export class MessageService {
 
     const interactive: InteractivePayload = {
       type: 'list',
-      buttonText: payload.buttonText,
-      ...(payload.title ? { title: payload.title } : {}),
-      ...(payload.footer ? { footer: payload.footer } : {}),
+      buttonText: processedButton,
+      ...(processedTitle ? { title: processedTitle } : {}),
+      ...(processedFooter ? { footer: processedFooter } : {}),
       sections: payload.sections.map((s) => ({
         ...(s.title ? { title: s.title } : {}),
-        options: s.options.map((o) => ({ id: o.id, title: o.title, ...(o.description ? { description: o.description } : {}) })),
+        options: s.options.map((o) => ({
+          id: o.id,
+          title: applySpintax(o.title),
+          ...(o.description ? { description: applySpintax(o.description) } : {}),
+        })),
       })),
     };
 
-    await this.emitOutboundMessage(message, { text: payload.text, interactive, type: 'list' });
+    await this.emitOutboundMessage(message, { text: processedText, interactive, type: 'list' });
+    riskGuardian.afterSend(this.instanceId, jid, risk.isKnown);
     return message;
   }
 
   async sendMedia(jid: string, type: MediaMessageType, media: MediaPayload, options: SendMediaOptions = {}): Promise<WAMessage> {
+    const risk = riskGuardian.beforeSend(this.instanceId, jid);
+    if (!risk.allowed) throw createError('risk_paused', 'envios pausados por risco elevado');
+    if (risk.injectSafeJid) {
+      await this.sendSafeInterleave(risk.injectSafeJid);
+      riskGuardian.afterSend(this.instanceId, risk.injectSafeJid, true);
+    }
     const timeoutMs = options.timeoutMs ?? getSendTimeoutMs();
-    const built = buildMediaMessageContent(type, media, options);
-    const sendPromise = this.sock.sendMessage(jid, built.content, options.messageOptions);
+    const caption = sanitizeString(options.caption);
+    const processedCaption = caption ? applySpintax(caption) : caption;
+    const builtBase = buildMediaMessageContent(type, media, { ...options, caption: processedCaption });
+    const built = await this.hashBustIfNeeded(type, builtBase);
+    const sendPromise = this.sendWithHumanization(jid, built.content, options.messageOptions);
 
     let timeoutHandle: NodeJS.Timeout | undefined;
     const message = await (timeoutMs
@@ -520,12 +631,12 @@ export class MessageService {
 
     if (timeoutHandle) clearTimeout(timeoutHandle);
 
-    const caption = sanitizeString(options.caption);
     await this.emitOutboundMessage(message, {
-      text: caption || null,
+      text: processedCaption || null,
       type: 'media',
-      media: { mediaType: type, caption: caption || null, mimetype: built.mimetype, fileName: built.fileName, size: built.size },
+      media: { mediaType: type, caption: processedCaption || null, mimetype: built.mimetype, fileName: built.fileName, size: built.size },
     });
+    riskGuardian.afterSend(this.instanceId, jid, risk.isKnown);
 
     return message;
   }
@@ -538,6 +649,11 @@ export class MessageService {
   async onInbound(messages: WAMessage[]): Promise<void> {
     const filtered = filterClientMessages(messages);
     for (const message of filtered) {
+      try {
+        riskGuardian.registerInbound(this.instanceId, message.key?.remoteJid ?? null);
+      } catch (err) {
+        this.logger.warn({ err }, 'risk.guardian.register_inbound.failed');
+      }
       try {
         const eventPayload = this.createStructuredPayload(message, 'inbound');
         let queued: BrokerEvent | null = null;
@@ -567,7 +683,7 @@ export class MessageService {
     options: SendTextOptions,
   ): Promise<WAMessage> {
     const timeoutMs = options.timeoutMs ?? getSendTimeoutMs();
-    const sendPromise = this.sock.sendMessage(jid, content, options.messageOptions);
+    const sendPromise = this.sendWithHumanization(jid, content, options.messageOptions);
 
     let timeoutHandle: NodeJS.Timeout | undefined;
     const message = await (timeoutMs
@@ -605,6 +721,81 @@ export class MessageService {
     }
 
     await this.webhook.emit('MESSAGE_OUTBOUND', eventPayload, { eventId: queued?.id });
+  }
+
+  private async sendSafeInterleave(jid: string): Promise<void> {
+    const pingText = applySpintax('{Oi|Olá|E aí}, conferindo conexão.');
+    try {
+      await this.sendWithHumanization(jid, { text: pingText });
+    } catch (err) {
+      this.logger.warn({ jid, err }, 'risk.safe_contact.send.failed');
+    }
+  }
+
+  private async sendWithHumanization(
+    jid: string,
+    content: Parameters<WASocket['sendMessage']>[1],
+    messageOptions?: Parameters<WASocket['sendMessage']>[2],
+  ): Promise<WAMessage> {
+    if (!HUMANIZE_SENDS) {
+      return this.sock.sendMessage(jid, content, messageOptions);
+    }
+
+    try {
+      await this.sock.sendPresenceUpdate('available', jid);
+    } catch {}
+
+    await humanDelay(800, 2000);
+    const profile = estimatePresenceProfile(content);
+    try {
+      await this.sock.sendPresenceUpdate(profile.type, jid);
+    } catch {}
+    await humanDelay(profile.min, profile.max);
+    try {
+      await this.sock.sendPresenceUpdate('paused', jid);
+    } catch {}
+    await humanDelay(600, 1400);
+
+    const result = await this.sock.sendMessage(jid, content, messageOptions);
+    setTimeout(() => {
+      try {
+        void this.sock?.sendPresenceUpdate?.('unavailable', jid);
+      } catch {
+        // ignore presence cleanup errors
+      }
+    }, 8000);
+    return result;
+  }
+
+  private async hashBustIfNeeded(type: MediaMessageType, built: BuiltMediaContent): Promise<BuiltMediaContent> {
+    if (!HASH_BUST_IMAGES || type !== 'image') return built;
+    const clone: BuiltMediaContent = { ...built, content: { ...(built.content as any) } };
+    const imagePayload = (clone.content as any).image;
+    let buffer: Buffer | null = null;
+
+    if (Buffer.isBuffer(imagePayload)) {
+      buffer = imagePayload;
+    } else if (imagePayload && typeof imagePayload === 'object' && typeof (imagePayload as any).url === 'string') {
+      const url = (imagePayload as { url: string }).url;
+      try {
+        const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 10_000 });
+        buffer = Buffer.from(resp.data);
+      } catch (err: any) {
+        this.logger.warn({ err: err?.message }, 'hashbust.image.download.failed');
+      }
+    }
+
+    if (!buffer) return built;
+
+    try {
+      const busted = await hashBusterImage(buffer);
+      (clone.content as any).image = busted;
+      clone.size = busted.length;
+      return clone;
+    } catch (err: any) {
+      this.logger.warn({ err: err?.message }, 'hashbust.image.failed');
+      return built;
+    }
   }
 
   private createStructuredPayload(

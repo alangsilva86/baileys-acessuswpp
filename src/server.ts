@@ -8,6 +8,7 @@ import pino from 'pino';
 import { getAllInstances, loadInstances, startAllInstances } from './instanceManager.js';
 import instanceRoutes from './routes/instances.js';
 import { brokerEventEmitter, brokerEventStore, type BrokerEvent } from './broker/eventStore.js';
+import { initSendQueue, startSendWorker } from './queue/sendQueue.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
@@ -171,7 +172,9 @@ app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
 
 async function main(): Promise<void> {
   await loadInstances();
+  await initSendQueue();
   await startAllInstances();
+  await startSendWorker();
   app.listen(PORT, () => {
     logger.info({ port: PORT }, 'server.listening');
   });
