@@ -54,8 +54,10 @@
       <div class="flex items-center gap-3 flex-wrap">
         <div class="relative">
           <select id="selInstance" class="border rounded-lg px-3 py-2 pr-10 min-w-[16rem]"></select>
-          <div id="instanceLoading" class="hidden absolute inset-y-0 right-2 flex items-center" aria-hidden="true">
-            <span class="h-4 w-4 border-2 border-slate-300 border-t-slate-500 rounded-full animate-spin"></span>
+          <div id="instanceLoading" class="hidden absolute inset-y-0 right-2" aria-hidden="true">
+            <div class="flex items-center h-full">
+              <span class="h-4 w-4 border-2 border-slate-300 border-t-slate-500 rounded-full animate-spin"></span>
+            </div>
           </div>
         </div>
         <button id="btnNew" class="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">+ Nova instância</button>
@@ -133,9 +135,11 @@
         <div class="p-4 bg-white rounded-2xl shadow">
           <h2 class="font-semibold mb-2">QR Code (instância selecionada)</h2>
           <div id="qrWrap" class="border rounded-xl p-3 text-center transition-colors">
-            <div id="qrLoader" class="hidden flex flex-col items-center gap-2 text-sm text-slate-500">
-              <span class="h-6 w-6 border-2 border-slate-300 border-t-slate-500 rounded-full animate-spin"></span>
-              <span>Sincronizando QR…</span>
+            <div id="qrLoader" class="hidden text-sm text-slate-500">
+              <div class="flex flex-col items-center gap-2">
+                <span class="h-6 w-6 border-2 border-slate-300 border-t-slate-500 rounded-full animate-spin"></span>
+                <span>Sincronizando QR…</span>
+              </div>
             </div>
             <img id="qrImg" alt="QR" class="mx-auto hidden" />
             <div id="qrHint" class="text-sm text-slate-500" aria-live="polite">Selecione uma instância desconectada para ver o QR.</div>
@@ -148,9 +152,11 @@
                 <span class="font-medium text-slate-600">Tentativa atual</span>
                 <span id="qrAttempt">—</span>
               </div>
-              <div id="qrLastErrorWrap" class="flex items-center justify-between hidden">
-                <span class="font-medium text-rose-600">Último erro</span>
-                <span id="qrLastError" class="text-rose-600 text-right truncate max-w-[12rem]">—</span>
+              <div id="qrLastErrorWrap" class="hidden">
+                <div class="flex items-center justify-between w-full">
+                  <span class="font-medium text-rose-600">Último erro</span>
+                  <span id="qrLastError" class="text-rose-600 text-right truncate max-w-[12rem]">—</span>
+                </div>
               </div>
             </div>
           </div>
@@ -253,10 +259,12 @@
           </div>
 
           <div class="relative w-full h-56 overflow-hidden">
-            <div id="metricsSkeleton" class="absolute inset-0 flex items-center justify-center bg-white/80 hidden">
-              <div class="flex flex-col items-center gap-2 text-sm text-slate-500">
-                <span class="h-6 w-6 border-2 border-slate-300 border-t-slate-500 rounded-full animate-spin"></span>
-                <span>Carregando métricas…</span>
+            <div id="metricsSkeleton" class="absolute inset-0 bg-white/80 hidden">
+              <div class="flex items-center justify-center h-full">
+                <div class="flex flex-col items-center gap-2 text-sm text-slate-500">
+                  <span class="h-6 w-6 border-2 border-slate-300 border-t-slate-500 rounded-full animate-spin"></span>
+                  <span>Carregando métricas…</span>
+                </div>
               </div>
             </div>
             <canvas id="metricsChart" class="absolute inset-0 w-full h-full"></canvas>
@@ -290,43 +298,44 @@
     </div>
 
     <!-- Modal de envio rápido -->
-    <div id="quickSendModal" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm items-center justify-center z-50 flex">
-      <div class="bg-white rounded-2xl shadow-xl max-w-4xl w-full mx-4 p-6 space-y-4">
-        <div class="flex items-start justify-between gap-3">
-          <div>
-            <h3 class="text-lg font-semibold">Envio rápido</h3>
-            <p class="text-sm text-slate-500">Usa mimetismo, fila segura e configurações da instância selecionada.</p>
-          </div>
-          <button id="btnCloseQuickSend" class="px-3 py-2 border rounded-lg">Fechar</button>
-        </div>
-        <div class="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
-          <div>
-            <label class="block text-sm font-medium text-slate-700 mb-1">API Key</label>
-            <input id="inpApiKey" type="password" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Sua chave de API" />
-          </div>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+    <div id="quickSendModal" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm z-50">
+      <div class="flex items-center justify-center min-h-full pointer-events-none">
+        <div class="bg-white rounded-2xl shadow-xl max-w-4xl w-full mx-4 p-6 space-y-4 pointer-events-auto">
+          <div class="flex items-start justify-between gap-3">
             <div>
-              <label class="block text-sm font-medium text-slate-700 mb-1">Telefone (E.164)</label>
-              <input id="inpPhone" type="tel" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="+5511999999999" />
+              <h3 class="text-lg font-semibold">Envio rápido</h3>
+              <p class="text-sm text-slate-500">Usa mimetismo, fila segura e configurações da instância selecionada.</p>
             </div>
+            <button id="btnCloseQuickSend" class="px-3 py-2 border rounded-lg">Fechar</button>
+          </div>
+          <div class="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
             <div>
-              <label class="block text-sm font-medium text-slate-700 mb-1">Tipo de mensagem</label>
-              <select id="selQuickType" class="w-full border rounded-lg px-3 py-2 text-sm">
-                <option value="text">Texto</option>
-                <option value="buttons">Botões</option>
-                <option value="list">Lista</option>
-                <option value="media">Mídia</option>
-              </select>
+              <label class="block text-sm font-medium text-slate-700 mb-1">API Key</label>
+              <input id="inpApiKey" type="password" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Sua chave de API" />
             </div>
-          </div>
-          <div id="quickMessageGroup" class="space-y-1">
-            <div class="flex items-baseline justify-between gap-3">
-              <label id="quickMsgLabel" class="text-sm font-medium text-slate-700">Mensagem</label>
-              <span class="text-[11px] text-slate-500"><span id="msgCounter">0</span>/4096</span>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1">Telefone (E.164)</label>
+                <input id="inpPhone" type="tel" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="+5511999999999" />
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-slate-700 mb-1">Tipo de mensagem</label>
+                <select id="selQuickType" class="w-full border rounded-lg px-3 py-2 text-sm">
+                  <option value="text">Texto</option>
+                  <option value="buttons">Botões</option>
+                  <option value="list">Lista</option>
+                  <option value="media">Mídia</option>
+                </select>
+              </div>
             </div>
-            <textarea id="inpMsg" rows="3" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Sua mensagem aqui"></textarea>
-            <p id="quickMsgHint" class="text-[11px] text-slate-500">Texto simples enviado como mensagem padrão.</p>
-          </div>
+            <div id="quickMessageGroup" class="space-y-1">
+              <div class="flex items-baseline justify-between gap-3">
+                <label id="quickMsgLabel" class="text-sm font-medium text-slate-700">Mensagem</label>
+                <span class="text-[11px] text-slate-500"><span id="msgCounter">0</span>/4096</span>
+              </div>
+              <textarea id="inpMsg" rows="3" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Sua mensagem aqui"></textarea>
+              <p id="quickMsgHint" class="text-[11px] text-slate-500">Texto simples enviado como mensagem padrão.</p>
+            </div>
 
           <div id="quickButtonsFields" class="space-y-2 hidden">
             <div>
