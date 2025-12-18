@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import type { HttpsProxyAgentOptions } from 'https-proxy-agent';
 
 export type ProxyValidationStatus = 'ok' | 'blocked' | 'failed';
 
@@ -43,9 +44,14 @@ export async function validateProxyUrl(proxyUrl: string): Promise<ProxyValidatio
   if (cached) return cached;
 
   const lastCheckAt = Date.now();
+  const insecure = process.env.PROXY_INSECURE === '1';
   let agent: HttpsProxyAgent<string> | undefined;
   try {
     agent = new HttpsProxyAgent(proxyUrl);
+    if (agent && insecure) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (agent as any).options.rejectUnauthorized = false;
+    }
   } catch (err: any) {
     return toCache(proxyUrl, {
       status: 'failed',
@@ -64,6 +70,8 @@ export async function validateProxyUrl(proxyUrl: string): Promise<ProxyValidatio
       httpAgent: agent,
       httpsAgent: agent,
       timeout: 10_000,
+      // axios will respect the agent's rejectUnauthorized; keep proxy off.
+      proxy: false,
     });
     const latencyMs = Date.now() - started;
     const data = resp.data || {};
@@ -104,18 +112,38 @@ export async function validateProxyUrl(proxyUrl: string): Promise<ProxyValidatio
   try {
     const primary = await runCheck(DEFAULT_CHECK_URL);
     return toCache(proxyUrl, primary);
-  } catch {
-    try {
-      const fallback = await runCheck(FALLBACK_CHECK_URL);
-      return toCache(proxyUrl, fallback);
-    } catch (err: any) {
+  } catch (err: any) {
+    // Map common proxy errors to clearer reasons
+    const status = err?.response?.status;
+    const errMsg = err?.message || '';
+    if (status === 407) {
       return toCache(proxyUrl, {
         status: 'failed',
         ip: null,
         isp: null,
         asn: null,
         latencyMs: null,
-        blockReason: `proxy_check_failed: ${err?.message || 'request failed'}`,
+        blockReason: 'proxy_auth_required_407',
+        lastCheckAt,
+      });
+    }
+    try {
+      const fallback = await runCheck(FALLBACK_CHECK_URL);
+      return toCache(proxyUrl, fallback);
+    } catch (fallbackErr: any) {
+      const fbStatus = fallbackErr?.response?.status;
+      const fbMsg = fallbackErr?.message || '';
+      const reason =
+        fbStatus === 407
+          ? 'proxy_auth_required_407'
+          : `proxy_check_failed: ${fbMsg || errMsg || 'request failed'}`;
+      return toCache(proxyUrl, {
+        status: 'failed',
+        ip: null,
+        isp: null,
+        asn: null,
+        latencyMs: null,
+        blockReason: reason,
         lastCheckAt,
       });
     }

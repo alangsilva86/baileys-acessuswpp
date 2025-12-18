@@ -92,6 +92,8 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   let resetScheduledForSocket = false;
 
   let agent: HttpsProxyAgent<string> | undefined;
+  const allowProxyFallback = process.env.ALLOW_PROXY_FALLBACK === '1';
+  const proxyRequired = process.env.PROXY_REQUIRED !== '0';
   // Se a instância não tem proxy, tenta montar via Bright Data a partir das envs
   if (!inst.network?.proxyUrl) {
     const bdUrl = createBrightDataProxyUrl(inst.id);
@@ -119,15 +121,21 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
         updateConnectionState(inst, 'close');
         throw new Error(validation.blockReason || 'proxy_blocked_datacenter');
       }
-      if (validation.status === 'failed') {
-        setLastError(inst, validation.blockReason);
-        logger.warn({ iid: inst.id, reason: validation.blockReason }, 'network.proxy.validation_failed');
+      if (validation.status !== 'ok') {
+        const reason = validation.blockReason || 'proxy_validation_failed';
+        setLastError(inst, reason);
+        logger.warn({ iid: inst.id, reason }, 'network.proxy.validation_failed');
+        if (proxyRequired && !allowProxyFallback) {
+          updateConnectionState(inst, 'close');
+          throw new Error(reason);
+        }
+      } else {
+        agent = new HttpsProxyAgent(inst.network.proxyUrl);
+        logger.info(
+          { iid: inst.id, proxy: inst.network.proxyUrl, asn: validation.asn, isp: validation.isp, latencyMs: validation.latencyMs },
+          'network.proxy.enabled',
+        );
       }
-      agent = new HttpsProxyAgent(inst.network.proxyUrl);
-      logger.info(
-        { iid: inst.id, proxy: inst.network.proxyUrl, asn: validation.asn, isp: validation.isp, latencyMs: validation.latencyMs },
-        'network.proxy.enabled',
-      );
     } catch (err: any) {
       logger.error({ iid: inst.id, err: err?.message }, 'network.proxy.invalid');
     }
