@@ -158,6 +158,12 @@ function updateInspector(snapshot) {
     ];
     els.inspectorLogs.textContent = lines.join('\n');
   }
+
+  // Habilita/desabilita ação "Enviar safe" conforme contatos
+  if (els.btnSendSafe) {
+    els.btnSendSafe.disabled = safeCount === 0;
+    els.btnSendSafe.title = safeCount === 0 ? 'Adicione safe contacts para usar esta ação' : '';
+  }
 }
 
 function closeInstanceStream() {
@@ -700,8 +706,9 @@ export async function refreshSelected(options = {}) {
     updateKpis(metrics);
 
     const timeline = metrics.timeline || [];
+    const hasData = Array.isArray(timeline) && timeline.some((p) => (p.sent ?? 0) > 0);
 
-    if (chart && timeline.length) {
+    if (chart && hasData) {
       chart.data.labels = timeline.map((p) => formatTimelineLabel(p.iso));
       chart.data.datasets[0].data = timeline.map((p) => p.sent ?? 0);
       STATUS_SERIES.forEach((series, idx) => {
@@ -716,9 +723,10 @@ export async function refreshSelected(options = {}) {
     if (els.chartHint) {
       const effectiveRange = metrics?.range?.effective || { from, to: now };
       const rangeLabel = formatRangeLabel(effectiveRange);
-      if (timeline.length) {
+      if (hasData) {
         const sentDelta = Number(lastRangeSummary?.deltas?.sent);
-        const parts = [`${timeline.length} ponto${timeline.length > 1 ? 's' : ''}`];
+        const points = timeline.length;
+        const parts = [`${points} ponto${points > 1 ? 's' : ''}`];
         if (rangeLabel) parts.push(`Intervalo: ${rangeLabel}`);
         if (Number.isFinite(sentDelta)) parts.push(`Enviadas no período: ${sentDelta}`);
         els.chartHint.textContent = parts.join(' • ');

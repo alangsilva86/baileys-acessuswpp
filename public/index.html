@@ -77,151 +77,91 @@
       </div>
     </section>
 
-    <section class="p-4 bg-white rounded-2xl shadow">
-      <div class="flex items-center justify-between gap-4 mb-4 flex-wrap">
-        <h2 class="font-semibold">Métricas da Instância</h2>
-        <div class="flex items-center gap-2 flex-wrap">
-          <select id="selRange" class="border rounded-lg px-2 py-1 text-sm">
-            <option value="30">Últimos 30min</option>
-            <option value="60">Última 1h</option>
-            <option value="180">Últimas 3h</option>
-            <option value="360">Últimas 6h</option>
-            <option value="720">Últimas 12h</option>
-            <option value="1440">Últimas 24h</option>
-          </select>
-          <button
-            id="btnExportCsv"
-            class="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-sm rounded-lg"
-            type="button"
-          >Exportar CSV</button>
-          <button
-            id="btnExportJson"
-            class="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-sm rounded-lg"
-            type="button"
-          >Exportar JSON</button>
-        </div>
-      </div>
-
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
-        <div class="p-3 rounded-xl border border-slate-100 bg-slate-50">
-          <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Taxa de Entrega</div>
-          <div id="kpiDeliveryValue" class="mt-1 text-2xl font-semibold text-emerald-600">—</div>
-          <div id="kpiDeliveryHint" class="text-xs text-slate-500 mt-1">Aguardando dados</div>
-        </div>
-        <div class="p-3 rounded-xl border border-slate-100 bg-slate-50">
-          <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Leituras e reproduções (status 4/5)</div>
-          <div id="kpiFailureValue" class="mt-1 text-2xl font-semibold text-indigo-600">—</div>
-          <div id="kpiFailureHint" class="text-xs text-slate-500 mt-1">Aguardando dados</div>
-        </div>
-        <div class="p-3 rounded-xl border border-slate-100 bg-slate-50">
-          <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Uso do limite</div>
-          <div id="kpiRateValue" class="mt-1 text-2xl font-semibold text-slate-700">—</div>
-          <div id="kpiRateHint" class="text-xs text-slate-500 mt-1">Monitorado na janela atual</div>
-        </div>
-        <div class="p-3 rounded-xl border border-slate-100 bg-slate-50">
-          <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Mensagens em trânsito</div>
-          <div id="kpiTransitValue" class="mt-1 text-2xl font-semibold text-indigo-600">—</div>
-          <div id="kpiTransitHint" class="text-xs text-slate-500 mt-1">Aguardando envios</div>
-        </div>
-      </div>
-
-      <div class="relative w-full h-64 md:h-80 xl:h-96 overflow-hidden">
-        <div id="metricsSkeleton" class="absolute inset-0 flex items-center justify-center bg-white/80 hidden">
-          <div class="flex flex-col items-center gap-2 text-sm text-slate-500">
-            <span class="h-6 w-6 border-2 border-slate-300 border-t-slate-500 rounded-full animate-spin"></span>
-            <span>Carregando métricas…</span>
+    <section class="grid lg:grid-cols-[1.5fr_1fr] gap-6 items-start">
+      <div class="space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <label class="sr-only" for="instanceSearch">Buscar instâncias</label>
+            <input
+              id="instanceSearch"
+              type="search"
+              class="border rounded-lg px-3 py-2 text-sm"
+              placeholder="Buscar instâncias…"
+              autocomplete="off"
+            />
+            <label class="sr-only" for="instanceFilterState">Filtrar por status</label>
+            <select id="instanceFilterState" class="border rounded-lg px-2 py-2 text-sm">
+              <option value="all">Todas</option>
+              <option value="open">Conectadas</option>
+              <option value="connecting">Reconectando</option>
+              <option value="close">Desconectadas</option>
+            </select>
+            <label class="sr-only" for="instanceSort">Ordenação</label>
+            <select id="instanceSort" class="border rounded-lg px-2 py-2 text-sm">
+              <option value="name">Nome (A→Z)</option>
+              <option value="recent">Mais recentes</option>
+              <option value="usage">Maior uso do limite</option>
+            </select>
           </div>
+          <span id="instanceCounter" class="text-sm text-slate-500">0/0</span>
         </div>
-        <canvas id="metricsChart" class="absolute inset-0 w-full h-full"></canvas>
-      </div>
-      <p id="chartHint" class="text-xs text-slate-500" aria-live="polite">Nenhum dado disponível ainda.</p>
-    </section>
-
-    <section class="space-y-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="flex flex-wrap items-center gap-2">
-          <label class="sr-only" for="instanceSearch">Buscar instâncias</label>
-          <input
-            id="instanceSearch"
-            type="search"
-            class="border rounded-lg px-3 py-2 text-sm"
-            placeholder="Buscar instâncias…"
-            autocomplete="off"
-          />
-          <label class="sr-only" for="instanceFilterState">Filtrar por status</label>
-          <select id="instanceFilterState" class="border rounded-lg px-2 py-2 text-sm">
-            <option value="all">Todas</option>
-            <option value="open">Conectadas</option>
-            <option value="connecting">Reconectando</option>
-            <option value="close">Desconectadas</option>
-          </select>
-          <label class="sr-only" for="instanceSort">Ordenação</label>
-          <select id="instanceSort" class="border rounded-lg px-2 py-2 text-sm">
-            <option value="name">Nome (A→Z)</option>
-            <option value="recent">Mais recentes</option>
-            <option value="usage">Maior uso do limite</option>
-          </select>
-        </div>
-        <span id="instanceCounter" class="text-sm text-slate-500">0/0</span>
-      </div>
-      <div id="cardsSkeleton" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        <div class="p-4 bg-white rounded-2xl shadow space-y-3 animate-pulse">
-          <div class="h-4 bg-slate-200 rounded w-1/2"></div>
-          <div class="h-3 bg-slate-100 rounded w-1/3"></div>
-          <div class="grid grid-cols-3 gap-2">
-            <div class="h-16 bg-slate-100 rounded"></div>
-            <div class="h-16 bg-slate-100 rounded"></div>
-            <div class="h-16 bg-slate-100 rounded"></div>
-          </div>
-          <div class="h-20 bg-slate-100 rounded"></div>
-        </div>
-        <div class="p-4 bg-white rounded-2xl shadow space-y-3 animate-pulse hidden sm:block">
-          <div class="h-4 bg-slate-200 rounded w-1/2"></div>
-          <div class="h-3 bg-slate-100 rounded w-1/3"></div>
-          <div class="grid grid-cols-3 gap-2">
-            <div class="h-16 bg-slate-100 rounded"></div>
-            <div class="h-16 bg-slate-100 rounded"></div>
-            <div class="h-16 bg-slate-100 rounded"></div>
-          </div>
-          <div class="h-20 bg-slate-100 rounded"></div>
-        </div>
-      </div>
-      <section id="cards" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></section>
-    </section>
-
-    <section class="grid md:grid-cols-3 gap-6 items-start">
-      <div class="p-4 bg-white rounded-2xl shadow">
-        <h2 class="font-semibold mb-2">QR Code (instância selecionada)</h2>
-        <div id="qrWrap" class="border rounded-xl p-3 text-center transition-colors">
-          <div id="qrLoader" class="hidden flex flex-col items-center gap-2 text-sm text-slate-500">
-            <span class="h-6 w-6 border-2 border-slate-300 border-t-slate-500 rounded-full animate-spin"></span>
-            <span>Sincronizando QR…</span>
-          </div>
-          <img id="qrImg" alt="QR" class="mx-auto hidden" />
-          <div id="qrHint" class="text-sm text-slate-500" aria-live="polite">Selecione uma instância desconectada para ver o QR.</div>
-          <div id="qrMeta" class="mt-2 text-xs text-slate-500 space-y-1" aria-live="polite">
-            <div class="flex items-center justify-between">
-              <span class="font-medium text-slate-600">Expira em</span>
-              <span id="qrCountdown">—</span>
+        <div id="cardsSkeleton" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div class="p-4 bg-white rounded-2xl shadow space-y-3 animate-pulse">
+            <div class="h-4 bg-slate-200 rounded w-1/2"></div>
+            <div class="h-3 bg-slate-100 rounded w-1/3"></div>
+            <div class="grid grid-cols-3 gap-2">
+              <div class="h-16 bg-slate-100 rounded"></div>
+              <div class="h-16 bg-slate-100 rounded"></div>
+              <div class="h-16 bg-slate-100 rounded"></div>
             </div>
-            <div class="flex items-center justify-between">
-              <span class="font-medium text-slate-600">Tentativa atual</span>
-              <span id="qrAttempt">—</span>
+            <div class="h-20 bg-slate-100 rounded"></div>
+          </div>
+          <div class="p-4 bg-white rounded-2xl shadow space-y-3 animate-pulse hidden sm:block">
+            <div class="h-4 bg-slate-200 rounded w-1/2"></div>
+            <div class="h-3 bg-slate-100 rounded w-1/3"></div>
+            <div class="grid grid-cols-3 gap-2">
+              <div class="h-16 bg-slate-100 rounded"></div>
+              <div class="h-16 bg-slate-100 rounded"></div>
+              <div class="h-16 bg-slate-100 rounded"></div>
             </div>
-            <div id="qrLastErrorWrap" class="flex items-center justify-between hidden">
-              <span class="font-medium text-rose-600">Último erro</span>
-              <span id="qrLastError" class="text-rose-600 text-right truncate max-w-[12rem]">—</span>
+            <div class="h-20 bg-slate-100 rounded"></div>
+          </div>
+        </div>
+        <section id="cards" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></section>
+      </div>
+
+      <div class="space-y-4">
+        <div class="p-4 bg-white rounded-2xl shadow">
+          <h2 class="font-semibold mb-2">QR Code (instância selecionada)</h2>
+          <div id="qrWrap" class="border rounded-xl p-3 text-center transition-colors">
+            <div id="qrLoader" class="hidden flex flex-col items-center gap-2 text-sm text-slate-500">
+              <span class="h-6 w-6 border-2 border-slate-300 border-t-slate-500 rounded-full animate-spin"></span>
+              <span>Sincronizando QR…</span>
+            </div>
+            <img id="qrImg" alt="QR" class="mx-auto hidden" />
+            <div id="qrHint" class="text-sm text-slate-500" aria-live="polite">Selecione uma instância desconectada para ver o QR.</div>
+            <div id="qrMeta" class="mt-2 text-xs text-slate-500 space-y-1" aria-live="polite">
+              <div class="flex items-center justify-between">
+                <span class="font-medium text-slate-600">Expira em</span>
+                <span id="qrCountdown">—</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="font-medium text-slate-600">Tentativa atual</span>
+                <span id="qrAttempt">—</span>
+              </div>
+              <div id="qrLastErrorWrap" class="flex items-center justify-between hidden">
+                <span class="font-medium text-rose-600">Último erro</span>
+                <span id="qrLastError" class="text-rose-600 text-right truncate max-w-[12rem]">—</span>
+              </div>
             </div>
           </div>
+          <div class="mt-3 flex gap-2 flex-wrap">
+            <button id="btnLogout" class="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg">Desconectar</button>
+            <button id="btnWipe" class="px-3 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg">Limpar sessão</button>
+            <button id="btnPair" class="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg">Parear por código</button>
+          </div>
         </div>
-        <div class="mt-3 flex gap-2 flex-wrap">
-          <button id="btnLogout" class="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg">Desconectar</button>
-          <button id="btnWipe" class="px-3 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg">Limpar sessão</button>
-          <button id="btnPair" class="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg">Parear por código</button>
-        </div>
-      </div>
 
-      <div class="md:col-span-2 space-y-4">
         <div class="p-4 bg-white rounded-2xl shadow space-y-4">
           <div class="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
             <div>
@@ -234,6 +174,7 @@
               <button id="btnSendSafe" class="px-3 py-2 text-xs bg-sky-100 text-sky-800 rounded-lg border border-sky-200">Enviar safe</button>
               <button id="btnRevalidateProxy" class="px-3 py-2 text-xs bg-slate-100 text-slate-800 rounded-lg border border-slate-200">Revalidar proxy</button>
               <button id="btnOpenQuickSend" class="px-3 py-2 text-xs bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg">Envio rápido</button>
+              <button id="btnOpenLogs" class="px-3 py-2 text-xs bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg">Ver logs</button>
             </div>
           </div>
 
@@ -263,23 +204,104 @@
             <div id="inspectorLogs" class="text-xs text-slate-600 bg-slate-50 rounded-xl p-3 h-32 overflow-y-auto">Selecione uma instância para ver os últimos eventos.</div>
           </div>
         </div>
+
+        <div class="p-4 bg-white rounded-2xl shadow space-y-4">
+          <div class="flex items-center justify-between gap-4">
+            <h2 class="font-semibold">Métricas da Instância</h2>
+            <div class="flex items-center gap-2 flex-wrap">
+              <select id="selRange" class="border rounded-lg px-2 py-1 text-sm">
+                <option value="30">Últimos 30min</option>
+                <option value="60">Última 1h</option>
+                <option value="180">Últimas 3h</option>
+                <option value="360">Últimas 6h</option>
+                <option value="720">Últimas 12h</option>
+                <option value="1440">Últimas 24h</option>
+              </select>
+              <button
+                id="btnExportCsv"
+                class="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-sm rounded-lg"
+                type="button"
+              >Exportar CSV</button>
+              <button
+                id="btnExportJson"
+                class="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-sm rounded-lg"
+                type="button"
+              >Exportar JSON</button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 md:grid-cols-2 gap-4 text-center">
+            <div class="p-3 rounded-xl border border-slate-100 bg-slate-50">
+              <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Taxa de Entrega</div>
+              <div id="kpiDeliveryValue" class="mt-1 text-2xl font-semibold text-emerald-600">—</div>
+              <div id="kpiDeliveryHint" class="text-xs text-slate-500 mt-1">Aguardando dados</div>
+            </div>
+            <div class="p-3 rounded-xl border border-slate-100 bg-slate-50">
+              <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Leituras e reproduções (status 4/5)</div>
+              <div id="kpiFailureValue" class="mt-1 text-2xl font-semibold text-indigo-600">—</div>
+              <div id="kpiFailureHint" class="text-xs text-slate-500 mt-1">Aguardando dados</div>
+            </div>
+            <div class="p-3 rounded-xl border border-slate-100 bg-slate-50">
+              <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Uso do limite</div>
+              <div id="kpiRateValue" class="mt-1 text-2xl font-semibold text-slate-700">—</div>
+              <div id="kpiRateHint" class="text-xs text-slate-500 mt-1">Monitorado na janela atual</div>
+            </div>
+            <div class="p-3 rounded-xl border border-slate-100 bg-slate-50">
+              <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Mensagens em trânsito</div>
+              <div id="kpiTransitValue" class="mt-1 text-2xl font-semibold text-indigo-600">—</div>
+              <div id="kpiTransitHint" class="text-xs text-slate-500 mt-1">Aguardando envios</div>
+            </div>
+          </div>
+
+          <div class="relative w-full h-56 overflow-hidden">
+            <div id="metricsSkeleton" class="absolute inset-0 flex items-center justify-center bg-white/80 hidden">
+              <div class="flex flex-col items-center gap-2 text-sm text-slate-500">
+                <span class="h-6 w-6 border-2 border-slate-300 border-t-slate-500 rounded-full animate-spin"></span>
+                <span>Carregando métricas…</span>
+              </div>
+            </div>
+            <canvas id="metricsChart" class="absolute inset-0 w-full h-full"></canvas>
+          </div>
+          <p id="chartHint" class="text-xs text-slate-500" aria-live="polite">Nenhum dado disponível ainda.</p>
+        </div>
+
+        <div id="noteCard" class="p-4 bg-white rounded-2xl shadow hidden border border-sky-100 space-y-2">
+          <div class="flex items-center justify-between gap-2">
+            <p class="text-xs font-semibold uppercase tracking-wide text-sky-700">Contexto da instância</p>
+            <span id="noteMeta" class="text-xs text-slate-500"></span>
+          </div>
+          <div class="space-y-2">
+            <textarea id="instanceNote" rows="3" class="w-full border rounded-lg p-2 text-sm" placeholder="Anotações sobre esta instância..."></textarea>
+            <div class="flex items-center justify-between text-[11px] text-slate-500">
+              <span id="noteStatus" aria-live="polite"></span>
+              <button id="noteRetry" class="hidden text-sky-600 hover:underline" type="button">Tentar novamente</button>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
-    <section class="p-4 bg-white rounded-2xl shadow md:col-span-2 space-y-3">
-      <div class="flex items-center justify-between gap-4">
-        <h2 class="font-semibold">Últimos eventos enviados ao LeadEngine</h2>
-        <button id="btnRefreshLogs" class="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-sm rounded-lg">Atualizar</button>
+    <!-- Drawer de Logs -->
+    <div id="logsDrawer" class="hidden fixed inset-0 z-40 bg-black/50 backdrop-blur-sm">
+      <div class="absolute right-0 top-0 bottom-0 w-full max-w-4xl bg-white shadow-2xl p-6 overflow-y-auto space-y-3">
+        <div class="flex items-center justify-between gap-2">
+          <h2 class="font-semibold">Últimos eventos enviados ao LeadEngine</h2>
+          <div class="flex gap-2">
+            <button id="btnRefreshLogs" class="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-sm rounded-lg">Atualizar</button>
+            <button id="btnCloseLogs" class="px-3 py-2 border rounded-lg">Fechar</button>
+          </div>
+        </div>
+        <p class="text-xs text-slate-500">Visualize as 20 últimas mensagens inbound, outbound e chamadas de webhook.</p>
+        <div id="logsAlert" class="hidden text-sm px-3 py-2 rounded-lg border bg-amber-50 border-amber-200 text-amber-800"></div>
+        <div id="logsSkeleton" class="space-y-2 hidden">
+          <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
+          <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
+          <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
+        </div>
+        <div id="logsEmpty" class="text-sm text-slate-500 bg-slate-50 rounded-xl p-3">Nenhum evento encontrado ainda para esta instância.</div>
+        <div id="logsList" class="space-y-2"></div>
       </div>
-      <p class="text-xs text-slate-500">Visualize as 20 últimas mensagens inbound, outbound e chamadas de webhook.</p>
-      <div id="logsSkeleton" class="space-y-2 hidden">
-        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
-        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
-        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
-      </div>
-      <div id="logsEmpty" class="text-sm text-slate-500 bg-slate-50 rounded-xl p-3">Nenhum evento encontrado ainda para esta instância.</div>
-      <div id="logsList" class="space-y-2"></div>
-    </section>
+    </div>
 
     <!-- Modal de envio rápido -->
     <div id="quickSendModal" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm items-center justify-center z-50 flex">

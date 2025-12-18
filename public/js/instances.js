@@ -398,6 +398,31 @@ function createInstanceCard(inst, selectedId) {
   const meterColor = usagePercent >= 90 ? 'bg-rose-400' : usagePercent >= 70 ? 'bg-amber-400' : 'bg-emerald-400';
   const userId = inst.user?.id ? escapeHtml(inst.user.id) : '—';
   const noteVal = (inst.note || inst.notes || '').trim();
+  const tierBadge = (() => {
+    if (ageDays == null) return '';
+    if (ageDays < 5) return '<span class="px-2 py-0.5 rounded-full text-[11px] bg-amber-100 text-amber-800">Tier 1</span>';
+    if (ageDays < 15) return '<span class="px-2 py-0.5 rounded-full text-[11px] bg-blue-100 text-blue-800">Tier 2</span>';
+    return '<span class="px-2 py-0.5 rounded-full text-[11px] bg-violet-100 text-violet-800">Tier 3</span>';
+  })();
+  const proxyBg =
+    network.status === 'ok'
+      ? 'bg-emerald-50 border-emerald-100'
+      : network.status === 'blocked'
+      ? 'bg-rose-50 border-rose-100'
+      : 'bg-amber-50 border-amber-100';
+  const proxyText =
+    network.status === 'ok'
+      ? 'text-emerald-700'
+      : network.status === 'blocked'
+      ? 'text-rose-700'
+      : 'text-amber-700';
+  const riskBarClass = riskRatio >= 60 ? 'bg-rose-500' : riskRatio >= 30 ? 'bg-amber-500' : 'bg-emerald-500';
+  const queueClass = queueInfo.paused ? 'text-amber-700' : queueEnabled ? 'text-emerald-700' : 'text-slate-600';
+  const queueBg = queueInfo.paused
+    ? 'bg-amber-50 border-amber-100'
+    : queueEnabled
+    ? 'bg-emerald-50 border-emerald-100'
+    : 'bg-slate-50 border-slate-100';
 
   card.innerHTML = `
     <div class="flex items-start justify-between gap-3">
@@ -405,36 +430,38 @@ function createInstanceCard(inst, selectedId) {
         <label class="text-xs font-medium text-slate-500">Nome</label>
         <input data-field="name" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" value="${escapeHtml(inst.name)}" />
       </div>
-      <span class="px-2 py-0.5 rounded text-xs ${badgeClass}">
-        ${escapeHtml(statusLabel)}
-      </span>
+      <div class="flex flex-col items-end gap-1">
+        <span class="px-2 py-0.5 rounded text-xs ${badgeClass}">${escapeHtml(statusLabel)}</span>
+        ${tierBadge}
+      </div>
     </div>
 
     <div class="text-xs text-slate-500 break-all">WhatsApp: ${userId}</div>
 
     <div class="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
-      <div class="rounded-lg bg-slate-50 p-2 border border-slate-100">
-        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
+      <div class="rounded-lg p-2 border ${proxyBg}">
+        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide ${proxyText}">
           <span>Rede</span>
-          <span class="${network.status === 'ok' ? 'text-emerald-600' : network.status === 'blocked' ? 'text-rose-600' : 'text-amber-600'}">
-            ${escapeHtml(network.status || 'unknown')}
-          </span>
+          <span>${escapeHtml(network.status || 'unknown')}</span>
         </div>
         <div class="font-semibold text-slate-700 truncate">${escapeHtml(network.isp || network.asn || '—')}</div>
         <div class="text-[11px] text-slate-500">Latência: ${network.latencyMs != null ? escapeHtml(String(network.latencyMs)) + ' ms' : '—'}</div>
       </div>
-      <div class="rounded-lg bg-slate-50 p-2 border border-slate-100">
+      <div class="rounded-lg p-2 border bg-slate-50 border-slate-100 space-y-1">
         <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
           <span>Risco</span>
           <span class="${riskRuntime.paused ? 'text-rose-600' : 'text-emerald-600'}">${riskRuntime.paused ? 'Pausado' : 'Ativo'}</span>
         </div>
         <div class="font-semibold text-slate-700">${riskRatio}% desconhecidos</div>
-        <div class="text-[11px] text-slate-500">Safe contacts: ${safeCount} • Threshold: ${riskCfg.threshold ?? 0.7}</div>
+        <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+          <div class="h-full ${riskBarClass}" style="width:${Math.min(riskRatio, 100)}%"></div>
+        </div>
+        <div class="text-[11px] text-slate-500">Safe: ${safeCount} • Threshold: ${riskCfg.threshold ?? 0.7}</div>
       </div>
-      <div class="rounded-lg bg-slate-50 p-2 border border-slate-100">
+      <div class="rounded-lg p-2 border ${queueBg}">
         <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
           <span>Fila</span>
-          <span class="${queueInfo.paused ? 'text-amber-600' : queueEnabled ? 'text-emerald-600' : 'text-slate-500'}">${queueLabel}</span>
+          <span class="${queueClass}">${queueLabel}</span>
         </div>
         <div class="font-semibold text-slate-700">${queueEnabled ? `Pendentes: ${queueInfo.waiting ?? queueInfo.count ?? 0}` : 'Envio direto'}</div>
         <div class="text-[11px] text-slate-500">Execução: ${queueInfo.active ?? queueInfo.activeCount ?? 0} • Modo: ${modeGuess}</div>
@@ -952,7 +979,13 @@ async function callInstanceAction(path, button, busyLabel, successMsg, errorMsg)
     return payload;
   } catch (err) {
     console.error('[instances] ação rápida falhou', err);
-    showError(errorMsg || 'Ação não concluída');
+    const code = err?.body?.error;
+    if (code === 'no_safe_contacts') {
+      showError('Configure contatos seguros antes de enviar um safe (card da instância > Segurança).');
+      setBadgeState('error', 'Adicione safe contacts para usar esta ação.', 5000);
+    } else {
+      showError(errorMsg || 'Ação não concluída');
+    }
     return null;
   } finally {
     setBusy(button, false);

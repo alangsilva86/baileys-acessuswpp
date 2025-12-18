@@ -97,6 +97,9 @@ export const els = {
   logsList: q('logsList'),
   logsEmpty: q('logsEmpty'),
   logsSkeleton: q('logsSkeleton'),
+  logsDrawer: q('logsDrawer'),
+  btnOpenLogs: q('btnOpenLogs'),
+  btnCloseLogs: q('btnCloseLogs'),
 
   // Modal
   modalDelete: q('modalDelete'),

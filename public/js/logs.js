@@ -157,6 +157,22 @@ function renderLogs(events) {
   toggleHidden(els.logsEmpty, hasEvents);
   els.logsList.textContent = '';
 
+  if (els.logsAlert) {
+    const webhookErrors = (events || []).filter((ev) => {
+      const status = ev?.payload?.status ?? ev?.payload?.body?.status;
+      return Number(status) >= 400;
+    });
+    if (webhookErrors.length) {
+      const first = webhookErrors[0];
+      const status = first?.payload?.status ?? first?.payload?.body?.status;
+      els.logsAlert.textContent = `${webhookErrors.length} falha${webhookErrors.length > 1 ? 's' : ''} de webhook (HTTP ${status}). Verifique credenciais ou headers.`;
+      els.logsAlert.classList.remove('hidden');
+    } else {
+      els.logsAlert.classList.add('hidden');
+      els.logsAlert.textContent = '';
+    }
+  }
+
   events.forEach((event) => {
     const details = document.createElement('details');
     details.className = 'bg-white rounded-xl shadow-sm p-3 space-y-2';
@@ -243,6 +259,14 @@ export function resetLogs() {
   lastLogsSignature = '';
 }
 
+function openDrawer() {
+  if (els.logsDrawer) els.logsDrawer.classList.remove('hidden');
+}
+
+function closeDrawer() {
+  if (els.logsDrawer) els.logsDrawer.classList.add('hidden');
+}
+
 export async function refreshLogs(options = {}) {
   if (!els.logsList || !els.logsEmpty) return false;
   const { silent = false, range } = options;
@@ -303,5 +327,19 @@ export async function refreshLogs(options = {}) {
 export function initLogs() {
   if (els.btnRefreshLogs) {
     els.btnRefreshLogs.addEventListener('click', () => refreshLogs({ silent: false }));
+  }
+  if (els.btnOpenLogs) {
+    els.btnOpenLogs.addEventListener('click', () => {
+      openDrawer();
+      void refreshLogs({ silent: false });
+    });
+  }
+  if (els.btnCloseLogs) {
+    els.btnCloseLogs.addEventListener('click', () => closeDrawer());
+  }
+  if (els.logsDrawer) {
+    els.logsDrawer.addEventListener('click', (ev) => {
+      if (ev.target === els.logsDrawer) closeDrawer();
+    });
   }
 }
