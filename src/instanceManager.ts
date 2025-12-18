@@ -573,6 +573,7 @@ export {
   getAllInstances,
   ensureInstance,
   ensureInstanceStarted,
+  stopWhatsAppInstance,
   removeInstance,
   emitInstanceEvent,
   onInstanceEvent,

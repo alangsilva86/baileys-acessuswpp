@@ -9,6 +9,7 @@ import {
   getAllInstances,
   getInstance,
   resetInstanceSession,
+  stopWhatsAppInstance,
   saveInstancesIndex,
   type Instance,
   type MetricsTimelineEntry,

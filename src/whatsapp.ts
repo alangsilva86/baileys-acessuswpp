@@ -91,7 +91,7 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   updateConnectionState(inst, 'connecting');
   let resetScheduledForSocket = false;
 
-  let agent: ReturnType<typeof HttpsProxyAgent> | undefined;
+  let agent: HttpsProxyAgent<string> | undefined;
   // Se a instância não tem proxy, tenta montar via Bright Data a partir das envs
   if (!inst.network?.proxyUrl) {
     const bdUrl = createBrightDataProxyUrl(inst.id);
