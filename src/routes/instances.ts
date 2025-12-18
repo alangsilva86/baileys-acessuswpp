@@ -8,6 +8,7 @@ import {
   deleteInstance,
   getAllInstances,
   getInstance,
+  ensureInstanceStarted,
   resetInstanceSession,
   stopWhatsAppInstance,
   saveInstancesIndex,
@@ -778,8 +779,12 @@ router.get(
       res.status(404).send('instance_not_found');
       return;
     }
+    if (!inst.sock) {
+      // Se a instância não está com socket ativo, tenta religar em background.
+      ensureInstanceStarted(inst.id).catch((err) => console.warn('qr.autostart.failed', { iid: inst.id, err }));
+    }
     if (!inst.lastQR) {
-      res.status(404).send('no-qr');
+      res.status(404).send('no-qr-yet');
       return;
     }
     const png = await QRCode.toBuffer(inst.lastQR, {

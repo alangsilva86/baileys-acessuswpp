@@ -560,6 +560,14 @@ async function loadQRCode(iid, options = {}) {
       return true;
     }
 
+    if (response.status === 404) {
+      const text = await response.text().catch(() => '');
+      const waiting = text?.includes('no-qr');
+      toggleHidden(els.qrImg, true);
+      setQrState('loading', waiting ? 'Gerando QR… aguarde alguns segundos.' : 'Instância sem QR. Verifique conexão.');
+      return false;
+    }
+
     if (response.status === 401) {
       toggleHidden(els.qrImg, true);
       setQrState('needs-key', 'API Key inválida.');
