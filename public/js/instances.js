@@ -31,6 +31,8 @@ let lastSelectedInstanceEtag = null;
 let allInstances = [];
 let filteredInstances = [];
 let queueSnapshot = null;
+let healthSnapshot = null;
+let lastHealthFetchAt = 0;
 let filterHandlersBound = false;
 let scrollRaf = null;
 let measureRaf = null;
@@ -38,8 +40,25 @@ let resizeRaf = null;
 
 const MAX_RENDERED_ITEMS = 50;
 const VIRTUAL_OVERSCAN_ROWS = 2;
+const HEALTH_REFRESH_INTERVAL_MS = 30000;
 
 const virtualizationState = INSTANCE_VIEW.virtualization;
+
+async function refreshHealthMetrics(force = false) {
+  const now = Date.now();
+  if (!force && now - lastHealthFetchAt < HEALTH_REFRESH_INTERVAL_MS && healthSnapshot) {
+    return healthSnapshot;
+  }
+  try {
+    const data = await fetchJSON('/health', false);
+    healthSnapshot = data || null;
+    lastHealthFetchAt = now;
+    window.__healthSnapshot = healthSnapshot;
+  } catch (err) {
+    console.debug('[instances] health fetch failed', err);
+  }
+  return healthSnapshot;
+}
 
 function computeInstanceEtag(inst) {
   if (!inst) return '';
@@ -759,11 +778,12 @@ export async function refreshInstances(options = {}) {
         toggleHidden(els.qrImg, true);
         setQrState('idle', 'Selecione uma instância para visualizar o QR.');
         setBadgeState('info', 'Crie uma instância para começar', 4000);
-        await refreshQueueMetrics();
-        updateGlobalHealth();
-        result = { changed: meta.listChanged || meta.selectedChanged, selectedChanged: meta.selectedChanged };
-        return result;
-      }
+      await refreshQueueMetrics();
+      await refreshHealthMetrics();
+      updateGlobalHealth();
+      result = { changed: meta.listChanged || meta.selectedChanged, selectedChanged: meta.selectedChanged };
+      return result;
+    }
 
       hasLoadedInstances = true;
       applyFiltersAndRender({ keepSelection: true });
@@ -774,6 +794,7 @@ export async function refreshInstances(options = {}) {
       }
 
       await refreshQueueMetrics();
+      await refreshHealthMetrics();
       updateGlobalHealth();
       result = { changed: meta.listChanged || selectedChanged, selectedChanged };
     } catch (err) {
@@ -819,7 +840,15 @@ function updateGlobalHealth() {
   const proxyBlocked = allInstances.filter((i) => i.network?.status === 'blocked').length;
   const proxyPct = total ? Math.round((proxyOk / total) * 100) : 0;
   els.ghProxy.textContent = total ? `${proxyPct}%` : '—';
-  els.ghProxyHint.textContent = `${proxyOk} ok • ${proxyBlocked} bloqueados`;
+  const proxyMetrics = healthSnapshot?.proxyMetrics || null;
+  const proxyHintParts = [`${proxyOk} ok`, `${proxyBlocked} bloqueados`];
+  if (proxyMetrics?.avgLatencyMs != null) {
+    proxyHintParts.push(`${proxyMetrics.avgLatencyMs}ms méd.`);
+  }
+  if (proxyMetrics?.failed) {
+    proxyHintParts.push(`${proxyMetrics.failed} falhas`);
+  }
+  els.ghProxyHint.textContent = proxyHintParts.filter(Boolean).join(' • ');
 
   const ratios = allInstances
     .map((i) => Number(i.risk?.runtime?.ratio))

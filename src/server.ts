@@ -9,6 +9,7 @@ import { getAllInstances, loadInstances, startAllInstances } from './instanceMan
 import instanceRoutes from './routes/instances.js';
 import { brokerEventEmitter, brokerEventStore, type BrokerEvent } from './broker/eventStore.js';
 import { initSendQueue, startSendWorker } from './queue/sendQueue.js';
+import { getProxyValidationMetrics } from './network/proxyValidator.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
@@ -86,7 +87,8 @@ app.get('/health', (_req, res) => {
     connectionUpdatedAt: inst.connectionUpdatedAt ? new Date(inst.connectionUpdatedAt).toISOString() : null,
   }));
   const queue = brokerEventStore.metrics();
-  res.json({ status: 'ok', uptime: process.uptime(), instances, queue });
+  const proxyMetrics = getProxyValidationMetrics();
+  res.json({ status: 'ok', uptime: process.uptime(), instances, queue, proxyMetrics });
 });
 
 app.get('/', (_req, res) => {

@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Baileys API — Dashboard</title>
   <link rel="stylesheet" href="/assets/app.css" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body class="bg-slate-50 text-slate-800">
   <div class="max-w-6xl mx-auto p-6 space-y-6">
@@ -265,19 +264,6 @@
           <p id="chartHint" class="text-xs text-slate-500" aria-live="polite">Nenhum dado disponível ainda.</p>
         </div>
 
-        <div id="noteCard" class="p-4 bg-white rounded-2xl shadow hidden border border-sky-100 space-y-2">
-          <div class="flex items-center justify-between gap-2">
-            <p class="text-xs font-semibold uppercase tracking-wide text-sky-700">Contexto da instância</p>
-            <span id="noteMeta" class="text-xs text-slate-500"></span>
-          </div>
-          <div class="space-y-2">
-            <textarea id="instanceNote" rows="3" class="w-full border rounded-lg p-2 text-sm" placeholder="Anotações sobre esta instância..."></textarea>
-            <div class="flex items-center justify-between text-[11px] text-slate-500">
-              <span id="noteStatus" aria-live="polite"></span>
-              <button id="noteRetry" class="hidden text-sky-600 hover:underline" type="button">Tentar novamente</button>
-            </div>
-          </div>
-        </div>
       </div>
     </section>
 

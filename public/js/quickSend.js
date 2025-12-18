@@ -66,6 +66,23 @@ const QUICK_TYPE_META = {
 const MAX_TEXT_LENGTH = 4096;
 const QUICK_RESULT_LIMIT = 5;
 
+function createLabeledInput({ label, role, type = 'text', placeholder = '', initial = '' }) {
+  const wrap = document.createElement('div');
+  wrap.className = 'space-y-1';
+  const lbl = document.createElement('label');
+  lbl.className = 'text-xs font-medium text-slate-600';
+  lbl.textContent = label;
+  const input = document.createElement('input');
+  input.type = type;
+  input.className = 'w-full border rounded-lg px-3 py-2 text-sm';
+  if (role) input.dataset.role = role;
+  if (placeholder) input.placeholder = placeholder;
+  if (initial) input.value = initial;
+  wrap.appendChild(lbl);
+  wrap.appendChild(input);
+  return { wrap, input };
+}
+
 function toggleQuickSendModal(open) {
   if (!els.quickSendModal) return;
   const shouldOpen = open === true || (open !== false && els.quickSendModal.classList.contains('hidden'));
@@ -117,31 +134,17 @@ function createButtonRow(initial = {}) {
   row.className = 'border border-slate-200 rounded-lg p-3 space-y-2';
   row.dataset.role = 'button-row';
 
-  const idWrap = document.createElement('div');
-  idWrap.className = 'space-y-1';
-  const idLabel = document.createElement('label');
-  idLabel.className = 'text-xs font-medium text-slate-600';
-  idLabel.textContent = 'ID do botão';
-  const idInput = document.createElement('input');
-  idInput.type = 'text';
-  idInput.className = 'w-full border rounded-lg px-3 py-2 text-sm';
-  idInput.dataset.role = 'button-id';
-  if (initial.id) idInput.value = initial.id;
-  idWrap.appendChild(idLabel);
-  idWrap.appendChild(idInput);
+  const { wrap: idWrap } = createLabeledInput({
+    label: 'ID do botão',
+    role: 'button-id',
+    initial: initial.id || '',
+  });
 
-  const titleWrap = document.createElement('div');
-  titleWrap.className = 'space-y-1';
-  const titleLabel = document.createElement('label');
-  titleLabel.className = 'text-xs font-medium text-slate-600';
-  titleLabel.textContent = 'Rótulo';
-  const titleInput = document.createElement('input');
-  titleInput.type = 'text';
-  titleInput.className = 'w-full border rounded-lg px-3 py-2 text-sm';
-  titleInput.dataset.role = 'button-title';
-  if (initial.title) titleInput.value = initial.title;
-  titleWrap.appendChild(titleLabel);
-  titleWrap.appendChild(titleInput);
+  const { wrap: titleWrap } = createLabeledInput({
+    label: 'Rótulo',
+    role: 'button-title',
+    initial: initial.title || '',
+  });
 
   const actions = document.createElement('div');
   actions.className = 'flex justify-end';
@@ -192,44 +195,23 @@ function createListOption(sectionEl, initial = {}) {
   option.className = 'border border-slate-200 rounded-lg p-3 space-y-2';
   option.dataset.role = 'list-option';
 
-  const idWrap = document.createElement('div');
-  idWrap.className = 'space-y-1';
-  const idLabel = document.createElement('label');
-  idLabel.className = 'text-xs font-medium text-slate-600';
-  idLabel.textContent = 'ID da opção';
-  const idInput = document.createElement('input');
-  idInput.type = 'text';
-  idInput.className = 'w-full border rounded-lg px-3 py-2 text-sm';
-  idInput.dataset.role = 'option-id';
-  if (initial.id) idInput.value = initial.id;
-  idWrap.appendChild(idLabel);
-  idWrap.appendChild(idInput);
+  const { wrap: idWrap } = createLabeledInput({
+    label: 'ID da opção',
+    role: 'option-id',
+    initial: initial.id || '',
+  });
 
-  const titleWrap = document.createElement('div');
-  titleWrap.className = 'space-y-1';
-  const titleLabel = document.createElement('label');
-  titleLabel.className = 'text-xs font-medium text-slate-600';
-  titleLabel.textContent = 'Título';
-  const titleInput = document.createElement('input');
-  titleInput.type = 'text';
-  titleInput.className = 'w-full border rounded-lg px-3 py-2 text-sm';
-  titleInput.dataset.role = 'option-title';
-  if (initial.title) titleInput.value = initial.title;
-  titleWrap.appendChild(titleLabel);
-  titleWrap.appendChild(titleInput);
+  const { wrap: titleWrap } = createLabeledInput({
+    label: 'Título',
+    role: 'option-title',
+    initial: initial.title || '',
+  });
 
-  const descWrap = document.createElement('div');
-  descWrap.className = 'space-y-1';
-  const descLabel = document.createElement('label');
-  descLabel.className = 'text-xs font-medium text-slate-600';
-  descLabel.textContent = 'Descrição (opcional)';
-  const descInput = document.createElement('input');
-  descInput.type = 'text';
-  descInput.className = 'w-full border rounded-lg px-3 py-2 text-sm';
-  descInput.dataset.role = 'option-description';
-  if (initial.description) descInput.value = initial.description;
-  descWrap.appendChild(descLabel);
-  descWrap.appendChild(descInput);
+  const { wrap: descWrap } = createLabeledInput({
+    label: 'Descrição (opcional)',
+    role: 'option-description',
+    initial: initial.description || '',
+  });
 
   const actions = document.createElement('div');
   actions.className = 'flex justify-end';

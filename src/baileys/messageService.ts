@@ -1,25 +1,16 @@
-import type {
-  AnyMessageContent,
-  BaileysEventMap,
-  WAMessage,
-  WASocket,
-} from '@whiskeysockets/baileys';
-import type Long from 'long';
-import axios from 'axios';
+import type { BaileysEventMap, WAMessage, WASocket } from '@whiskeysockets/baileys';
 import pino from 'pino';
-import sharp from 'sharp';
+import type Long from 'long';
 
 import { buildContactPayload, mapLeadFromMessage } from '../services/leadMapper.js';
 import type { ContactPayload } from '../services/leadMapper.js';
 import { WebhookClient } from '../services/webhook.js';
-import { getSendTimeoutMs } from '../utils.js';
 import {
   extractMessageText,
   extractMessageType,
   filterClientMessages,
   getNormalizedMessageContent,
 } from './messageUtils.js';
-import { Buffer } from 'node:buffer';
 import type {
   BrokerEvent,
   BrokerEventDirection,
@@ -27,14 +18,27 @@ import type {
   BrokerEventStore,
 } from '../broker/eventStore.js';
 import { toIsoDate } from './time.js';
-import {
-  getPollMetadataFromCache,
-  getVoteSelection,
-  normalizeJid,
-  recordVoteSelection,
-} from './pollMetadata.js';
+import { recordVoteSelection } from './pollMetadata.js';
 import type { LidMappingStore } from '../lidMappingStore.js';
 import { riskGuardian } from '../risk/guardian.js';
+import {
+  applySpintax,
+  sendMessageWithTimeout,
+  sendWithHumanization,
+} from './outboundSender.js';
+import {
+  buildMediaMessageContent,
+  fetchBufferFromUrl,
+  hashBusterImage,
+  type BuiltMediaContent,
+  type MediaMessageType,
+  type MediaPayload,
+  MAX_MEDIA_BYTES,
+  type SendMediaOptions,
+} from './mediaBuilder.js';
+import { createError } from './messageErrors.js';
+import { resolvePollChoice, type PollChoiceMetadata } from './pollChoiceResolver.js';
+import { Buffer } from 'node:buffer';
 
 export interface SendTextOptions {
   timeoutMs?: number;
@@ -58,33 +62,14 @@ export interface SendListPayload {
   sections: ListSectionPayload[];
 }
 
-export const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
-export type MediaMessageType = 'image' | 'video' | 'audio' | 'document';
-
-export interface MediaPayload {
-  url?: string | null;
-  base64?: string | null;
-  mimetype?: string | null;
-  fileName?: string | null;
-  ptt?: boolean | null;
-  gifPlayback?: boolean | null;
-}
-
-export interface SendMediaOptions extends SendTextOptions {
-  caption?: string | null;
-  mimetype?: string | null;
-  fileName?: string | null;
-  ptt?: boolean | null;
-  gifPlayback?: boolean | null;
-}
-
-export interface BuiltMediaContent {
-  content: AnyMessageContent;
-  mimetype: string | null;
-  fileName: string | null;
-  size: number | null;
-  source: 'base64' | 'url';
-}
+export {
+  MAX_MEDIA_BYTES,
+  type MediaMessageType,
+  type MediaPayload,
+  type SendMediaOptions,
+  type BuiltMediaContent,
+  buildMediaMessageContent,
+} from './mediaBuilder.js';
 
 interface InteractivePayload { type: string; [k: string]: unknown; }
 interface MediaMetadataPayload {
@@ -107,13 +92,6 @@ interface StructuredMessagePayload {
 
 type StructuredMessageOverrides = Partial<Omit<StructuredMessagePayload, 'id' | 'chatId'>>;
 
-interface PollChoiceMetadata {
-  pollId: string | null;
-  question: string | null;
-  selectedOptions: Array<{ id: string | null; text: string | null }>;
-  optionIds: string[];
-}
-
 interface EventMetadata {
   timestamp: string;
   broker: { direction: BrokerEventDirection; type: string; };
@@ -135,170 +113,7 @@ export interface MessageServiceOptions {
 
 /* --------------------------------- helpers -------------------------------- */
 
-const DEFAULT_DOCUMENT_MIMETYPE = 'application/octet-stream';
-const HUMANIZE_SENDS = process.env.HUMANIZE_SENDS !== '0';
 const HASH_BUST_IMAGES = process.env.HASH_BUST_IMAGES !== '0';
-const TYPING_MS_PER_CHAR = 200;
-
-function createError(code: string, message?: string): Error {
-  const err = new Error(message ?? code);
-  (err as any).code = code;
-  return err;
-}
-
-function sanitizeString(v: unknown): string {
-  return typeof v === 'string' ? v.trim() : '';
-}
-
-function applySpintax(text: string): string {
-  const regex = /\{([^{}]+?)\}/g;
-  return text.replace(regex, (_, group) => {
-    const variants = String(group)
-      .split('|')
-      .map((v: string) => v.trim())
-      .filter(Boolean);
-    if (!variants.length) return group;
-    const pick = variants[Math.floor(Math.random() * variants.length)];
-    return pick;
-  });
-}
-
-async function humanDelay(minMs: number, maxMs: number): Promise<void> {
-  const min = Math.max(0, Math.floor(minMs));
-  const max = Math.max(min, Math.floor(maxMs));
-  const jitter = Math.floor(Math.random() * (max - min + 1) + min);
-  await new Promise((resolve) => setTimeout(resolve, jitter));
-}
-
-function estimatePresenceProfile(content: Parameters<WASocket['sendMessage']>[1]): {
-  type: 'composing' | 'recording';
-  min: number;
-  max: number;
-} {
-  let textLength = 24;
-  if (typeof (content as any)?.text === 'string') {
-    textLength = (content as any).text.length || 1;
-  } else if (typeof (content as any)?.caption === 'string') {
-    textLength = (content as any).caption.length || 1;
-  }
-  const base = textLength * TYPING_MS_PER_CHAR;
-  const extra = 1000 + Math.random() * 2000; // 1-3s extra reação
-  const duration = Math.min(20_000, base + extra);
-  return {
-    type: (content as any)?.audio ? 'recording' : 'composing',
-    min: duration * 0.8,
-    max: duration * 1.2,
-  };
-}
-
-async function hashBusterImage(buffer: Buffer): Promise<Buffer> {
-  try {
-    const brightness = 1 + Math.random() * 0.01;
-    const saturation = 1 + Math.random() * 0.01;
-    return await sharp(buffer)
-      .modulate({ brightness, saturation })
-      .withMetadata({
-        exif: {
-          IFD0: {
-            Copyright: `aegis-${Date.now()}-${Math.random()}`,
-          },
-        },
-      })
-      .toBuffer();
-  } catch {
-    return buffer;
-  }
-}
-
-function extractBase64(value: string): { buffer: Buffer; mimetype: string | null } {
-  const trimmed = value.trim();
-  const match = trimmed.match(/^data:(?<mime>[^;]+);base64,(?<data>.+)$/);
-  const base64Data = match?.groups?.data ?? trimmed;
-  const mime = match?.groups?.mime ?? null;
-
-  try {
-    const buffer = Buffer.from(base64Data, 'base64');
-    if (!buffer.length) throw createError('media_base64_invalid', 'base64 payload is empty');
-    return { buffer, mimetype: mime };
-  } catch (err) {
-    throw createError('media_base64_invalid', (err as Error).message);
-  }
-}
-
-export function buildMediaMessageContent(
-  type: MediaMessageType,
-  media: MediaPayload,
-  options: SendMediaOptions = {},
-): BuiltMediaContent {
-  const url = sanitizeString(media.url);
-  const base64 = sanitizeString(media.base64);
-
-  if (!url && !base64) throw createError('media_source_missing', 'media.url ou media.base64 são obrigatórios');
-
-  let source: Buffer | { url: string };
-  let size: number | null = null;
-  let detectedMime: string | null = null;
-
-  if (base64) {
-    const { buffer, mimetype } = extractBase64(base64);
-    if (buffer.length > MAX_MEDIA_BYTES) throw createError('media_too_large', 'arquivo excede o tamanho máximo permitido');
-    source = buffer;
-    size = buffer.length;
-    detectedMime = mimetype;
-  } else {
-    try {
-      const parsed = new URL(url);
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        throw createError('media_url_invalid', 'apenas URLs http(s) são aceitas');
-      }
-    } catch (err) {
-      if ((err as any).code === 'media_url_invalid') throw err;
-      throw createError('media_url_invalid', (err as Error).message);
-    }
-    source = { url };
-  }
-
-  const rawMime = sanitizeString(options.mimetype) || sanitizeString(media.mimetype) || (detectedMime ?? '');
-  let finalMime: string | null = rawMime || null;
-  const fileName = sanitizeString(options.fileName) || sanitizeString(media.fileName) || null;
-  const caption = sanitizeString(options.caption);
-  const ptt = Boolean(options.ptt ?? media.ptt ?? false);
-  const gifPlayback = Boolean(options.gifPlayback ?? media.gifPlayback ?? false);
-
-  let content: AnyMessageContent;
-  switch (type) {
-    case 'image': {
-      const image: AnyMessageContent = { image: source };
-      if (caption) (image as any).caption = caption;
-      if (finalMime) (image as any).mimetype = finalMime;
-      content = image; break;
-    }
-    case 'video': {
-      const video: AnyMessageContent = { video: source };
-      if (caption) (video as any).caption = caption;
-      if (finalMime) (video as any).mimetype = finalMime;
-      if (gifPlayback) (video as any).gifPlayback = true;
-      content = video; break;
-    }
-    case 'audio': {
-      const audio: AnyMessageContent = { audio: source };
-      if (finalMime) (audio as any).mimetype = finalMime;
-      if (ptt) (audio as any).ptt = true;
-      content = audio; break;
-    }
-    case 'document': {
-      const documentMime = finalMime || DEFAULT_DOCUMENT_MIMETYPE;
-      const document: AnyMessageContent = { document: source, mimetype: documentMime } as AnyMessageContent;
-      if (caption) (document as any).caption = caption;
-      if (fileName) (document as any).fileName = fileName;
-      content = document; finalMime = documentMime; break;
-    }
-    default:
-      throw createError('media_type_unsupported', `tipo de mídia não suportado: ${type}`);
-  }
-
-  return { content, mimetype: finalMime, fileName, size, source: base64 ? 'base64' : 'url' };
-}
 
 function toSafeNumber(value: unknown): number | null {
   if (value == null) return null;
@@ -614,27 +429,22 @@ export class MessageService {
       await this.sendSafeInterleave(risk.injectSafeJid);
       riskGuardian.afterSend(this.instanceId, risk.injectSafeJid, true);
     }
-    const timeoutMs = options.timeoutMs ?? getSendTimeoutMs();
-    const caption = sanitizeString(options.caption);
-    const processedCaption = caption ? applySpintax(caption) : caption;
-    const builtBase = buildMediaMessageContent(type, media, { ...options, caption: processedCaption });
+    const caption = typeof options.caption === 'string' ? options.caption.trim() : '';
+    const processedCaption = caption ? applySpintax(caption) : caption || null;
+    const builtBase = buildMediaMessageContent(type, media, { ...options, caption: processedCaption ?? undefined });
     const built = await this.hashBustIfNeeded(type, builtBase);
-    const sendPromise = this.sendWithHumanization(jid, built.content, options.messageOptions);
-
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    const message = await (timeoutMs
-      ? (Promise.race([
-          sendPromise,
-          new Promise<WAMessage>((_, reject) => { timeoutHandle = setTimeout(() => reject(new Error('send timeout')), timeoutMs); }),
-        ]) as Promise<WAMessage>)
-      : sendPromise);
-
-    if (timeoutHandle) clearTimeout(timeoutHandle);
+    const message = await sendMessageWithTimeout(
+      this.sock,
+      jid,
+      built.content,
+      { timeoutMs: options.timeoutMs, messageOptions: options.messageOptions },
+      this.logger,
+    );
 
     await this.emitOutboundMessage(message, {
-      text: processedCaption || null,
+      text: processedCaption,
       type: 'media',
-      media: { mediaType: type, caption: processedCaption || null, mimetype: built.mimetype, fileName: built.fileName, size: built.size },
+      media: { mediaType: type, caption: processedCaption, mimetype: built.mimetype, fileName: built.fileName, size: built.size },
     });
     riskGuardian.afterSend(this.instanceId, jid, risk.isKnown);
 
@@ -682,19 +492,7 @@ export class MessageService {
     content: Parameters<WASocket['sendMessage']>[1],
     options: SendTextOptions,
   ): Promise<WAMessage> {
-    const timeoutMs = options.timeoutMs ?? getSendTimeoutMs();
-    const sendPromise = this.sendWithHumanization(jid, content, options.messageOptions);
-
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    const message = await (timeoutMs
-      ? (Promise.race([
-          sendPromise,
-          new Promise<WAMessage>((_, reject) => { timeoutHandle = setTimeout(() => reject(new Error('send timeout')), timeoutMs); }),
-        ]) as Promise<WAMessage>)
-      : sendPromise);
-
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-    return message;
+    return sendMessageWithTimeout(this.sock, jid, content, options, this.logger);
   }
 
   private async emitOutboundMessage(message: WAMessage, extras: StructuredMessageOverrides = {}): Promise<void> {
@@ -726,45 +524,10 @@ export class MessageService {
   private async sendSafeInterleave(jid: string): Promise<void> {
     const pingText = applySpintax('{Oi|Olá|E aí}, conferindo conexão.');
     try {
-      await this.sendWithHumanization(jid, { text: pingText });
+      await sendWithHumanization(this.sock, jid, { text: pingText }, undefined, this.logger);
     } catch (err) {
       this.logger.warn({ jid, err }, 'risk.safe_contact.send.failed');
     }
-  }
-
-  private async sendWithHumanization(
-    jid: string,
-    content: Parameters<WASocket['sendMessage']>[1],
-    messageOptions?: Parameters<WASocket['sendMessage']>[2],
-  ): Promise<WAMessage> {
-    if (!HUMANIZE_SENDS) {
-      return this.sock.sendMessage(jid, content, messageOptions);
-    }
-
-    try {
-      await this.sock.sendPresenceUpdate('available', jid);
-    } catch {}
-
-    await humanDelay(800, 2000);
-    const profile = estimatePresenceProfile(content);
-    try {
-      await this.sock.sendPresenceUpdate(profile.type, jid);
-    } catch {}
-    await humanDelay(profile.min, profile.max);
-    try {
-      await this.sock.sendPresenceUpdate('paused', jid);
-    } catch {}
-    await humanDelay(600, 1400);
-
-    const result = await this.sock.sendMessage(jid, content, messageOptions);
-    setTimeout(() => {
-      try {
-        void this.sock?.sendPresenceUpdate?.('unavailable', jid);
-      } catch {
-        // ignore presence cleanup errors
-      }
-    }, 8000);
-    return result;
   }
 
   private async hashBustIfNeeded(type: MediaMessageType, built: BuiltMediaContent): Promise<BuiltMediaContent> {
@@ -777,11 +540,9 @@ export class MessageService {
       buffer = imagePayload;
     } else if (imagePayload && typeof imagePayload === 'object' && typeof (imagePayload as any).url === 'string') {
       const url = (imagePayload as { url: string }).url;
-      try {
-        const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 10_000 });
-        buffer = Buffer.from(resp.data);
-      } catch (err: any) {
-        this.logger.warn({ err: err?.message }, 'hashbust.image.download.failed');
+      buffer = await fetchBufferFromUrl(url);
+      if (!buffer) {
+        this.logger.warn({ url }, 'hashbust.image.download.failed');
       }
     }
 
@@ -810,101 +571,19 @@ export class MessageService {
     const chatId = lead.remoteJid ?? message.key?.remoteJid ?? null;
 
     const extractedText = extractMessageText(message);
-
-    // Voto decifrado pelo PollService (cache)
-    const voteSelection = getVoteSelection(messageId);
-    let pollChoice: PollChoiceMetadata | null = null;
-    let normalizedSelectedOptions: Array<{ id: string | null; text: string | null }> = [];
-    if (voteSelection) {
-      normalizedSelectedOptions = (voteSelection.selectedOptions ?? []).map((opt) => ({
-        id: opt?.id ?? null,
-        text: opt?.text ?? null,
-      }));
-    }
-    let voteText: string | null = null;
-    if (normalizedSelectedOptions.length) {
-      const parts = normalizedSelectedOptions
-        .map((opt) =>
-          (typeof opt.text === 'string' && opt.text.trim()) ||
-          (typeof opt.id === 'string' && opt.id.trim()) ||
-          '',
-        )
-        .filter(Boolean);
-      if (parts.length) voteText = parts.join(', ');
-    }
-    if (voteSelection) {
-      const optionIds = normalizedSelectedOptions
-        .map((opt) => (typeof opt.id === 'string' ? opt.id.trim() : ''))
-        .filter((id): id is string => Boolean(id));
-      pollChoice = {
-        pollId: typeof voteSelection.pollId === 'string' ? voteSelection.pollId : null,
-        question: typeof voteSelection.question === 'string' ? voteSelection.question : null,
-        selectedOptions: normalizedSelectedOptions,
-        optionIds,
-      };
-    }
-    if (!voteText) {
-      const pollUpdate = message.message?.pollUpdateMessage;
-      if (pollUpdate?.vote?.encPayload && pollUpdate.vote.encIv) {
-        const pollId = pollUpdate.pollCreationMessageKey?.id ?? null;
-        const pollRemoteRaw =
-          pollUpdate.pollCreationMessageKey?.remoteJid ?? message.key?.remoteJid ?? null;
-        const pollRemoteAlt =
-          (pollUpdate.pollCreationMessageKey as any)?.remoteJidAlt ??
-          (message.key as any)?.remoteJidAlt ??
-          null;
-        const normalizedRemote =
-          this.mappingStore?.resolveRemoteJid(pollRemoteRaw, pollRemoteAlt) ?? normalizeJid(pollRemoteRaw);
-        const metadata =
-          (pollId ? getPollMetadataFromCache(pollId, normalizedRemote) : null) ?? null;
-
-        if (!metadata) {
-          this.logger.info(
-            {
-              messageId,
-              pollId,
-              pollUpdateMessageId: pollUpdate.pollUpdateMessageKey?.id ?? null,
-              remoteJid: pollRemoteRaw ?? null,
-              clue: 'sem metadados, estamos sem mapa do tesouro — talvez a criação não tenha sido vista',
-            },
-            'poll.vote.metadata.missing',
-          );
-        } else {
-          this.logger.info(
-            {
-              messageId,
-              pollId,
-              optionsCount: metadata.options.length,
-              hasEncKey: Boolean(metadata.encKeyHex),
-              encKeyPreview: metadata.encKeyHex
-                ? `${metadata.encKeyHex.slice(0, 8)}…${metadata.encKeyHex.slice(-8)}`
-                : null,
-              clue: 'metadados recuperados — hora de traduzir o voto',
-            },
-            'poll.vote.metadata.ready',
-          );
-        }
-      }
-
-      if (!voteText) {
-        this.logger.warn(
-          {
-            messageId,
-            clue: 'voto recebido mas nenhum texto decifrado — confira logs do PollService',
-          },
-          'poll.vote.text.missing',
-        );
-      }
-    }
+    const { text: voteText, pollChoice, shouldClearSelection } = resolvePollChoice(
+      message,
+      direction,
+      this.mappingStore,
+      this.logger,
+    );
 
     const text =
       Object.prototype.hasOwnProperty.call(messageOverrides, 'text')
         ? messageOverrides.text ?? null
         : voteText ?? extractedText ?? null;
 
-    const pickedTextFromVote =
-      !Object.prototype.hasOwnProperty.call(messageOverrides, 'text') && !!voteText;
-    if (pickedTextFromVote && direction === 'inbound' && messageId) {
+    if (shouldClearSelection && messageId) {
       recordVoteSelection(messageId, null);
     }
 

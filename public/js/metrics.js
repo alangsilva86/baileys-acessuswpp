@@ -28,6 +28,7 @@ let currentConnectionState = null;
 const qrVersionCache = new Map();
 let lastRangeRequest = { from: null, to: null };
 let lastRangeSummary = null;
+let chartLoaderPromise = null;
 
 function formatRangeLabel(range) {
   if (!range) return '';
@@ -102,6 +103,7 @@ function updateInspector(snapshot) {
   const ispLabel = network.isp || network.asn || 'Sem dados de ISP';
   const proxyClass =
     proxyStatus === 'ok' ? 'text-emerald-700' : proxyStatus === 'blocked' ? 'text-rose-700' : 'text-amber-700';
+  const globalProxyMetrics = (window.__healthSnapshot || null)?.proxyMetrics || null;
 
   if (els.inspectorProxyValue) {
     els.inspectorProxyValue.className = `text-sm font-semibold ${proxyClass}`;
@@ -111,6 +113,8 @@ function updateInspector(snapshot) {
     const proxyParts = [];
     if (network.asn) proxyParts.push(`ASN ${network.asn}`);
     if (latency != null) proxyParts.push(`${latency} ms`);
+    if (globalProxyMetrics?.avgLatencyMs != null) proxyParts.push(`média ${globalProxyMetrics.avgLatencyMs} ms`);
+    if (globalProxyMetrics?.failed) proxyParts.push(`${globalProxyMetrics.failed} falhas globais`);
     els.inspectorProxyHint.textContent = proxyParts.length ? proxyParts.join(' • ') : 'Validação ASN e latência aparecerão aqui.';
   }
 
@@ -359,7 +363,27 @@ function scheduleQrInvalidation(snapshot, connection) {
   }, delay + 300);
 }
 
-function initChart() {
+function loadChartJs() {
+  if (typeof Chart !== 'undefined') return Promise.resolve(Chart);
+  if (chartLoaderPromise) return chartLoaderPromise;
+  chartLoaderPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/chart.js';
+    script.async = true;
+    script.onload = () => resolve(window.Chart);
+    script.onerror = (err) => {
+      console.error('[metrics] falha ao carregar Chart.js', err);
+      resolve(null);
+    };
+    document.head.appendChild(script);
+  });
+  return chartLoaderPromise;
+}
+
+async function initChart() {
+  if (chart) return;
+  const ChartJs = await loadChartJs();
+  if (!ChartJs) return;
   const canvas = document.getElementById('metricsChart');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -375,7 +399,7 @@ function initChart() {
       fill: false,
     };
   });
-  chart = new Chart(ctx, {
+  chart = new ChartJs(ctx, {
     type: 'line',
     data: {
       labels: [],
@@ -703,6 +727,7 @@ export async function refreshSelected(options = {}) {
     lastRangeRequest = { from, to: now };
     lastRangeSummary = metrics?.range?.summary || null;
 
+    await initChart();
     updateKpis(metrics);
 
     const timeline = metrics.timeline || [];
@@ -735,10 +760,13 @@ export async function refreshSelected(options = {}) {
       }
     }
 
-    setLogsLoading(true);
+    const shouldLoadLogs = !els.logsDrawer || !els.logsDrawer.classList.contains('hidden');
     const effectiveRange = metrics?.range?.effective || { from, to: now };
-    await refreshLogs({ silent: true, range: effectiveRange });
-    setLogsLoading(false);
+    if (shouldLoadLogs) {
+      setLogsLoading(true);
+      await refreshLogs({ silent: true, range: effectiveRange });
+      setLogsLoading(false);
+    }
     hasLoadedSelected = true;
   } catch (err) {
     console.error('[metrics] erro ao buscar detalhes da instância', err);
@@ -761,7 +789,6 @@ function applySavedRange() {
 }
 
 export function initMetrics() {
-  initChart();
   applySavedRange();
   if (els.btnExportCsv) els.btnExportCsv.addEventListener('click', () => exportMetrics('csv'));
   if (els.btnExportJson) els.btnExportJson.addEventListener('click', () => exportMetrics('json'));
