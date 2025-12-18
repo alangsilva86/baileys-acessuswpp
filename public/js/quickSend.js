@@ -66,6 +66,12 @@ const QUICK_TYPE_META = {
 const MAX_TEXT_LENGTH = 4096;
 const QUICK_RESULT_LIMIT = 5;
 
+function toggleQuickSendModal(open) {
+  if (!els.quickSendModal) return;
+  const shouldOpen = open === true || (open !== false && els.quickSendModal.classList.contains('hidden'));
+  els.quickSendModal.classList[shouldOpen ? 'remove' : 'add']('hidden');
+}
+
 function setSendOut(message, tone = 'info') {
   if (!els.sendOut) return;
   els.sendOut.textContent = message;
@@ -763,5 +769,17 @@ export function initQuickSend() {
 
   if (els.btnSend) {
     els.btnSend.addEventListener('click', handleQuickSend);
+  }
+
+  if (els.btnOpenQuickSend) {
+    els.btnOpenQuickSend.addEventListener('click', () => toggleQuickSendModal(true));
+  }
+  if (els.btnCloseQuickSend) {
+    els.btnCloseQuickSend.addEventListener('click', () => toggleQuickSendModal(false));
+  }
+  if (els.quickSendModal) {
+    els.quickSendModal.addEventListener('click', (ev) => {
+      if (ev.target === els.quickSendModal) toggleQuickSendModal(false);
+    });
   }
 }

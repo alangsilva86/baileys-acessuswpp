@@ -15,6 +15,43 @@
     </header>
 
     <section class="p-4 bg-white rounded-2xl shadow">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="globalHealth">
+        <div class="p-3 rounded-xl border border-slate-100 bg-gradient-to-br from-emerald-50 to-emerald-100">
+          <div class="flex items-center justify-between">
+            <div class="text-[11px] font-semibold uppercase tracking-wide text-emerald-700">Instâncias ativas</div>
+            <span class="text-emerald-700">🛰️</span>
+          </div>
+          <div id="ghInstances" class="mt-1 text-2xl font-semibold text-emerald-800">—</div>
+          <div id="ghInstancesHint" class="text-xs text-emerald-700/80 mt-1">Monitorando…</div>
+        </div>
+        <div class="p-3 rounded-xl border border-slate-100 bg-gradient-to-br from-indigo-50 to-indigo-100">
+          <div class="flex items-center justify-between">
+            <div class="text-[11px] font-semibold uppercase tracking-wide text-indigo-700">Fila</div>
+            <span class="text-indigo-700">⏱️</span>
+          </div>
+          <div id="ghQueue" class="mt-1 text-2xl font-semibold text-indigo-800">—</div>
+          <div id="ghQueueHint" class="text-xs text-indigo-700/80 mt-1">Fila segura</div>
+        </div>
+        <div class="p-3 rounded-xl border border-slate-100 bg-gradient-to-br from-sky-50 to-sky-100">
+          <div class="flex items-center justify-between">
+            <div class="text-[11px] font-semibold uppercase tracking-wide text-sky-700">Proxies</div>
+            <span class="text-sky-700">📶</span>
+          </div>
+          <div id="ghProxy" class="mt-1 text-2xl font-semibold text-sky-800">—</div>
+          <div id="ghProxyHint" class="text-xs text-sky-700/80 mt-1">Saúde da rede</div>
+        </div>
+        <div class="p-3 rounded-xl border border-slate-100 bg-gradient-to-br from-amber-50 to-amber-100">
+          <div class="flex items-center justify-between">
+            <div class="text-[11px] font-semibold uppercase tracking-wide text-amber-700">Risco (Unknown)</div>
+            <span class="text-amber-700">🛡️</span>
+          </div>
+          <div id="ghRisk" class="mt-1 text-2xl font-semibold text-amber-800">—</div>
+          <div id="ghRiskHint" class="text-xs text-amber-700/80 mt-1">Aguardando dados</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="p-4 bg-white rounded-2xl shadow">
       <div class="flex items-center gap-3 flex-wrap">
         <div class="relative">
           <select id="selInstance" class="border rounded-lg px-3 py-2 pr-10 min-w-[16rem]"></select>
@@ -152,7 +189,7 @@
       <section id="cards" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></section>
     </section>
 
-    <section class="grid md:grid-cols-3 gap-6">
+    <section class="grid md:grid-cols-3 gap-6 items-start">
       <div class="p-4 bg-white rounded-2xl shadow">
         <h2 class="font-semibold mb-2">QR Code (instância selecionada)</h2>
         <div id="qrWrap" class="border rounded-xl p-3 text-center transition-colors">
@@ -184,9 +221,77 @@
         </div>
       </div>
 
-      <div class="p-4 bg-white rounded-2xl shadow md:col-span-2">
-        <h2 class="font-semibold mb-2">Envio Rápido</h2>
-        <div class="space-y-4">
+      <div class="md:col-span-2 space-y-4">
+        <div class="p-4 bg-white rounded-2xl shadow space-y-4">
+          <div class="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
+            <div>
+              <h2 class="font-semibold">Inspector de Saúde</h2>
+              <p class="text-xs text-slate-500">Rede, risco e fila em tempo real da instância selecionada.</p>
+            </div>
+            <div class="flex flex-wrap gap-2 justify-end">
+              <button id="btnPauseQueue" class="px-3 py-2 text-xs bg-amber-100 text-amber-800 rounded-lg border border-amber-200">Pausar fila</button>
+              <button id="btnResumeQueue" class="px-3 py-2 text-xs bg-emerald-100 text-emerald-800 rounded-lg border border-emerald-200">Retomar</button>
+              <button id="btnSendSafe" class="px-3 py-2 text-xs bg-sky-100 text-sky-800 rounded-lg border border-sky-200">Enviar safe</button>
+              <button id="btnRevalidateProxy" class="px-3 py-2 text-xs bg-slate-100 text-slate-800 rounded-lg border border-slate-200">Revalidar proxy</button>
+              <button id="btnOpenQuickSend" class="px-3 py-2 text-xs bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg">Envio rápido</button>
+            </div>
+          </div>
+
+          <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            <div id="inspectorProxy" class="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-1">
+              <div class="text-[11px] uppercase tracking-wide text-slate-400">Rede / Proxy</div>
+              <div id="inspectorProxyValue" class="text-sm font-semibold text-slate-800">Aguardando instância…</div>
+              <div id="inspectorProxyHint" class="text-xs text-slate-500">Validação ASN e latência aparecerão aqui.</div>
+            </div>
+            <div id="inspectorRisk" class="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-1">
+              <div class="text-[11px] uppercase tracking-wide text-slate-400">Risco</div>
+              <div id="inspectorRiskValue" class="text-sm font-semibold text-slate-800">—</div>
+              <div id="inspectorRiskHint" class="text-xs text-slate-500">Unknown ratio aguardando dados.</div>
+            </div>
+            <div id="inspectorQueue" class="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-1">
+              <div class="text-[11px] uppercase tracking-wide text-slate-400">Fila</div>
+              <div id="inspectorQueueValue" class="text-sm font-semibold text-slate-800">—</div>
+              <div id="inspectorQueueHint" class="text-xs text-slate-500">ETA e pausas do guardião.</div>
+            </div>
+          </div>
+
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="text-sm font-semibold text-slate-700">Diagnósticos rápidos</h3>
+              <span class="text-[11px] text-slate-500">Proxy, risco e fila</span>
+            </div>
+            <div id="inspectorLogs" class="text-xs text-slate-600 bg-slate-50 rounded-xl p-3 h-32 overflow-y-auto">Selecione uma instância para ver os últimos eventos.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="p-4 bg-white rounded-2xl shadow md:col-span-2 space-y-3">
+      <div class="flex items-center justify-between gap-4">
+        <h2 class="font-semibold">Últimos eventos enviados ao LeadEngine</h2>
+        <button id="btnRefreshLogs" class="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-sm rounded-lg">Atualizar</button>
+      </div>
+      <p class="text-xs text-slate-500">Visualize as 20 últimas mensagens inbound, outbound e chamadas de webhook.</p>
+      <div id="logsSkeleton" class="space-y-2 hidden">
+        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
+        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
+        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
+      </div>
+      <div id="logsEmpty" class="text-sm text-slate-500 bg-slate-50 rounded-xl p-3">Nenhum evento encontrado ainda para esta instância.</div>
+      <div id="logsList" class="space-y-2"></div>
+    </section>
+
+    <!-- Modal de envio rápido -->
+    <div id="quickSendModal" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm items-center justify-center z-50 flex">
+      <div class="bg-white rounded-2xl shadow-xl max-w-4xl w-full mx-4 p-6 space-y-4">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <h3 class="text-lg font-semibold">Envio rápido</h3>
+            <p class="text-sm text-slate-500">Usa mimetismo, fila segura e configurações da instância selecionada.</p>
+          </div>
+          <button id="btnCloseQuickSend" class="px-3 py-2 border rounded-lg">Fechar</button>
+        </div>
+        <div class="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
           <div>
             <label class="block text-sm font-medium text-slate-700 mb-1">API Key</label>
             <input id="inpApiKey" type="password" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Sua chave de API" />
@@ -298,22 +403,7 @@
           <div id="quickResults" class="space-y-3" aria-live="polite"></div>
         </div>
       </div>
-    </section>
-
-    <section class="p-4 bg-white rounded-2xl shadow md:col-span-2 space-y-3">
-      <div class="flex items-center justify-between gap-4">
-        <h2 class="font-semibold">Últimos eventos enviados ao LeadEngine</h2>
-        <button id="btnRefreshLogs" class="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-sm rounded-lg">Atualizar</button>
-      </div>
-      <p class="text-xs text-slate-500">Visualize as 20 últimas mensagens inbound, outbound e chamadas de webhook.</p>
-      <div id="logsSkeleton" class="space-y-2 hidden">
-        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
-        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
-        <div class="p-3 bg-white rounded-2xl shadow-sm animate-pulse h-20"></div>
-      </div>
-      <div id="logsEmpty" class="text-sm text-slate-500 bg-slate-50 rounded-xl p-3">Nenhum evento encontrado ainda para esta instância.</div>
-      <div id="logsList" class="space-y-2"></div>
-    </section>
+    </div>
 
     <!-- Modal de exclusão -->
     <div id="modalDelete" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm items-center justify-center z-50">

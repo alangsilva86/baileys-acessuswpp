@@ -56,16 +56,35 @@ export async function getQueueMetrics(): Promise<
       delayed: number;
       failed: number;
       completed: number;
+      etaSeconds?: number | null;
     }
 > {
   if (!queue || !ENABLE_SEND_QUEUE) return null;
   const counts = await queue.getJobCounts();
+  let etaSeconds: number | null = null;
+  try {
+    const waiting = await queue.getWaiting();
+    if (waiting.length) {
+      const first = waiting[0];
+      const now = Date.now();
+      const diff = first.timestamp ? now - first.timestamp : 0;
+      const processed = counts.completed ?? 0;
+      const total = waiting.length + (counts.active ?? 0);
+      if (total > 0 && diff > 0) {
+        const avgPerJob = diff / Math.max(1, processed + 1);
+        etaSeconds = Math.max(1, Math.round((total - 1) * (avgPerJob / 1000)));
+      }
+    }
+  } catch {
+    etaSeconds = null;
+  }
   return {
     waiting: counts.waiting ?? 0,
     active: counts.active ?? 0,
     delayed: counts.delayed ?? 0,
     failed: counts.failed ?? 0,
     completed: counts.completed ?? 0,
+    etaSeconds,
   };
 }
 

@@ -100,7 +100,7 @@ class RiskGuardian {
       return { allowed: true, ratio: 0, isKnown, injectSafeJid: null };
     }
 
-    if (state.paused && currentRatio > state.config.threshold) {
+    if (state.paused) {
       return { allowed: false, reason: 'risk_paused', ratio: currentRatio, isKnown };
     }
 
@@ -129,6 +129,11 @@ class RiskGuardian {
   resume(instanceId: string): void {
     const state = this.ensure(instanceId);
     state.paused = false;
+  }
+
+  pause(instanceId: string): void {
+    const state = this.ensure(instanceId);
+    state.paused = true;
   }
 
   private ensure(instanceId: string): RiskState {

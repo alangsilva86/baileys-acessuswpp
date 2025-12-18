@@ -7,6 +7,15 @@ export const els = {
   btnNew: q('btnNew'),
   cards: q('cards'),
   cardsSkeleton: q('cardsSkeleton'),
+  ghInstances: q('ghInstances'),
+  ghInstancesHint: q('ghInstancesHint'),
+  ghQueue: q('ghQueue'),
+  ghQueueHint: q('ghQueueHint'),
+  ghProxy: q('ghProxy'),
+  ghProxyHint: q('ghProxyHint'),
+  ghRisk: q('ghRisk'),
+  ghRiskHint: q('ghRiskHint'),
+  queueEta: q('queueEta'),
   instanceLoading: q('instanceLoading'),
   instanceSearch: q('instanceSearch'),
   instanceFilterState: q('instanceFilterState'),
@@ -79,6 +88,9 @@ export const els = {
   sendOut: q('sendOut'),
   msgCounter: q('msgCounter'),
   quickResults: q('quickResults'),
+  quickSendModal: q('quickSendModal'),
+  btnOpenQuickSend: q('btnOpenQuickSend'),
+  btnCloseQuickSend: q('btnCloseQuickSend'),
 
   // Logs recentes
   btnRefreshLogs: q('btnRefreshLogs'),
@@ -97,6 +109,22 @@ export const els = {
   pairModalCode: q('pairModalCode'),
   pairModalClose: q('pairModalClose'),
   pairModalCopy: q('pairModalCopy'),
+
+  // Inspector
+  inspectorProxy: q('inspectorProxy'),
+  inspectorProxyValue: q('inspectorProxyValue'),
+  inspectorProxyHint: q('inspectorProxyHint'),
+  inspectorRisk: q('inspectorRisk'),
+  inspectorRiskValue: q('inspectorRiskValue'),
+  inspectorRiskHint: q('inspectorRiskHint'),
+  inspectorQueue: q('inspectorQueue'),
+  inspectorQueueValue: q('inspectorQueueValue'),
+  inspectorQueueHint: q('inspectorQueueHint'),
+  inspectorLogs: q('inspectorLogs'),
+  btnPauseQueue: q('btnPauseQueue'),
+  btnResumeQueue: q('btnResumeQueue'),
+  btnSendSafe: q('btnSendSafe'),
+  btnRevalidateProxy: q('btnRevalidateProxy'),
 };
 
 export const STATUS_SERIES = [

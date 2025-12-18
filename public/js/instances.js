@@ -1,6 +1,6 @@
 import { fetchJSON, requireKey } from './api.js';
 import { applyInstanceNote, resetNotes } from './notes.js';
-import { refreshSelected, resetChart } from './metrics.js';
+import { refreshSelected, resetChart, resetInspector } from './metrics.js';
 import { resetLogs } from './logs.js';
 import {
   HTML_ESCAPES,
@@ -30,6 +30,7 @@ let lastInstancesSignature = '';
 let lastSelectedInstanceEtag = null;
 let allInstances = [];
 let filteredInstances = [];
+let queueSnapshot = null;
 let filterHandlersBound = false;
 let scrollRaf = null;
 let measureRaf = null;
@@ -362,6 +363,25 @@ function applyVirtualPadding(startIndex, endIndex) {
 
 function createInstanceCard(inst, selectedId) {
   const connection = describeConnection(inst);
+  const network = inst.network || {};
+  const risk = inst.risk || {};
+  const riskCfg = risk.config || {};
+  const riskRuntime = risk.runtime || {};
+  const riskRatio = Math.round((Number(riskRuntime.ratio) || 0) * 100);
+  const safeCount = Array.isArray(riskCfg.safeContacts) ? riskCfg.safeContacts.length : 0;
+  const queueInfo = inst.queue || {};
+  const queueEnabled = queueInfo.enabled !== false && queueInfo.status !== 'disabled';
+  const queueLabel = queueInfo.paused ? 'Pausada' : queueEnabled ? 'Habilitada' : 'Direta';
+  const latency = network.latencyMs ?? network.latency ?? null;
+  const pairedAt = risk.profile?.pairedAt || risk.pairedAt || inst.metadata?.pairedAt;
+  const ageDays = pairedAt ? Math.round((Date.now() - Date.parse(pairedAt)) / (1000 * 60 * 60 * 24)) : null;
+  const modeGuess = (() => {
+    if (!Number.isFinite(riskCfg.threshold)) return 'equilibrado';
+    if (riskCfg.threshold <= 0.6) return 'ninja';
+    if (riskCfg.threshold >= 0.85) return 'turbo';
+    return 'equilibrado';
+  })();
+
   const card = document.createElement('article');
   card.className = 'p-4 bg-white rounded-2xl shadow transition ring-emerald-200/50 space-y-3';
   if (inst.id === selectedId) card.classList.add('ring-2', 'ring-emerald-200');
@@ -392,6 +412,35 @@ function createInstanceCard(inst, selectedId) {
 
     <div class="text-xs text-slate-500 break-all">WhatsApp: ${userId}</div>
 
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+      <div class="rounded-lg bg-slate-50 p-2 border border-slate-100">
+        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
+          <span>Rede</span>
+          <span class="${network.status === 'ok' ? 'text-emerald-600' : network.status === 'blocked' ? 'text-rose-600' : 'text-amber-600'}">
+            ${escapeHtml(network.status || 'unknown')}
+          </span>
+        </div>
+        <div class="font-semibold text-slate-700 truncate">${escapeHtml(network.isp || network.asn || '—')}</div>
+        <div class="text-[11px] text-slate-500">Latência: ${network.latencyMs != null ? escapeHtml(String(network.latencyMs)) + ' ms' : '—'}</div>
+      </div>
+      <div class="rounded-lg bg-slate-50 p-2 border border-slate-100">
+        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
+          <span>Risco</span>
+          <span class="${riskRuntime.paused ? 'text-rose-600' : 'text-emerald-600'}">${riskRuntime.paused ? 'Pausado' : 'Ativo'}</span>
+        </div>
+        <div class="font-semibold text-slate-700">${riskRatio}% desconhecidos</div>
+        <div class="text-[11px] text-slate-500">Safe contacts: ${safeCount} • Threshold: ${riskCfg.threshold ?? 0.7}</div>
+      </div>
+      <div class="rounded-lg bg-slate-50 p-2 border border-slate-100">
+        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
+          <span>Fila</span>
+          <span class="${queueInfo.paused ? 'text-amber-600' : queueEnabled ? 'text-emerald-600' : 'text-slate-500'}">${queueLabel}</span>
+        </div>
+        <div class="font-semibold text-slate-700">${queueEnabled ? `Pendentes: ${queueInfo.waiting ?? queueInfo.count ?? 0}` : 'Envio direto'}</div>
+        <div class="text-[11px] text-slate-500">Execução: ${queueInfo.active ?? queueInfo.activeCount ?? 0} • Modo: ${modeGuess}</div>
+      </div>
+    </div>
+
     <div class="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
       <div class="rounded-lg bg-slate-50 p-2">
         <span class="block text-[11px] uppercase tracking-wide text-slate-400">Enviadas</span>
@@ -407,6 +456,39 @@ function createInstanceCard(inst, selectedId) {
           <div class="h-full ${meterColor}" style="width:${Math.min(usagePercent, 100)}%"></div>
         </div>
         <div class="text-[11px] text-slate-400">Status 1: ${statusCounts['1'] || 0} • Status 2: ${statusCounts['2'] || 0} • Status 3: ${statusCounts['3'] || 0} • Status 4: ${statusCounts['4'] || 0} • Status 5: ${statusCounts['5'] || 0}</div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+      <div>
+        <label class="text-xs font-medium text-slate-500">Proxy (http/https)</label>
+        <input data-field="proxy" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" placeholder="http://user:pass@host:port" value="${escapeHtml(network.proxyUrl || '')}" />
+        <button data-act="save-proxy" data-iid="${inst.id}" class="mt-2 px-3 py-1.5 text-xs bg-slate-800 text-white rounded-lg">Salvar proxy</button>
+      </div>
+      <div class="space-y-2">
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <label class="text-[11px] font-medium text-slate-500">Modo</label>
+            <select data-act="mode" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs">
+              <option value="ninja"${modeGuess === 'ninja' ? ' selected' : ''}>Ninja</option>
+              <option value="equilibrado"${modeGuess === 'equilibrado' ? ' selected' : ''}>Equilibrado</option>
+              <option value="turbo"${modeGuess === 'turbo' ? ' selected' : ''}>Turbo</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-[11px] font-medium text-slate-500">Threshold</label>
+            <input data-field="risk-threshold" data-iid="${inst.id}" type="number" step="0.05" min="0.1" max="1" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" value="${riskCfg.threshold ?? 0.7}" />
+          </div>
+          <div>
+            <label class="text-[11px] font-medium text-slate-500">Interleave</label>
+            <input data-field="risk-interleave" data-iid="${inst.id}" type="number" min="1" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" value="${riskCfg.interleaveEvery ?? 5}" />
+          </div>
+        </div>
+        <div>
+          <label class="text-[11px] font-medium text-slate-500">Safe contacts (E164, separados por vírgula)</label>
+          <textarea data-field="risk-safe" data-iid="${inst.id}" rows="2" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" placeholder="5511999999999,551188888888">${Array.isArray(riskCfg.safeContacts) ? riskCfg.safeContacts.join(',') : ''}</textarea>
+        </div>
+        <button data-act="save-risk" data-iid="${inst.id}" class="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg">Salvar segurança</button>
       </div>
     </div>
 
@@ -645,10 +727,13 @@ export async function refreshInstances(options = {}) {
         applyFiltersAndRender({ keepSelection: false });
         resetNotes();
         resetChart();
+        resetInspector();
         resetLogs();
         toggleHidden(els.qrImg, true);
         setQrState('idle', 'Selecione uma instância para visualizar o QR.');
         setBadgeState('info', 'Crie uma instância para começar', 4000);
+        await refreshQueueMetrics();
+        updateGlobalHealth();
         result = { changed: meta.listChanged || meta.selectedChanged, selectedChanged: meta.selectedChanged };
         return result;
       }
@@ -661,6 +746,8 @@ export async function refreshInstances(options = {}) {
         await refreshSelected({ silent, withSkeleton: !silent });
       }
 
+      await refreshQueueMetrics();
+      updateGlobalHealth();
       result = { changed: meta.listChanged || selectedChanged, selectedChanged };
     } catch (err) {
       console.error('[instances] erro ao buscar instâncias', err);
@@ -682,6 +769,222 @@ export async function refreshInstances(options = {}) {
 
 export function findCardByIid(iid) {
   return document.querySelector(`[data-iid="${iid}"]`)?.closest('article');
+}
+
+async function refreshQueueMetrics() {
+  try {
+    const data = await fetchJSON('/instances/queue/metrics', true);
+    queueSnapshot = data && typeof data === 'object' ? data : null;
+  } catch (err) {
+    console.debug('[instances] queue metrics failed', err);
+    queueSnapshot = null;
+  }
+}
+
+function updateGlobalHealth() {
+  if (!els.ghInstances || !els.ghQueue || !els.ghProxy || !els.ghRisk) return;
+  const total = allInstances.length;
+  const active = allInstances.filter((inst) => inst.connectionState === 'open').length;
+  els.ghInstances.textContent = total ? `${active}/${total}` : '—';
+  els.ghInstancesHint.textContent = total ? 'Instâncias conectadas' : 'Nenhuma instância';
+
+  const proxyOk = allInstances.filter((i) => i.network?.status === 'ok').length;
+  const proxyBlocked = allInstances.filter((i) => i.network?.status === 'blocked').length;
+  const proxyPct = total ? Math.round((proxyOk / total) * 100) : 0;
+  els.ghProxy.textContent = total ? `${proxyPct}%` : '—';
+  els.ghProxyHint.textContent = `${proxyOk} ok • ${proxyBlocked} bloqueados`;
+
+  const ratios = allInstances
+    .map((i) => Number(i.risk?.runtime?.ratio))
+    .filter((n) => Number.isFinite(n));
+  const avgRatio = ratios.length ? Math.round((ratios.reduce((a, b) => a + b, 0) / ratios.length) * 100) : null;
+  els.ghRisk.textContent = avgRatio != null ? `${avgRatio}%` : '—';
+  els.ghRiskHint.textContent = 'Unknown ratio médio';
+  els.ghRisk.classList.toggle('text-amber-600', avgRatio != null && avgRatio >= 60);
+  els.ghRisk.classList.toggle('text-emerald-600', avgRatio != null && avgRatio < 60);
+
+  const queue = queueSnapshot;
+  if (queue && typeof queue === 'object' && queue.enabled !== false) {
+    const waiting = queue.waiting ?? queue.metrics?.waiting ?? queue?.waiting ?? 0;
+    const activeJobs = queue.active ?? queue.metrics?.active ?? 0;
+    const totalQueue = waiting + activeJobs;
+    els.ghQueue.textContent = `${totalQueue} msgs`;
+    const eta = queue.metrics?.etaSeconds ?? queue.etaSeconds ?? null;
+    const etaLabel = eta != null ? `${Math.ceil(eta / 60)} min` : 'calculando…';
+    els.ghQueueHint.textContent = `Na fila: ${waiting}, em execução: ${activeJobs} • ETA: ${etaLabel}`;
+    els.ghQueue.classList.toggle('text-rose-600', totalQueue > 1000);
+    els.ghQueue.classList.toggle('text-amber-600', totalQueue > 200 && totalQueue <= 1000);
+    els.ghQueue.classList.toggle('text-slate-700', totalQueue <= 200);
+  } else {
+    els.ghQueue.textContent = 'Direta';
+    els.ghQueueHint.textContent = 'Fila desativada';
+    els.ghQueue.classList.remove('text-rose-600', 'text-amber-600');
+  }
+}
+
+function safeNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+async function saveProxyConfig(iid) {
+  const card = findCardByIid(iid);
+  if (!card) return;
+  const proxyInput = card.querySelector('[data-field="proxy"]');
+  const proxyUrl = proxyInput?.value?.trim() || '';
+  if (!proxyUrl) {
+    showError('Informe uma URL de proxy');
+    return;
+  }
+  const btn = card.querySelector('[data-act="save-proxy"]');
+  setBusy(btn, true, 'Validando proxy…');
+  try {
+    requireKey();
+    await fetchJSON(`/instances/${iid}/proxy`, true, {
+      method: 'POST',
+      body: JSON.stringify({ proxyUrl }),
+    });
+    setBadgeState('update', 'Proxy atualizado', 4000);
+    await Promise.all([
+      refreshInstances({ silent: true, withSkeleton: false }),
+      refreshQueueMetrics(),
+    ]);
+  } catch (err) {
+    console.error('[instances] erro ao salvar proxy', err);
+    showError('Falha ao salvar proxy');
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
+async function saveRiskConfig(iid) {
+  const card = findCardByIid(iid);
+  if (!card) return;
+  const thresholdInput = card.querySelector('[data-field="risk-threshold"]');
+  const interleaveInput = card.querySelector('[data-field="risk-interleave"]');
+  const safeInput = card.querySelector('[data-field="risk-safe"]');
+
+  const threshold = safeNumber(thresholdInput?.value, 0.7);
+  const interleaveEvery = Math.max(1, Math.trunc(safeNumber(interleaveInput?.value, 5)));
+  const safeContacts = (safeInput?.value || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const btn = card.querySelector('[data-act="save-risk"]');
+  setBusy(btn, true, 'Salvando…');
+  try {
+    requireKey();
+    await fetchJSON(`/instances/${iid}/risk`, true, {
+      method: 'POST',
+      body: JSON.stringify({ threshold, interleaveEvery, safeContacts }),
+    });
+    setBadgeState('update', 'Configurações de risco atualizadas', 4000);
+    await refreshInstances({ silent: true, withSkeleton: false });
+  } catch (err) {
+    console.error('[instances] erro ao salvar risco', err);
+    showError('Falha ao salvar risco');
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
+function applyModePreset(card, mode) {
+  const thresholdInput = card.querySelector('[data-field="risk-threshold"]');
+  const interleaveInput = card.querySelector('[data-field="risk-interleave"]');
+  if (!thresholdInput || !interleaveInput) return;
+  if (mode === 'ninja') {
+    thresholdInput.value = '0.55';
+    interleaveInput.value = '2';
+  } else if (mode === 'turbo') {
+    thresholdInput.value = '0.9';
+    interleaveInput.value = '10';
+  } else {
+    thresholdInput.value = '0.7';
+    interleaveInput.value = '5';
+  }
+}
+
+function handleCardEvents(event) {
+  const target = event.target;
+  if (!target || !(target instanceof HTMLElement)) return;
+  const act = target.dataset.act;
+  if (!act) return;
+  const iid = target.dataset.iid;
+  if (!iid) return;
+
+  if (act === 'save-proxy') {
+    event.preventDefault();
+    void saveProxyConfig(iid);
+    return;
+  }
+  if (act === 'save-risk') {
+    event.preventDefault();
+    void saveRiskConfig(iid);
+    return;
+  }
+  if (act === 'mode' && event.type === 'change') {
+    const card = findCardByIid(iid);
+  if (card) applyModePreset(card, target.value);
+  }
+}
+
+function getSelectedInstanceId() {
+  return els.selInstance?.value || '';
+}
+
+async function callInstanceAction(path, button, busyLabel, successMsg, errorMsg) {
+  const iid = getSelectedInstanceId();
+  if (!iid) {
+    showError('Selecione uma instância primeiro.');
+    return null;
+  }
+
+  setBusy(button, true, busyLabel);
+  try {
+    requireKey();
+    const payload = await fetchJSON(`/instances/${iid}${path}`, true, { method: 'POST' });
+    if (successMsg) setBadgeState('update', successMsg, 4000);
+    await Promise.all([
+      refreshInstances({ silent: true, withSkeleton: false, skipSelected: false }),
+      refreshSelected({ silent: true, withSkeleton: false }),
+    ]);
+    return payload;
+  } catch (err) {
+    console.error('[instances] ação rápida falhou', err);
+    showError(errorMsg || 'Ação não concluída');
+    return null;
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+if (typeof document !== 'undefined') {
+  if (els.cards) {
+    els.cards.addEventListener('click', handleCardEvents);
+    els.cards.addEventListener('change', handleCardEvents);
+  }
+
+  if (els.btnPauseQueue) {
+    els.btnPauseQueue.addEventListener('click', () => {
+      void callInstanceAction('/risk/pause', els.btnPauseQueue, 'Pausando…', 'Fila pausada pelo guardião.', 'Falha ao pausar fila');
+    });
+  }
+  if (els.btnResumeQueue) {
+    els.btnResumeQueue.addEventListener('click', () => {
+      void callInstanceAction('/risk/resume', els.btnResumeQueue, 'Retomando…', 'Fila retomada.', 'Falha ao retomar fila');
+    });
+  }
+  if (els.btnSendSafe) {
+    els.btnSendSafe.addEventListener('click', () => {
+      void callInstanceAction('/risk/send-safe', els.btnSendSafe, 'Enviando…', 'Safe enviado para diluir risco.', 'Falha ao enviar safe');
+    });
+  }
+  if (els.btnRevalidateProxy) {
+    els.btnRevalidateProxy.addEventListener('click', () => {
+      void callInstanceAction('/proxy/revalidate', els.btnRevalidateProxy, 'Revalidando…', 'Proxy revalidado.', 'Falha ao revalidar proxy');
+    });
+  }
 }
 
 export async function handleSaveMetadata(iid) {

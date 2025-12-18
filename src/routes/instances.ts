@@ -953,6 +953,43 @@ router.post(
   }),
 );
 
+router.post(
+  '/:iid/risk/pause',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!inst) {
+      res.status(404).json({ error: 'instance_not_found' });
+      return;
+    }
+    riskGuardian.pause(inst.id);
+    res.json({ ok: true, risk: buildRiskSnapshot(inst) });
+  }),
+);
+
+router.post(
+  '/:iid/risk/send-safe',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!ensureInstanceOnline(inst, res)) return;
+    const safeContacts = Array.isArray(inst.risk?.safeContacts) ? inst.risk.safeContacts : [];
+    if (!safeContacts.length) {
+      res.status(400).json({ error: 'no_safe_contacts' });
+      return;
+    }
+    const target = safeContacts[0];
+    const messageRaw = (req.body as any)?.message;
+    const message = typeof messageRaw === 'string' && messageRaw.trim() ? messageRaw.trim() : 'Safe ping automático';
+    const msgService = inst.context?.messageService;
+    if (!msgService) {
+      res.status(503).json({ error: 'message_service_unavailable' });
+      return;
+    }
+    await msgService.sendText(target, message, {});
+    riskGuardian.afterSend(inst.id, target, true);
+    res.json({ ok: true, target, message });
+  }),
+);
+
 router.get('/:iid/proxy', (req, res) => {
   const inst = getInstance(req.params.iid);
   if (!inst) {
@@ -992,6 +1029,37 @@ router.post(
       if (inst.sock && result.status !== 'ok') {
         await stopWhatsAppInstance(inst, { logout: false });
       }
+      res.json({ ok: true, network: inst.network });
+    } catch (err: any) {
+      res.status(500).json({ error: 'proxy_validation_failed', detail: err?.message });
+    }
+  }),
+);
+
+router.post(
+  '/:iid/proxy/revalidate',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!inst) {
+      res.status(404).json({ error: 'instance_not_found' });
+      return;
+    }
+    const proxyUrl = inst.network?.proxyUrl;
+    if (!proxyUrl) {
+      res.status(400).json({ error: 'proxy_missing' });
+      return;
+    }
+    try {
+      const result = await import('../network/proxyValidator.js').then((m) => m.validateProxyUrl(proxyUrl));
+      inst.network.ip = result.ip;
+      inst.network.asn = result.asn;
+      inst.network.isp = result.isp;
+      inst.network.latencyMs = result.latencyMs;
+      inst.network.status = result.status === 'ok' ? 'ok' : result.status === 'blocked' ? 'blocked' : 'failed';
+      inst.network.blockReason = result.blockReason;
+      inst.network.lastCheckAt = result.lastCheckAt;
+      inst.network.validatedAt = result.status === 'ok' ? result.lastCheckAt : inst.network.validatedAt;
+      await saveInstancesIndex();
       res.json({ ok: true, network: inst.network });
     } catch (err: any) {
       res.status(500).json({ error: 'proxy_validation_failed', detail: err?.message });

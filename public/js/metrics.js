@@ -57,6 +57,109 @@ function percent(value) {
   return Math.round(clamped * 100);
 }
 
+function formatEta(seconds) {
+  if (!Number.isFinite(seconds)) return 'calculando…';
+  if (seconds < 60) return `${Math.ceil(seconds)}s`;
+  return `${Math.ceil(seconds / 60)} min`;
+}
+
+export function resetInspector() {
+  if (els.inspectorProxyValue) {
+    els.inspectorProxyValue.className = 'text-sm font-semibold text-slate-800';
+    els.inspectorProxyValue.textContent = 'Aguardando instância…';
+  }
+  if (els.inspectorProxyHint) els.inspectorProxyHint.textContent = 'Validação ASN e latência aparecerão aqui.';
+  if (els.inspectorRiskValue) {
+    els.inspectorRiskValue.className = 'text-sm font-semibold text-slate-800';
+    els.inspectorRiskValue.textContent = '—';
+  }
+  if (els.inspectorRiskHint) els.inspectorRiskHint.textContent = 'Unknown ratio aguardando dados.';
+  if (els.inspectorQueueValue) {
+    els.inspectorQueueValue.className = 'text-sm font-semibold text-slate-800';
+    els.inspectorQueueValue.textContent = '—';
+  }
+  if (els.inspectorQueueHint) els.inspectorQueueHint.textContent = 'ETA e pausas do guardião.';
+  if (els.inspectorLogs) els.inspectorLogs.textContent = 'Selecione uma instância para ver os últimos eventos.';
+}
+
+function updateInspector(snapshot) {
+  if (!els.inspectorProxy) return;
+  if (!snapshot) {
+    resetInspector();
+    return;
+  }
+
+  const network = snapshot.network || {};
+  const risk = snapshot.risk || {};
+  const riskCfg = risk.config || {};
+  const riskRuntime = risk.runtime || {};
+  const queue = snapshot.queue || {};
+  const safeCount = Array.isArray(riskCfg.safeContacts) ? riskCfg.safeContacts.length : 0;
+
+  const latency = network.latencyMs ?? network.latency ?? null;
+  const proxyStatus = network.status || 'unknown';
+  const proxyLabel = proxyStatus === 'ok' ? 'Residencial' : proxyStatus === 'blocked' ? 'Datacenter' : proxyStatus;
+  const ispLabel = network.isp || network.asn || 'Sem dados de ISP';
+  const proxyClass =
+    proxyStatus === 'ok' ? 'text-emerald-700' : proxyStatus === 'blocked' ? 'text-rose-700' : 'text-amber-700';
+
+  if (els.inspectorProxyValue) {
+    els.inspectorProxyValue.className = `text-sm font-semibold ${proxyClass}`;
+    els.inspectorProxyValue.textContent = `${proxyLabel} • ${ispLabel}`;
+  }
+  if (els.inspectorProxyHint) {
+    const proxyParts = [];
+    if (network.asn) proxyParts.push(`ASN ${network.asn}`);
+    if (latency != null) proxyParts.push(`${latency} ms`);
+    els.inspectorProxyHint.textContent = proxyParts.length ? proxyParts.join(' • ') : 'Validação ASN e latência aparecerão aqui.';
+  }
+
+  const ratioVal = Number(riskRuntime.ratio);
+  const ratioPct = Number.isFinite(ratioVal) ? Math.round(ratioVal * 100) : null;
+  const paused = Boolean(queue.paused || riskRuntime.paused);
+  const riskClass = paused ? 'text-rose-700' : ratioPct != null && ratioPct >= 60 ? 'text-amber-700' : 'text-emerald-700';
+
+  if (els.inspectorRiskValue) {
+    els.inspectorRiskValue.className = `text-sm font-semibold ${riskClass}`;
+    els.inspectorRiskValue.textContent = ratioPct != null ? `${ratioPct}% desconhecidos` : 'Sem dados';
+  }
+  if (els.inspectorRiskHint) {
+    els.inspectorRiskHint.textContent = paused
+      ? 'Fila pausada pelo guardião de risco'
+      : `Threshold ${riskCfg.threshold ?? 0.7} • Safe ${safeCount}`;
+  }
+
+  const queueEnabled = queue.enabled !== false && queue.status !== 'disabled';
+  const waiting = queue.waiting ?? queue.metrics?.waiting ?? queue.count ?? 0;
+  const active = queue.active ?? queue.metrics?.active ?? queue.activeCount ?? 0;
+  const eta = queue.metrics?.etaSeconds ?? queue.etaSeconds;
+  const queueClass = paused ? 'text-amber-700' : queueEnabled ? 'text-emerald-700' : 'text-slate-700';
+
+  if (els.inspectorQueueValue) {
+    els.inspectorQueueValue.className = `text-sm font-semibold ${queueClass}`;
+    els.inspectorQueueValue.textContent = queueEnabled ? `${waiting} pend. / ${active} em exec.` : 'Envio direto';
+  }
+  if (els.inspectorQueueHint) {
+    const parts = [];
+    if (queueEnabled) {
+      if (paused) parts.push('Guardião pausado');
+      parts.push(`ETA ${formatEta(eta)}`);
+    } else {
+      parts.push('Fila desativada');
+    }
+    els.inspectorQueueHint.textContent = parts.join(' • ');
+  }
+
+  if (els.inspectorLogs) {
+    const lines = [
+      `Proxy: ${proxyLabel} (${ispLabel})${latency != null ? ` • ${latency} ms` : ''}`,
+      `Risco: ${ratioPct != null ? `${ratioPct}%` : 'sem dados'}${paused ? ' • pausado' : ''}`,
+      queueEnabled ? `Fila: ${waiting} pend. / ${active} exec. • ETA ${formatEta(eta)}` : 'Fila: envio direto',
+    ];
+    els.inspectorLogs.textContent = lines.join('\n');
+  }
+}
+
 function closeInstanceStream() {
   if (instanceEventSource) {
     try {
@@ -366,6 +469,7 @@ function applyInstanceSnapshot(snapshot, options = {}) {
   currentConnectionState = connection.state;
   setStatusBadge(connection, snapshot.name);
   setSelectedInstanceActionsDisabled(iid, isInstanceLocked(iid));
+  updateInspector(snapshot);
 
   if (options.refreshNote && els.noteCard) {
     applyInstanceNote(snapshot);
@@ -546,6 +650,7 @@ export async function refreshSelected(options = {}) {
   if (!iid) {
     toggleHidden(els.qrImg, true);
     setQrState('idle', 'Nenhuma instância selecionada.');
+    resetInspector();
     resetNotes();
     resetChart();
     resetLogs();
