@@ -1,6 +1,6 @@
 import axios from 'axios';
 import sharp from 'sharp';
-import type { AnyMessageContent } from '@whiskeysockets/baileys';
+import type { AnyMessageContent, WASocket } from '@whiskeysockets/baileys';
 import { Buffer } from 'node:buffer';
 import { createError } from './messageErrors.js';
 
@@ -23,7 +23,7 @@ export interface SendMediaOptions {
   ptt?: boolean | null;
   gifPlayback?: boolean | null;
   timeoutMs?: number;
-  messageOptions?: Parameters<AnyMessageContent['contextInfo']>[0];
+  messageOptions?: Parameters<WASocket['sendMessage']>[2];
 }
 
 export interface BuiltMediaContent {
