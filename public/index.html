@@ -148,6 +148,22 @@
           </div>
           <span id="instanceCounter" class="text-sm text-slate-500">0/0</span>
         </div>
+        <div id="instanceActionBar" class="hidden sticky top-2 z-10 border border-slate-200 bg-white/90 backdrop-blur rounded-xl px-4 py-3 shadow flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-3 min-w-0">
+            <div class="flex flex-col min-w-0">
+              <span id="iabName" class="text-sm font-semibold text-slate-900 truncate">Selecione uma instância</span>
+              <span id="iabUpdated" class="text-xs text-slate-500 truncate">—</span>
+            </div>
+            <span id="iabStatus" class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700 whitespace-nowrap">—</span>
+          </div>
+          <div class="flex flex-wrap gap-2 justify-end">
+            <button id="iabSave" data-act="save" class="px-3 py-2 text-xs bg-sky-600 hover:bg-sky-700 text-white rounded-lg">Salvar</button>
+            <button id="iabQr" data-act="qr" class="px-3 py-2 text-xs border border-slate-200 rounded-lg">Ver QR</button>
+            <button id="iabLogout" data-act="logout" class="px-3 py-2 text-xs border border-slate-200 rounded-lg">Logout</button>
+            <button id="iabWipe" data-act="wipe" class="px-3 py-2 text-xs border border-amber-200 text-amber-800 rounded-lg">Wipe</button>
+            <button id="iabDelete" data-act="delete" class="px-3 py-2 text-xs bg-rose-500 hover:bg-rose-600 text-white rounded-lg">Excluir</button>
+          </div>
+        </div>
         <div id="cardsSkeleton" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 auto-rows-fr gap-4">
           <div class="p-4 bg-white/70 backdrop-blur border border-slate-100 rounded-2xl shadow-lg space-y-3 animate-pulse">
             <div class="h-4 bg-slate-200 rounded w-1/2"></div>

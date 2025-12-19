@@ -21,6 +21,7 @@ import {
   showError,
   toggleHidden,
   updateInstanceLocksFromSnapshot,
+  setActionBarInstance,
 } from './state.js';
 
 let hasLoadedInstances = false;
@@ -37,6 +38,11 @@ let filterHandlersBound = false;
 let scrollRaf = null;
 let measureRaf = null;
 let resizeRaf = null;
+
+export function getInstanceFromCache(iid) {
+  if (!iid) return null;
+  return allInstances.find((inst) => inst?.id === iid) || null;
+}
 
 const MAX_RENDERED_ITEMS = 50;
 const VIRTUAL_OVERSCAN_ROWS = 2;
@@ -223,6 +229,12 @@ function updateInstanceCounter() {
   if (els.instanceCounter) {
     els.instanceCounter.textContent = `${INSTANCE_VIEW.filtered}/${INSTANCE_VIEW.total}`;
   }
+}
+
+function syncActionBarWithSelected() {
+  const selectedId = els.selInstance?.value || '';
+  const inst = allInstances.find((item) => item?.id === selectedId) || null;
+  setActionBarInstance(inst);
 }
 
 function updateInstanceSelect(prevSelected) {
@@ -457,25 +469,28 @@ function createInstanceCard(inst, selectedId) {
     <div class="flex items-start justify-between gap-3">
       <div class="flex-1 min-w-0 space-y-1">
         <label class="text-xs font-medium text-slate-500">Nome</label>
-        <input data-field="name" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm truncate" value="${escapeHtml(inst.name)}" />
+        <input data-field="name" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm font-semibold text-slate-900 truncate" value="${escapeHtml(inst.name)}" />
         <p class="text-[11px] text-slate-500 truncate">WhatsApp: ${userId}</p>
       </div>
       <div class="flex flex-col items-end gap-1 shrink-0 text-right">
-        <span class="px-2 py-0.5 rounded text-xs whitespace-nowrap ${badgeClass}">${escapeHtml(statusLabel)}</span>
+        <div class="flex items-center gap-2 flex-wrap justify-end">
+          <span class="px-2 py-0.5 rounded text-xs whitespace-nowrap ${badgeClass}">${escapeHtml(statusLabel)}</span>
+          <button data-act="select" data-iid="${inst.id}" class="px-2 py-1 text-[11px] border border-slate-200 rounded-lg hover:border-slate-300">Selecionar</button>
+        </div>
         <span class="text-[11px] text-slate-500 whitespace-nowrap">${connection.updatedText || '—'}</span>
       </div>
     </div>
 
-    <div class="grid grid-cols-2 gap-2 text-xs">
+    <div class="grid grid-cols-2 gap-2 text-xs auto-rows-fr">
       <div class="rounded-lg p-3 border ${queueBg} min-h-[92px]">
         <p class="text-[11px] uppercase tracking-wide text-slate-500">Fila</p>
-        <p class="text-sm font-semibold text-slate-800 truncate">${queueSummary}</p>
+        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${queueSummary}</p>
         <p class="text-[11px] text-slate-500 truncate">ETA: ${etaShort} • ${queueLabel}</p>
         <p class="text-[11px] text-slate-500 truncate">Modo: ${modeGuess}</p>
       </div>
       <div class="rounded-lg p-3 border bg-slate-50 min-h-[92px]">
         <p class="text-[11px] uppercase tracking-wide text-slate-500">Risco</p>
-        <p class="text-sm font-semibold text-slate-800">${riskRatio}% desconhecidos</p>
+        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${riskRatio}% desconhecidos</p>
         <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-1">
           <div class="h-full ${riskBarClass}" style="width:${riskWidth}%"></div>
         </div>
@@ -483,7 +498,7 @@ function createInstanceCard(inst, selectedId) {
       </div>
       <div class="rounded-lg p-3 border bg-slate-50 min-h-[92px]">
         <p class="text-[11px] uppercase tracking-wide text-slate-500">Limite</p>
-        <p class="text-sm font-semibold text-slate-800">${usagePercent}% em uso</p>
+        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${usagePercent}% em uso</p>
         <div class="h-2 bg-slate-100 rounded-full overflow-hidden mt-1">
           <div class="h-full ${meterColor}" style="width:${usageWidth}%"></div>
         </div>
@@ -491,7 +506,7 @@ function createInstanceCard(inst, selectedId) {
       </div>
       <div class="rounded-lg p-3 border ${proxyBg} min-h-[92px]">
         <p class="text-[11px] uppercase tracking-wide ${proxyText}">Rede</p>
-        <p class="text-sm font-semibold text-slate-800 truncate">${escapeHtml(network.isp || network.asn || '—')}</p>
+        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${escapeHtml(network.isp || network.asn || '—')}</p>
         <p class="text-[11px] text-slate-500 truncate">Latência: ${network.latencyMs != null ? escapeHtml(String(network.latencyMs)) + ' ms' : '—'}</p>
         <p class="text-[11px] text-slate-500 truncate">Status: ${escapeHtml(network.status || 'unknown')}</p>
       </div>
@@ -500,12 +515,12 @@ function createInstanceCard(inst, selectedId) {
     <div class="grid grid-cols-2 gap-2 text-xs">
       <div class="rounded-lg p-3 border bg-slate-50">
         <p class="text-[11px] uppercase tracking-wide text-slate-500">Guardião</p>
-        <p class="text-sm font-semibold text-slate-800 truncate">${queueInfo.paused ? 'Pausado' : 'Ativo'}</p>
+        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${queueInfo.paused ? 'Pausado' : 'Ativo'}</p>
         <p class="text-[11px] text-slate-500 truncate">Safe: ${safeCount} • Modo: ${modeGuess}</p>
       </div>
       <div class="rounded-lg p-3 border bg-slate-50">
         <p class="text-[11px] uppercase tracking-wide text-slate-500">Tier & id</p>
-        <p class="text-sm font-semibold text-slate-800 truncate">${inst.id}</p>
+        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${inst.id}</p>
         <p class="text-[11px] text-slate-500 truncate">${tierBadge ? 'Tier ativo' : 'Sem tier'}</p>
       </div>
     </div>
@@ -545,21 +560,12 @@ function createInstanceCard(inst, selectedId) {
             <button data-act="save-risk" data-iid="${inst.id}" class="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg">Salvar segurança</button>
           </div>
         </div>
-        <div>
-          <label class="text-xs font-medium text-slate-500">Notas</label>
-          <textarea data-field="note" data-iid="${inst.id}" rows="2" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" placeholder="Observações desta instância">${escapeHtml(noteVal)}</textarea>
-        </div>
+      <div>
+        <label class="text-xs font-medium text-slate-500">Notas</label>
+        <textarea data-field="note" data-iid="${inst.id}" rows="2" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" placeholder="Observações desta instância">${escapeHtml(noteVal)}</textarea>
       </div>
-    </details>
-
-    <div class="flex items-center justify-end gap-2 flex-wrap">
-      <button data-act="save" data-iid="${inst.id}" class="px-3 py-1.5 text-sm bg-sky-600 hover:bg-sky-700 text-white rounded-lg">Salvar</button>
-      <button data-act="select" data-iid="${inst.id}" class="px-3 py-1.5 text-sm border rounded-lg">Selecionar</button>
-      <button data-act="qr" data-iid="${inst.id}" class="px-3 py-1.5 text-sm border rounded-lg">Ver QR</button>
-      <button data-act="logout" data-iid="${inst.id}" class="px-3 py-1.5 text-sm border rounded-lg">Logout</button>
-      <button data-act="wipe" data-iid="${inst.id}" class="px-3 py-1.5 text-sm border rounded-lg">Wipe</button>
-      <button data-act="delete" data-iid="${inst.id}" class="px-3 py-1.5 text-sm bg-rose-500 hover:bg-rose-600 text-white rounded-lg">Excluir</button>
     </div>
+    </details>
   `;
 
   return { card, locked };
@@ -690,6 +696,7 @@ function applyFiltersAndRender({ keepSelection = true } = {}) {
       setSelectedInstanceActionsDisabled(currentSelected, isInstanceLocked(currentSelected));
     }
   }
+  syncActionBarWithSelected();
 }
 
 function updateFilterState(key, value) {
@@ -787,11 +794,12 @@ export async function refreshInstances(options = {}) {
         toggleHidden(els.qrImg, true);
         setQrState('idle', 'Selecione uma instância para visualizar o QR.');
         setBadgeState('info', 'Crie uma instância para começar', 4000);
-      await refreshQueueMetrics();
-      await refreshHealthMetrics();
-      updateGlobalHealth();
-      result = { changed: meta.listChanged || meta.selectedChanged, selectedChanged: meta.selectedChanged };
-      return result;
+        setActionBarInstance(null);
+        await refreshQueueMetrics();
+        await refreshHealthMetrics();
+        updateGlobalHealth();
+        result = { changed: meta.listChanged || meta.selectedChanged, selectedChanged: meta.selectedChanged };
+        return result;
     }
 
       hasLoadedInstances = true;
@@ -1068,7 +1076,9 @@ export async function handleSaveMetadata(iid) {
     return;
   }
 
-  const btn = card.querySelector(`[data-act="save"][data-iid="${iid}"]`);
+  const btn =
+    card.querySelector(`[data-act="save"][data-iid="${iid}"]`) ||
+    document.querySelector(`#iabSave[data-act="save"]`);
   setBusy(btn, true, 'Salvando…');
   try {
     requireKey();

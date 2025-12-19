@@ -7,6 +7,15 @@ export const els = {
   btnNew: q('btnNew'),
   cards: q('cards'),
   cardsSkeleton: q('cardsSkeleton'),
+  instanceActionBar: q('instanceActionBar'),
+  iabName: q('iabName'),
+  iabStatus: q('iabStatus'),
+  iabUpdated: q('iabUpdated'),
+  iabSave: q('iabSave'),
+  iabQr: q('iabQr'),
+  iabLogout: q('iabLogout'),
+  iabWipe: q('iabWipe'),
+  iabDelete: q('iabDelete'),
   ghInstances: q('ghInstances'),
   ghInstancesHint: q('ghInstancesHint'),
   ghQueue: q('ghQueue'),
@@ -555,7 +564,18 @@ export function setInstanceActionsDisabled(iid, disabled) {
 
 export function setSelectedInstanceActionsDisabled(iid, disabled) {
   if (els.selInstance?.value !== iid) return;
-  const buttons = [els.btnLogout, els.btnWipe, els.btnPair, els.btnSend, els.btnRefreshLogs].filter(Boolean);
+  const buttons = [
+    els.btnLogout,
+    els.btnWipe,
+    els.btnPair,
+    els.btnSend,
+    els.btnRefreshLogs,
+    els.iabSave,
+    els.iabQr,
+    els.iabLogout,
+    els.iabWipe,
+    els.iabDelete,
+  ].filter(Boolean);
   toggleButtonsDisabled(buttons, disabled);
 }
 
@@ -599,6 +619,51 @@ export function updateInstanceLocksFromSnapshot(instances = []) {
       unlockInstanceActions(inst.id);
     }
   });
+}
+
+export function setActionBarInstance(inst) {
+  if (!els.instanceActionBar) return;
+  const hasInstance = inst && inst.id;
+  els.instanceActionBar.classList.toggle('hidden', !hasInstance);
+  els.instanceActionBar.classList.toggle('flex', !!hasInstance);
+  const defaultName = 'Selecione uma instância';
+  if (!hasInstance) {
+    if (els.iabName) els.iabName.textContent = defaultName;
+    if (els.iabUpdated) els.iabUpdated.textContent = '—';
+    if (els.iabStatus) {
+      els.iabStatus.textContent = '—';
+      els.iabStatus.className = 'px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700 whitespace-nowrap';
+    }
+    const buttons = [els.iabSave, els.iabQr, els.iabLogout, els.iabWipe, els.iabDelete].filter(Boolean);
+    toggleButtonsDisabled(buttons, true);
+    buttons.forEach((btn) => {
+      if (!btn) return;
+      delete btn.dataset.iid;
+    });
+    return;
+  }
+
+  const connection = describeConnection(inst);
+  if (els.iabName) {
+    const label = inst.name || inst.id || defaultName;
+    els.iabName.textContent = label;
+    els.iabName.title = label;
+  }
+  if (els.iabUpdated) {
+    els.iabUpdated.textContent = connection.updatedText || '—';
+  }
+  if (els.iabStatus) {
+    const badgeClass = connection.meta?.badgeClass || 'bg-slate-100 text-slate-700';
+    const label = connection.meta?.label || 'Desconhecido';
+    els.iabStatus.textContent = label;
+    els.iabStatus.className = `px-2 py-0.5 rounded text-xs whitespace-nowrap ${badgeClass}`;
+  }
+
+  const buttons = [els.iabSave, els.iabQr, els.iabLogout, els.iabWipe, els.iabDelete].filter(Boolean);
+  buttons.forEach((btn) => {
+    btn.dataset.iid = inst.id;
+  });
+  toggleButtonsDisabled(buttons, isInstanceLocked(inst.id));
 }
 
 export function setCardsLoading(isLoading) {

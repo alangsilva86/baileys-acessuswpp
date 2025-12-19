@@ -1,5 +1,5 @@
 import { fetchJSON, requireKey } from './api.js';
-import { handleSaveMetadata, refreshInstances } from './instances.js';
+import { handleSaveMetadata, refreshInstances, getInstanceFromCache } from './instances.js';
 import { refreshSelected, onInstanceEvent } from './metrics.js';
 import {
   els,
@@ -13,6 +13,7 @@ import {
   setSelectedInstanceActionsDisabled,
   showError,
   validateE164,
+  setActionBarInstance,
 } from './state.js';
 
 function currentInstanceId() {
@@ -258,6 +259,8 @@ function bindDocumentShortcuts() {
 
     if (act === 'select') {
       if (els.selInstance) els.selInstance.value = iid;
+      const cached = getInstanceFromCache(iid);
+      setActionBarInstance(cached);
       await refreshSelected({ withSkeleton: true });
       return;
     }
@@ -268,6 +271,8 @@ function bindDocumentShortcuts() {
         return;
       }
       if (els.selInstance) els.selInstance.value = iid;
+      const cached = getInstanceFromCache(iid);
+      setActionBarInstance(cached);
       await refreshSelected({ withSkeleton: true });
       setBadgeState('info', 'QR atualizado', 3000);
       return;
@@ -454,6 +459,9 @@ function bindSelectionChange() {
       els.criticalConfirmInput.value = '';
       syncCriticalButtons();
     }
+    const current = els.selInstance.value;
+    const cached = getInstanceFromCache(current);
+    setActionBarInstance(cached);
     refreshSelected({ withSkeleton: true });
   });
 }
