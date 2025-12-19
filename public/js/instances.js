@@ -402,7 +402,7 @@ function createInstanceCard(inst, selectedId) {
   })();
 
   const card = document.createElement('article');
-  card.className = 'p-4 bg-white rounded-2xl shadow transition ring-emerald-200/50 space-y-3';
+  card.className = 'p-4 bg-white/80 backdrop-blur border border-slate-100 rounded-2xl shadow-lg transition ring-emerald-200/50 space-y-3 h-full';
   if (inst.id === selectedId) card.classList.add('ring-2', 'ring-emerald-200');
   const locked = isInstanceLocked(inst.id);
   card.classList.toggle('opacity-75', locked);

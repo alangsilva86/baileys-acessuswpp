@@ -15,6 +15,32 @@ import {
   validateE164,
 } from './state.js';
 
+function currentInstanceId() {
+  return els.selInstance?.value || '';
+}
+
+function hasCriticalToken(showFeedback = false) {
+  const iid = currentInstanceId();
+  if (!iid || !els.criticalConfirmInput) return false;
+  const token = els.criticalConfirmInput.value.trim();
+  const normalized = iid.toLowerCase();
+  const ok = Boolean(token && (token.toLowerCase() === normalized || token.toUpperCase() === 'WIPE'));
+  if (!ok && showFeedback) {
+    showError('Confirme digitando o nome da instância ou “WIPE”.');
+  }
+  return ok;
+}
+
+function syncCriticalButtons() {
+  const allow = hasCriticalToken(false);
+  const buttons = [els.btnLogout, els.btnWipe, els.btnPair].filter(Boolean);
+  buttons.forEach((btn) => {
+    btn.disabled = !allow;
+    btn.classList.toggle('opacity-50', !allow);
+    btn.classList.toggle('cursor-not-allowed', !allow);
+  });
+}
+
 function handleInstanceOfflineError(err) {
   if (!err || typeof err !== 'object') return false;
   const status = Number(err.status);
@@ -327,6 +353,7 @@ function bindHeaderActions() {
   if (els.btnLogout) {
     els.btnLogout.addEventListener('click', async () => {
       try {
+        if (!hasCriticalToken(true)) return;
         if (els.inpApiKey) {
           localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
         }
@@ -335,12 +362,19 @@ function bindHeaderActions() {
         const key = requireKey();
         const ok = await performInstanceAction('logout', iid, key, { name: iid, button: els.btnLogout });
         if (ok && els.qrHint) els.qrHint.textContent = 'Desconectando… aguarde novo QR.';
-      } catch {}
+      } catch {
+      } finally {
+        if (els.criticalConfirmInput) {
+          els.criticalConfirmInput.value = '';
+          syncCriticalButtons();
+        }
+      }
     });
   }
   if (els.btnWipe) {
     els.btnWipe.addEventListener('click', async () => {
       try {
+        if (!hasCriticalToken(true)) return;
         if (els.inpApiKey) {
           localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
         }
@@ -349,12 +383,19 @@ function bindHeaderActions() {
         const key = requireKey();
         const ok = await performInstanceAction('wipe', iid, key, { name: iid, button: els.btnWipe });
         if (ok && els.qrHint) els.qrHint.textContent = 'Limpando sessão… o serviço reiniciará para gerar novo QR.';
-      } catch {}
+      } catch {
+      } finally {
+        if (els.criticalConfirmInput) {
+          els.criticalConfirmInput.value = '';
+          syncCriticalButtons();
+        }
+      }
     });
   }
   if (els.btnPair) {
     els.btnPair.addEventListener('click', async () => {
       try {
+        if (!hasCriticalToken(true)) return;
         const iid = els.selInstance?.value;
         if (!iid) {
           showError('Selecione uma instância.');
@@ -397,6 +438,10 @@ function bindHeaderActions() {
         alert('Falha ao gerar código: ' + err.message);
       } finally {
         setBusy(els.btnPair, false);
+        if (els.criticalConfirmInput) {
+          els.criticalConfirmInput.value = '';
+          syncCriticalButtons();
+        }
       }
     });
   }
@@ -404,7 +449,13 @@ function bindHeaderActions() {
 
 function bindSelectionChange() {
   if (!els.selInstance) return;
-  els.selInstance.addEventListener('change', () => refreshSelected({ withSkeleton: true }));
+  els.selInstance.addEventListener('change', () => {
+    if (els.criticalConfirmInput) {
+      els.criticalConfirmInput.value = '';
+      syncCriticalButtons();
+    }
+    refreshSelected({ withSkeleton: true });
+  });
 }
 
 function initStreamReactions() {
@@ -440,4 +491,8 @@ export function initSessionActions() {
   bindHeaderActions();
   bindSelectionChange();
   initStreamReactions();
+  if (els.criticalConfirmInput) {
+    els.criticalConfirmInput.addEventListener('input', () => syncCriticalButtons());
+    syncCriticalButtons();
+  }
 }

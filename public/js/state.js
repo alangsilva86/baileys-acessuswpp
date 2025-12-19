@@ -22,6 +22,20 @@ export const els = {
   instanceSort: q('instanceSort'),
   instanceCounter: q('instanceCounter'),
 
+  // Estado selecionado
+  selectedStateSection: q('selectedStateSection'),
+  selectedStateContent: q('selectedStateContent'),
+  selectedStateEmpty: q('selectedStateEmpty'),
+  selectedName: q('selectedName'),
+  selectedBadge: q('selectedBadge'),
+  selectedSummary: q('selectedSummary'),
+  selectedUpdated: q('selectedUpdated'),
+  selectedConnection: q('selectedConnection'),
+  selectedQueue: q('selectedQueue'),
+  selectedRisk: q('selectedRisk'),
+  selectedRecommendation: q('selectedRecommendation'),
+  selectedActionHint: q('selectedActionHint'),
+
   // Note card
   noteCard: q('noteCard'),
   noteMeta: q('noteMeta'),
@@ -57,6 +71,7 @@ export const els = {
   btnLogout: q('btnLogout'),
   btnWipe: q('btnWipe'),
   btnPair: q('btnPair'),
+  criticalConfirmInput: q('criticalConfirmInput'),
 
   // Envio rápido
   inpApiKey: q('inpApiKey'),
@@ -302,7 +317,8 @@ const CONNECTION_STATE_META = {
     cardLabel: (ts) => (ts ? `Conectado • ${ts}` : 'Conectado'),
     badgeText: (name, ts) => (ts ? `Conectado (${name}) • ${ts}` : `Conectado (${name})`),
     qrState: 'connected',
-    qrMessage: (ts) => (ts ? `Instância conectada. Atualizado em ${ts}.` : 'Instância conectada.'),
+    qrMessage: (ts) =>
+      ts ? `Sessão ativa. QR oculto. Atualizado em ${ts}.` : 'Sessão ativa. QR oculto para conexões abertas.',
     shouldLoadQr: false,
   },
   connecting: {
@@ -363,6 +379,132 @@ function parseConnectionTimestamp(value) {
 export function formatConnectionTimestamp(value) {
   const date = parseConnectionTimestamp(value);
   return date ? dateTimeFmt.format(date) : null;
+}
+
+const SELECTED_STATE_STYLES = {
+  operational: {
+    badge: 'bg-emerald-100 text-emerald-800',
+    text: 'text-emerald-200',
+  },
+  attention: {
+    badge: 'bg-amber-100 text-amber-800',
+    text: 'text-amber-200',
+  },
+  critical: {
+    badge: 'bg-rose-100 text-rose-800',
+    text: 'text-rose-200',
+  },
+};
+
+function formatEtaShort(seconds) {
+  if (!Number.isFinite(seconds)) return 'calculando…';
+  if (seconds < 60) return `${Math.ceil(seconds)}s`;
+  return `${Math.ceil(seconds / 60)} min`;
+}
+
+function classifySelectedState(connection, snapshot) {
+  const riskRuntime = snapshot?.risk?.runtime || {};
+  const queue = snapshot?.queue || {};
+  const ratio = Number(riskRuntime.ratio);
+  const paused = Boolean(queue.paused || riskRuntime.paused);
+  if (connection.state === 'close' || paused || (Number.isFinite(ratio) && ratio >= 0.8)) return 'critical';
+  if (connection.state !== 'open' || (Number.isFinite(ratio) && ratio >= 0.6)) return 'attention';
+  return 'operational';
+}
+
+function buildRecommendation(connection, snapshot) {
+  const queue = snapshot?.queue || {};
+  const riskRuntime = snapshot?.risk?.runtime || {};
+  const riskCfg = snapshot?.risk?.config || {};
+  const ratio = Number.isFinite(Number(riskRuntime.ratio)) ? Math.round(Number(riskRuntime.ratio) * 100) : null;
+
+  if (connection.state === 'close') return 'Gerar novo QR e confirmar conexão.';
+  if (connection.state === 'connecting') return 'Aguardar reconexão e evitar novas filas.';
+  if (queue.paused || riskRuntime.paused) return 'Revisar guardião de risco e retomar somente quando seguro.';
+  if (ratio != null && ratio >= 70) return 'Enviar safe e reduzir ritmo de envios.';
+  if (ratio != null && ratio >= 50) return 'Monitorar risco e validar proxy/ASN.';
+  if ((queue.waiting ?? 0) > 500) return 'Escalonar fila ou diluir com safe contacts.';
+  if (riskCfg.safeContacts && Array.isArray(riskCfg.safeContacts) && !riskCfg.safeContacts.length) {
+    return 'Adicionar safe contacts antes de picos de envio.';
+  }
+  return 'Operar normalmente e monitorar fila/risco.';
+}
+
+export function resetSelectedOverview() {
+  if (!els.selectedStateSection) return;
+  toggleHidden(els.selectedStateEmpty, false);
+  toggleHidden(els.selectedStateContent, true);
+  if (els.selectedBadge) els.selectedBadge.className = 'px-3 py-1 rounded-full text-xs bg-slate-200 text-slate-800';
+}
+
+export function setSelectedOverview(snapshot) {
+  if (!els.selectedStateSection) return;
+  if (!snapshot) {
+    resetSelectedOverview();
+    return;
+  }
+  toggleHidden(els.selectedStateEmpty, true);
+  toggleHidden(els.selectedStateContent, false);
+
+  const connection = describeConnection(snapshot);
+  const queue = snapshot.queue || {};
+  const risk = snapshot.risk || {};
+  const riskCfg = risk.config || {};
+  const riskRuntime = risk.runtime || {};
+  const safeCount = Array.isArray(riskCfg.safeContacts) ? riskCfg.safeContacts.length : 0;
+  const ratioVal = Number(riskRuntime.ratio);
+  const ratioPct = Number.isFinite(ratioVal) ? Math.round(ratioVal * 100) : null;
+  const eta = queue.metrics?.etaSeconds ?? queue.etaSeconds;
+  const queueEnabled = queue.enabled !== false && queue.status !== 'disabled';
+  const waiting = queue.waiting ?? queue.metrics?.waiting ?? queue.count ?? 0;
+  const active = queue.active ?? queue.metrics?.active ?? queue.activeCount ?? 0;
+  const tone = classifySelectedState(connection, snapshot);
+  const palette = SELECTED_STATE_STYLES[tone] || SELECTED_STATE_STYLES.operational;
+  const recommendation = buildRecommendation(connection, snapshot);
+
+  if (els.selectedName) els.selectedName.textContent = snapshot.name || snapshot.id || 'Instância selecionada';
+  if (els.selectedBadge) {
+    els.selectedBadge.className = `px-3 py-1 rounded-full text-xs ${palette.badge}`;
+    els.selectedBadge.textContent =
+      tone === 'critical' ? 'Crítico' : tone === 'attention' ? 'Atenção' : 'Operacional';
+  }
+  if (els.selectedSummary) {
+    const network = snapshot.network || {};
+    const proxyLabel = network.status ? `Proxy ${network.status}` : 'Proxy desconhecido';
+    const connLabel = connection.meta?.label || 'Desconhecido';
+    els.selectedSummary.textContent = `${connLabel} • ${proxyLabel} • Safe ${safeCount}`;
+  }
+  if (els.selectedUpdated) {
+    const updated = connection.updatedText || 'sem atualização recente';
+    els.selectedUpdated.textContent = `Atualizado ${updated}`;
+  }
+  if (els.selectedConnection) {
+    const label = connection.meta?.label || 'Desconhecido';
+    els.selectedConnection.textContent = connection.updatedText ? `${label} • ${connection.updatedText}` : label;
+  }
+  if (els.selectedQueue) {
+    const queueParts = [];
+    queueParts.push(queueEnabled ? `${waiting} pend. / ${active} exec.` : 'Envio direto');
+    if (queue.paused) queueParts.push('Pausada');
+    if (eta != null) queueParts.push(`ETA ${formatEtaShort(eta)}`);
+    els.selectedQueue.textContent = queueParts.join(' • ');
+  }
+  if (els.selectedRisk) {
+    const riskParts = [];
+    riskParts.push(ratioPct != null ? `${ratioPct}% unknown` : 'Sem dados');
+    if (riskRuntime.paused) riskParts.push('Guardião pausado');
+    riskParts.push(`Safe ${safeCount}`);
+    if (riskCfg.threshold != null) riskParts.push(`Threshold ${riskCfg.threshold}`);
+    els.selectedRisk.textContent = riskParts.join(' • ');
+  }
+  if (els.selectedRecommendation) {
+    els.selectedRecommendation.textContent = `Recomendação: ${recommendation}`;
+    els.selectedRecommendation.className = 'text-sm font-semibold ' + (palette.text || 'text-emerald-200');
+  }
+  if (els.selectedActionHint) {
+    els.selectedActionHint.textContent = recommendation;
+    els.selectedActionHint.className = 'text-sm font-semibold ' + (palette.text || 'text-emerald-200');
+  }
 }
 
 export function toggleHidden(el, hidden) {

@@ -15,6 +15,8 @@ import {
   setMetricsLoading,
   setQrState,
   setSelectedInstanceActionsDisabled,
+  resetSelectedOverview,
+  setSelectedOverview,
   setStatusBadge,
   showError,
   toggleHidden,
@@ -498,6 +500,7 @@ function applyInstanceSnapshot(snapshot, options = {}) {
   const connection = describeConnection(snapshot);
   currentConnectionState = connection.state;
   setStatusBadge(connection, snapshot.name);
+  setSelectedOverview(snapshot);
   setSelectedInstanceActionsDisabled(iid, isInstanceLocked(iid));
   updateInspector(snapshot);
 
@@ -688,6 +691,7 @@ export async function refreshSelected(options = {}) {
   if (!iid) {
     toggleHidden(els.qrImg, true);
     setQrState('idle', 'Nenhuma instância selecionada.');
+    resetSelectedOverview();
     resetInspector();
     resetNotes();
     resetChart();
