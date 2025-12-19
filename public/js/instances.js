@@ -449,7 +449,7 @@ function createInstanceCard(inst, selectedId) {
     ? 'bg-emerald-50 border-emerald-100'
     : 'bg-slate-50 border-slate-100';
   const etaShort = etaLabel(queueInfo.metrics?.etaSeconds ?? queueInfo.etaSeconds);
-  const queueSummary = queueEnabled ? `${waiting} pend. / ${active} exec.` : 'Envio direto';
+  const queueSummary = queueEnabled ? `${queueInfo.waiting ?? queueInfo.count ?? 0} pend. / ${queueInfo.active ?? queueInfo.activeCount ?? 0} exec.` : 'Envio direto';
   const usageWidth = Math.min(Math.max(usagePercent, 0), 100);
   const riskWidth = Math.min(Math.max(riskRatio, 0), 100);
 
