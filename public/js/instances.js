@@ -380,6 +380,12 @@ function applyVirtualPadding(startIndex, endIndex) {
   els.cards.style.paddingBottom = bottomPadding ? `${bottomPadding}px` : '';
 }
 
+function etaLabel(seconds) {
+  if (!Number.isFinite(seconds)) return '—';
+  if (seconds < 60) return `${Math.ceil(seconds)}s`;
+  return `${Math.ceil(seconds / 60)} min`;
+}
+
 function createInstanceCard(inst, selectedId) {
   const connection = describeConnection(inst);
   const network = inst.network || {};
@@ -402,7 +408,7 @@ function createInstanceCard(inst, selectedId) {
   })();
 
   const card = document.createElement('article');
-  card.className = 'p-4 bg-white/80 backdrop-blur border border-slate-100 rounded-2xl shadow-lg transition ring-emerald-200/50 space-y-3 h-full';
+  card.className = 'flex flex-col gap-3 p-4 bg-white/80 backdrop-blur border border-slate-100 rounded-2xl shadow-lg transition ring-emerald-200/50 h-full';
   if (inst.id === selectedId) card.classList.add('ring-2', 'ring-emerald-200');
   const locked = isInstanceLocked(inst.id);
   card.classList.toggle('opacity-75', locked);
@@ -442,29 +448,32 @@ function createInstanceCard(inst, selectedId) {
     : queueEnabled
     ? 'bg-emerald-50 border-emerald-100'
     : 'bg-slate-50 border-slate-100';
+  const etaShort = etaLabel(queueInfo.metrics?.etaSeconds ?? queueInfo.etaSeconds);
+  const queueSummary = queueEnabled ? `${waiting} pend. / ${active} exec.` : 'Envio direto';
+  const usageWidth = Math.min(Math.max(usagePercent, 0), 100);
+  const riskWidth = Math.min(Math.max(riskRatio, 0), 100);
 
   card.innerHTML = `
     <div class="flex items-start justify-between gap-3">
-      <div class="flex-1">
+      <div class="flex-1 min-w-0 space-y-1">
         <label class="text-xs font-medium text-slate-500">Nome</label>
-        <input data-field="name" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" value="${escapeHtml(inst.name)}" />
+        <input data-field="name" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm truncate" value="${escapeHtml(inst.name)}" />
+        <p class="text-[11px] text-slate-500 truncate">WhatsApp: ${userId}</p>
       </div>
-      <div class="flex flex-col items-end gap-1">
-        <span class="px-2 py-0.5 rounded text-xs ${badgeClass}">${escapeHtml(statusLabel)}</span>
+      <div class="flex flex-col items-end gap-1 shrink-0">
+        <span class="px-2 py-0.5 rounded text-xs whitespace-nowrap ${badgeClass}">${escapeHtml(statusLabel)}</span>
         ${tierBadge}
       </div>
     </div>
 
-    <div class="text-xs text-slate-500 break-all">WhatsApp: ${userId}</div>
-
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
-      <div class="rounded-lg p-2 border ${proxyBg}">
-        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide ${proxyText}">
-          <span>Rede</span>
-          <span>${escapeHtml(network.status || 'unknown')}</span>
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+      <div class="rounded-lg p-2 border ${queueBg}">
+        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
+          <span>Fila</span>
+          <span class="${queueClass}">${queueLabel}</span>
         </div>
-        <div class="font-semibold text-slate-700 truncate">${escapeHtml(network.isp || network.asn || '—')}</div>
-        <div class="text-[11px] text-slate-500">Latência: ${network.latencyMs != null ? escapeHtml(String(network.latencyMs)) + ' ms' : '—'}</div>
+        <div class="font-semibold text-slate-700 truncate">${queueSummary}</div>
+        <div class="text-[11px] text-slate-500">ETA: ${etaShort} • Modo: ${modeGuess}</div>
       </div>
       <div class="rounded-lg p-2 border bg-slate-50 border-slate-100 space-y-1">
         <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
@@ -473,75 +482,82 @@ function createInstanceCard(inst, selectedId) {
         </div>
         <div class="font-semibold text-slate-700">${riskRatio}% desconhecidos</div>
         <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-          <div class="h-full ${riskBarClass}" style="width:${Math.min(riskRatio, 100)}%"></div>
+          <div class="h-full ${riskBarClass}" style="width:${riskWidth}%"></div>
         </div>
-        <div class="text-[11px] text-slate-500">Safe: ${safeCount} • Threshold: ${riskCfg.threshold ?? 0.7}</div>
+        <div class="text-[11px] text-slate-500 truncate">Safe: ${safeCount} • Threshold: ${riskCfg.threshold ?? 0.7}</div>
       </div>
-      <div class="rounded-lg p-2 border ${queueBg}">
+      <div class="rounded-lg p-2 border bg-slate-50 border-slate-100 space-y-1">
         <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
-          <span>Fila</span>
-          <span class="${queueClass}">${queueLabel}</span>
-        </div>
-        <div class="font-semibold text-slate-700">${queueEnabled ? `Pendentes: ${queueInfo.waiting ?? queueInfo.count ?? 0}` : 'Envio direto'}</div>
-        <div class="text-[11px] text-slate-500">Execução: ${queueInfo.active ?? queueInfo.activeCount ?? 0} • Modo: ${modeGuess}</div>
-      </div>
-    </div>
-
-    <div class="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
-      <div class="rounded-lg bg-slate-50 p-2">
-        <span class="block text-[11px] uppercase tracking-wide text-slate-400">Enviadas</span>
-        <span class="text-sm font-semibold text-slate-700">${sent}</span>
-      </div>
-      ${statusCardsHtml}
-      <div class="col-span-2 md:col-span-3 space-y-1">
-        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
-          <span>Uso do limite</span>
+          <span>Limite</span>
           <span>${usagePercent}%</span>
         </div>
         <div class="h-2 bg-slate-100 rounded-full overflow-hidden">
-          <div class="h-full ${meterColor}" style="width:${Math.min(usagePercent, 100)}%"></div>
+          <div class="h-full ${meterColor}" style="width:${usageWidth}%"></div>
         </div>
-        <div class="text-[11px] text-slate-400">Status 1: ${statusCounts['1'] || 0} • Status 2: ${statusCounts['2'] || 0} • Status 3: ${statusCounts['3'] || 0} • Status 4: ${statusCounts['4'] || 0} • Status 5: ${statusCounts['5'] || 0}</div>
+        <div class="text-[11px] text-slate-500 truncate">Enviadas: ${sent} • Status 1-5: ${statusCounts['1'] || 0}/${statusCounts['2'] || 0}/${statusCounts['3'] || 0}/${statusCounts['4'] || 0}/${statusCounts['5'] || 0}</div>
       </div>
     </div>
 
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-      <div>
-        <label class="text-xs font-medium text-slate-500">Proxy (http/https)</label>
-        <input data-field="proxy" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" placeholder="http://user:pass@host:port" value="${escapeHtml(network.proxyUrl || '')}" />
-        <button data-act="save-proxy" data-iid="${inst.id}" class="mt-2 px-3 py-1.5 text-xs bg-slate-800 text-white rounded-lg">Salvar proxy</button>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+      <div class="rounded-lg p-2 border ${proxyBg}">
+        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide ${proxyText}">
+          <span>Rede</span>
+          <span class="truncate">${escapeHtml(network.status || 'unknown')}</span>
+        </div>
+        <div class="font-semibold text-slate-700 truncate">${escapeHtml(network.isp || network.asn || '—')}</div>
+        <div class="text-[11px] text-slate-500 truncate">Latência: ${network.latencyMs != null ? escapeHtml(String(network.latencyMs)) + ' ms' : '—'}</div>
       </div>
-      <div class="space-y-2">
-        <div class="grid grid-cols-3 gap-2">
+      <div class="rounded-lg p-2 border bg-slate-50 border-slate-100">
+        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
+          <span>Atualização</span>
+          <span class="text-slate-600">${connection.updatedText || '—'}</span>
+        </div>
+        <div class="text-[11px] text-slate-500 truncate">Guardião: ${queueInfo.paused ? 'Pausado' : 'Ativo'} • Safe ${safeCount}</div>
+        <div class="text-[11px] text-slate-500 truncate">Modo: ${modeGuess} • Tier: ${tierBadge ? 'definido' : '—'}</div>
+      </div>
+    </div>
+
+    <details class="rounded-lg border border-slate-200 bg-slate-50/80 p-3">
+      <summary class="text-sm font-semibold text-slate-700 cursor-pointer select-none">Configurações e notas</summary>
+      <div class="mt-2 space-y-2">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <div>
-            <label class="text-[11px] font-medium text-slate-500">Modo</label>
-            <select data-act="mode" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs">
-              <option value="ninja"${modeGuess === 'ninja' ? ' selected' : ''}>Ninja</option>
-              <option value="equilibrado"${modeGuess === 'equilibrado' ? ' selected' : ''}>Equilibrado</option>
-              <option value="turbo"${modeGuess === 'turbo' ? ' selected' : ''}>Turbo</option>
-            </select>
+            <label class="text-xs font-medium text-slate-500">Proxy (http/https)</label>
+            <input data-field="proxy" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" placeholder="http://user:pass@host:port" value="${escapeHtml(network.proxyUrl || '')}" />
+            <button data-act="save-proxy" data-iid="${inst.id}" class="mt-2 px-3 py-1.5 text-xs bg-slate-800 text-white rounded-lg">Salvar proxy</button>
           </div>
-          <div>
-            <label class="text-[11px] font-medium text-slate-500">Threshold</label>
-            <input data-field="risk-threshold" data-iid="${inst.id}" type="number" step="0.05" min="0.1" max="1" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" value="${riskCfg.threshold ?? 0.7}" />
-          </div>
-          <div>
-            <label class="text-[11px] font-medium text-slate-500">Interleave</label>
-            <input data-field="risk-interleave" data-iid="${inst.id}" type="number" min="1" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" value="${riskCfg.interleaveEvery ?? 5}" />
+          <div class="space-y-2">
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="text-[11px] font-medium text-slate-500">Modo</label>
+                <select data-act="mode" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs">
+                  <option value="ninja"${modeGuess === 'ninja' ? ' selected' : ''}>Ninja</option>
+                  <option value="equilibrado"${modeGuess === 'equilibrado' ? ' selected' : ''}>Equilibrado</option>
+                  <option value="turbo"${modeGuess === 'turbo' ? ' selected' : ''}>Turbo</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-[11px] font-medium text-slate-500">Threshold</label>
+                <input data-field="risk-threshold" data-iid="${inst.id}" type="number" step="0.05" min="0.1" max="1" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" value="${riskCfg.threshold ?? 0.7}" />
+              </div>
+              <div>
+                <label class="text-[11px] font-medium text-slate-500">Interleave</label>
+                <input data-field="risk-interleave" data-iid="${inst.id}" type="number" min="1" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" value="${riskCfg.interleaveEvery ?? 5}" />
+              </div>
+            </div>
+            <div>
+              <label class="text-[11px] font-medium text-slate-500">Safe contacts (E164, separados por vírgula)</label>
+              <textarea data-field="risk-safe" data-iid="${inst.id}" rows="2" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" placeholder="5511999999999,551188888888">${Array.isArray(riskCfg.safeContacts) ? riskCfg.safeContacts.join(',') : ''}</textarea>
+            </div>
+            <button data-act="save-risk" data-iid="${inst.id}" class="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg">Salvar segurança</button>
           </div>
         </div>
         <div>
-          <label class="text-[11px] font-medium text-slate-500">Safe contacts (E164, separados por vírgula)</label>
-          <textarea data-field="risk-safe" data-iid="${inst.id}" rows="2" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" placeholder="5511999999999,551188888888">${Array.isArray(riskCfg.safeContacts) ? riskCfg.safeContacts.join(',') : ''}</textarea>
+          <label class="text-xs font-medium text-slate-500">Notas</label>
+          <textarea data-field="note" data-iid="${inst.id}" rows="2" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm" placeholder="Observações desta instância">${escapeHtml(noteVal)}</textarea>
         </div>
-        <button data-act="save-risk" data-iid="${inst.id}" class="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg">Salvar segurança</button>
       </div>
-    </div>
-
-    <div>
-      <label class="text-xs font-medium text-slate-500">Notas</label>
-      <textarea data-field="note" data-iid="${inst.id}" rows="3" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm">${escapeHtml(noteVal)}</textarea>
-    </div>
+    </details>
 
     <div class="flex items-center justify-end gap-2 flex-wrap">
       <button data-act="save" data-iid="${inst.id}" class="px-3 py-1.5 text-sm bg-sky-600 hover:bg-sky-700 text-white rounded-lg">Salvar</button>
