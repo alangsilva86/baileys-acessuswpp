@@ -28,6 +28,7 @@ let hasLoadedSelected = false;
 let currentInstanceId = null;
 let currentConnectionState = null;
 const qrVersionCache = new Map();
+const qrCooldownUntil = new Map();
 let lastRangeRequest = { from: null, to: null };
 let lastRangeSummary = null;
 let chartLoaderPromise = null;
@@ -547,6 +548,9 @@ function applyInstanceSnapshot(snapshot, options = {}) {
 
 async function loadQRCode(iid, options = {}) {
   const { version = null, qrState = 'loading', qrMessage = 'Sincronizando QR…' } = options;
+  const now = Date.now();
+  const cooldownUntil = qrCooldownUntil.get(iid) || 0;
+  if (now < cooldownUntil) return false;
   try {
     const key = getApiKeyValue();
     if (!key) {
@@ -598,18 +602,13 @@ async function loadQRCode(iid, options = {}) {
       const waiting = text?.includes('no-qr');
       toggleHidden(els.qrImg, true);
       setQrState('loading', waiting ? 'Gerando QR… aguarde alguns segundos.' : 'Instância sem QR. Verifique conexão.');
+      qrCooldownUntil.set(iid, now + 5000);
       return false;
     }
 
     if (response.status === 401) {
       toggleHidden(els.qrImg, true);
       setQrState('needs-key', 'API Key inválida.');
-      return false;
-    }
-
-    if (response.status === 404) {
-      toggleHidden(els.qrImg, true);
-      setQrState('loading', 'QR code ainda não disponível. Aguarde atualização.');
       return false;
     }
 

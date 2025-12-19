@@ -408,7 +408,7 @@ function createInstanceCard(inst, selectedId) {
   })();
 
   const card = document.createElement('article');
-  card.className = 'flex flex-col gap-3 p-4 bg-white/80 backdrop-blur border border-slate-100 rounded-2xl shadow-lg transition ring-emerald-200/50 h-full';
+  card.className = 'flex flex-col gap-3 p-4 bg-white/90 backdrop-blur border border-slate-100 rounded-2xl shadow-lg transition ring-emerald-200/50 h-full';
   if (inst.id === selectedId) card.classList.add('ring-2', 'ring-emerald-200');
   const locked = isInstanceLocked(inst.id);
   card.classList.toggle('opacity-75', locked);
@@ -460,60 +460,53 @@ function createInstanceCard(inst, selectedId) {
         <input data-field="name" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm truncate" value="${escapeHtml(inst.name)}" />
         <p class="text-[11px] text-slate-500 truncate">WhatsApp: ${userId}</p>
       </div>
-      <div class="flex flex-col items-end gap-1 shrink-0">
+      <div class="flex flex-col items-end gap-1 shrink-0 text-right">
         <span class="px-2 py-0.5 rounded text-xs whitespace-nowrap ${badgeClass}">${escapeHtml(statusLabel)}</span>
-        ${tierBadge}
+        <span class="text-[11px] text-slate-500 whitespace-nowrap">${connection.updatedText || '—'}</span>
       </div>
     </div>
 
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
-      <div class="rounded-lg p-2 border ${queueBg}">
-        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
-          <span>Fila</span>
-          <span class="${queueClass}">${queueLabel}</span>
-        </div>
-        <div class="font-semibold text-slate-700 truncate">${queueSummary}</div>
-        <div class="text-[11px] text-slate-500">ETA: ${etaShort} • Modo: ${modeGuess}</div>
+    <div class="grid grid-cols-2 gap-2 text-xs">
+      <div class="rounded-lg p-3 border ${queueBg} min-h-[92px]">
+        <p class="text-[11px] uppercase tracking-wide text-slate-500">Fila</p>
+        <p class="text-sm font-semibold text-slate-800 truncate">${queueSummary}</p>
+        <p class="text-[11px] text-slate-500 truncate">ETA: ${etaShort} • ${queueLabel}</p>
+        <p class="text-[11px] text-slate-500 truncate">Modo: ${modeGuess}</p>
       </div>
-      <div class="rounded-lg p-2 border bg-slate-50 border-slate-100 space-y-1">
-        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
-          <span>Risco</span>
-          <span class="${riskRuntime.paused ? 'text-rose-600' : 'text-emerald-600'}">${riskRuntime.paused ? 'Pausado' : 'Ativo'}</span>
-        </div>
-        <div class="font-semibold text-slate-700">${riskRatio}% desconhecidos</div>
-        <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+      <div class="rounded-lg p-3 border bg-slate-50 min-h-[92px]">
+        <p class="text-[11px] uppercase tracking-wide text-slate-500">Risco</p>
+        <p class="text-sm font-semibold text-slate-800">${riskRatio}% desconhecidos</p>
+        <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-1">
           <div class="h-full ${riskBarClass}" style="width:${riskWidth}%"></div>
         </div>
-        <div class="text-[11px] text-slate-500 truncate">Safe: ${safeCount} • Threshold: ${riskCfg.threshold ?? 0.7}</div>
+        <p class="text-[11px] text-slate-500 truncate">Safe: ${safeCount} • Threshold: ${riskCfg.threshold ?? 0.7}</p>
       </div>
-      <div class="rounded-lg p-2 border bg-slate-50 border-slate-100 space-y-1">
-        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
-          <span>Limite</span>
-          <span>${usagePercent}%</span>
-        </div>
-        <div class="h-2 bg-slate-100 rounded-full overflow-hidden">
+      <div class="rounded-lg p-3 border bg-slate-50 min-h-[92px]">
+        <p class="text-[11px] uppercase tracking-wide text-slate-500">Limite</p>
+        <p class="text-sm font-semibold text-slate-800">${usagePercent}% em uso</p>
+        <div class="h-2 bg-slate-100 rounded-full overflow-hidden mt-1">
           <div class="h-full ${meterColor}" style="width:${usageWidth}%"></div>
         </div>
-        <div class="text-[11px] text-slate-500 truncate">Enviadas: ${sent} • Status 1-5: ${statusCounts['1'] || 0}/${statusCounts['2'] || 0}/${statusCounts['3'] || 0}/${statusCounts['4'] || 0}/${statusCounts['5'] || 0}</div>
+        <p class="text-[11px] text-slate-500 truncate">Enviadas: ${sent}</p>
+      </div>
+      <div class="rounded-lg p-3 border ${proxyBg} min-h-[92px]">
+        <p class="text-[11px] uppercase tracking-wide ${proxyText}">Rede</p>
+        <p class="text-sm font-semibold text-slate-800 truncate">${escapeHtml(network.isp || network.asn || '—')}</p>
+        <p class="text-[11px] text-slate-500 truncate">Latência: ${network.latencyMs != null ? escapeHtml(String(network.latencyMs)) + ' ms' : '—'}</p>
+        <p class="text-[11px] text-slate-500 truncate">Status: ${escapeHtml(network.status || 'unknown')}</p>
       </div>
     </div>
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-      <div class="rounded-lg p-2 border ${proxyBg}">
-        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide ${proxyText}">
-          <span>Rede</span>
-          <span class="truncate">${escapeHtml(network.status || 'unknown')}</span>
-        </div>
-        <div class="font-semibold text-slate-700 truncate">${escapeHtml(network.isp || network.asn || '—')}</div>
-        <div class="text-[11px] text-slate-500 truncate">Latência: ${network.latencyMs != null ? escapeHtml(String(network.latencyMs)) + ' ms' : '—'}</div>
+    <div class="grid grid-cols-2 gap-2 text-xs">
+      <div class="rounded-lg p-3 border bg-slate-50">
+        <p class="text-[11px] uppercase tracking-wide text-slate-500">Guardião</p>
+        <p class="text-sm font-semibold text-slate-800 truncate">${queueInfo.paused ? 'Pausado' : 'Ativo'}</p>
+        <p class="text-[11px] text-slate-500 truncate">Safe: ${safeCount} • Modo: ${modeGuess}</p>
       </div>
-      <div class="rounded-lg p-2 border bg-slate-50 border-slate-100">
-        <div class="flex items-center justify-between text-[11px] uppercase tracking-wide text-slate-400">
-          <span>Atualização</span>
-          <span class="text-slate-600">${connection.updatedText || '—'}</span>
-        </div>
-        <div class="text-[11px] text-slate-500 truncate">Guardião: ${queueInfo.paused ? 'Pausado' : 'Ativo'} • Safe ${safeCount}</div>
-        <div class="text-[11px] text-slate-500 truncate">Modo: ${modeGuess} • Tier: ${tierBadge ? 'definido' : '—'}</div>
+      <div class="rounded-lg p-3 border bg-slate-50">
+        <p class="text-[11px] uppercase tracking-wide text-slate-500">Tier & id</p>
+        <p class="text-sm font-semibold text-slate-800 truncate">${inst.id}</p>
+        <p class="text-[11px] text-slate-500 truncate">${tierBadge ? 'Tier ativo' : 'Sem tier'}</p>
       </div>
     </div>
 
