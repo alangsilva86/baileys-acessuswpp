@@ -10,7 +10,12 @@ interface BrightDataConfig {
 }
 
 function sanitizeId(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || crypto.randomUUID().replace(/-/g, '');
+  // Bright Data sessions reject some characters and very long values; keep it simple & short.
+  const cleaned = value.replace(/[^a-zA-Z0-9]/g, '');
+  if (!cleaned) return crypto.randomUUID().replace(/-/g, '').slice(0, 20);
+  if (cleaned.length <= 20) return cleaned;
+  const hash = crypto.createHash('sha1').update(cleaned).digest('hex').slice(0, 10);
+  return `${cleaned.slice(0, 12)}${hash}`;
 }
 
 export function createBrightDataProxyUrl(instanceId: string, config?: Partial<BrightDataConfig>): string | null {

@@ -94,17 +94,31 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
   let agent: HttpsProxyAgent<string> | undefined;
   const allowProxyFallback = process.env.ALLOW_PROXY_FALLBACK === '1';
   const proxyRequired = process.env.PROXY_REQUIRED !== '0';
+  const insecureProxy = process.env.PROXY_INSECURE === '1';
+  const brightDataProxy = createBrightDataProxyUrl(inst.id);
   // Se a instância não tem proxy, tenta montar via Bright Data a partir das envs
   if (!inst.network?.proxyUrl) {
-    const bdUrl = createBrightDataProxyUrl(inst.id);
-    if (bdUrl) {
-      inst.network.proxyUrl = bdUrl;
+    if (brightDataProxy) {
+      inst.network.proxyUrl = brightDataProxy;
     }
+  } else if (!inst.network.proxyUrl.includes('@') && brightDataProxy) {
+    // Se veio sem credenciais, força a URL completa da Bright Data
+    inst.network.proxyUrl = brightDataProxy;
   }
 
   if (inst.network?.proxyUrl) {
     try {
-      const validation = await validateProxyUrl(inst.network.proxyUrl);
+      let proxyUrl = inst.network.proxyUrl;
+      let validation = await validateProxyUrl(proxyUrl);
+
+      // Se falhou por falta de auth, tenta regenerar a URL da Bright Data e revalidar
+      if (validation.blockReason === 'proxy_auth_required_407' && brightDataProxy && proxyUrl !== brightDataProxy) {
+        logger.warn({ iid: inst.id, proxy: proxyUrl }, 'network.proxy.auth_failed_retrying_brightdata');
+        proxyUrl = brightDataProxy;
+        validation = await validateProxyUrl(proxyUrl);
+      }
+
+      inst.network.proxyUrl = proxyUrl;
       inst.network = {
         ...inst.network,
         ip: validation.ip,
@@ -131,6 +145,10 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
         }
       } else {
         agent = new HttpsProxyAgent(inst.network.proxyUrl);
+        if (agent && insecureProxy) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (agent as any).options.rejectUnauthorized = false;
+        }
         logger.info(
           { iid: inst.id, proxy: inst.network.proxyUrl, asn: validation.asn, isp: validation.isp, latencyMs: validation.latencyMs },
           'network.proxy.enabled',
