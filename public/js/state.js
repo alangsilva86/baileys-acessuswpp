@@ -63,6 +63,7 @@ export const els = {
   kpiTransitValue: q('kpiTransitValue'),
   kpiTransitHint: q('kpiTransitHint'),
   chartHint: q('chartHint'),
+  metricsLegend: q('metricsLegend'),
   metricsSkeleton: q('metricsSkeleton'),
   btnExportCsv: q('btnExportCsv'),
   btnExportJson: q('btnExportJson'),

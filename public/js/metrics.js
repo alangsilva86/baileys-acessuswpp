@@ -428,7 +428,7 @@ async function initChart() {
         x: { grid: { display: false } },
         y: { beginAtZero: true, grace: '5%' },
       },
-      plugins: { legend: { display: true, position: 'bottom' } },
+      plugins: { legend: { display: false } },
     },
   });
 }
@@ -441,6 +441,56 @@ export function resetChart() {
   });
   chart.update('none');
   if (els.chartHint) els.chartHint.textContent = 'Nenhum dado disponível ainda.';
+}
+
+function buildMetricsLegendItems() {
+  const baseItem = {
+    id: 'sent',
+    label: 'Enviadas',
+    color: '#0ea5e9',
+    description: 'Volume total de mensagens confirmadas durante o intervalo selecionado.',
+  };
+  const statusItems = STATUS_SERIES.map((series) => {
+    const meta = STATUS_META[series.key] || series;
+    const label = meta.name || series.key;
+    const description = meta.description || (series.codes.length ? `Status ${series.codes.join(', ')}` : '');
+    return {
+      id: series.key,
+      label,
+      color: meta.chartColor || '#94a3b8',
+      description,
+      codes: series.codes,
+    };
+  });
+  return [baseItem, ...statusItems];
+}
+
+function renderMetricsLegend() {
+  if (!els.metricsLegend) return;
+  const items = buildMetricsLegendItems();
+  const fragment = document.createDocumentFragment();
+  items.forEach(({ id, label, color, description, codes }) => {
+    const chip = document.createElement('span');
+    chip.className =
+      'inline-flex items-center gap-1 px-2 py-1 rounded-full border border-slate-200 bg-white text-[11px] font-semibold text-slate-600';
+    chip.dataset.series = id || '';
+    chip.title = description || label;
+    chip.setAttribute('aria-label', description ? `${label}: ${description}` : label);
+
+    const bullet = document.createElement('span');
+    bullet.className = 'h-2 w-2 rounded-full border border-slate-200';
+    bullet.style.backgroundColor = color || '#94a3b8';
+    bullet.setAttribute('aria-hidden', 'true');
+    chip.appendChild(bullet);
+
+    const labelText = document.createElement('span');
+    labelText.textContent = codes && codes.length ? `${label} (${codes.join('/')})` : label;
+    chip.appendChild(labelText);
+
+    fragment.appendChild(chip);
+  });
+  els.metricsLegend.innerHTML = '';
+  els.metricsLegend.appendChild(fragment);
 }
 
 function updateKpis(metrics) {
@@ -796,6 +846,7 @@ function applySavedRange() {
 
 export function initMetrics() {
   applySavedRange();
+  renderMetricsLegend();
   if (els.btnExportCsv) els.btnExportCsv.addEventListener('click', () => exportMetrics('csv'));
   if (els.btnExportJson) els.btnExportJson.addEventListener('click', () => exportMetrics('json'));
   ensureInstanceStream();
