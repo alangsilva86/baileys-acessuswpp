@@ -420,6 +420,7 @@ function createInstanceCard(inst, selectedId) {
   })();
 
   const card = document.createElement('article');
+  card.dataset.iid = inst.id;
   card.className = 'flex flex-col gap-3 p-4 bg-white/90 backdrop-blur border border-slate-100 rounded-2xl shadow-lg transition ring-emerald-200/50 h-full';
   if (inst.id === selectedId) card.classList.add('ring-2', 'ring-emerald-200');
   const locked = isInstanceLocked(inst.id);
@@ -476,6 +477,7 @@ function createInstanceCard(inst, selectedId) {
         <div class="flex items-center gap-2 flex-wrap justify-end">
           <span class="px-2 py-0.5 rounded text-xs whitespace-nowrap ${badgeClass}">${escapeHtml(statusLabel)}</span>
           <button data-act="select" data-iid="${inst.id}" class="px-2 py-1 text-[11px] border border-slate-200 rounded-lg hover:border-slate-300">Selecionar</button>
+          <button data-act="delete" data-iid="${inst.id}" class="px-2 py-1 text-[11px] border border-rose-200 text-rose-700 rounded-lg hover:border-rose-300">Excluir</button>
         </div>
         <span class="text-[11px] text-slate-500 whitespace-nowrap">${connection.updatedText || '—'}</span>
       </div>

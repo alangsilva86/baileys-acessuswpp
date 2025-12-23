@@ -575,10 +575,17 @@ function applyInstanceSnapshot(snapshot, options = {}) {
   const normalizedQrVersion = extractQrVersion(snapshot);
   const previousQrVersion = qrVersionCache.get(iid) ?? null;
   const shouldLoadQr = Boolean(connection.meta?.shouldLoadQr);
+  const hasLastQr = snapshot.hasLastQr !== false;
   const hasNewQr = normalizedQrVersion ? previousQrVersion !== normalizedQrVersion : !previousQrVersion;
   const shouldForceReload = Boolean(options.forceQrReload);
 
   if (shouldLoadQr) {
+    if (!hasLastQr) {
+      toggleHidden(els.qrImg, true);
+      setQrState('loading', 'Gerando QR… aguarde alguns segundos.');
+      qrCooldownUntil.set(iid, Date.now() + 5000);
+      return;
+    }
     if (hasNewQr || shouldForceReload) {
       if (els.qrImg) toggleHidden(els.qrImg, true);
       setQrState('loading', 'Sincronizando QR…');

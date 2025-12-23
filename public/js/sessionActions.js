@@ -359,6 +359,19 @@ function bindNewInstance() {
 }
 
 function bindHeaderActions() {
+  if (els.iabDelete) {
+    els.iabDelete.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const iid = els.selInstance?.value;
+      if (!iid) {
+        showError('Selecione uma instância para excluir.');
+        return;
+      }
+      const name = els.iabName?.textContent?.trim() || iid;
+      openDeleteModal(iid, name);
+    });
+  }
   if (els.btnLogout) {
     els.btnLogout.addEventListener('click', async () => {
       try {
