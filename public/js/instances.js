@@ -341,7 +341,7 @@ function scheduleMeasurement() {
     const style = window.getComputedStyle(els.cards);
     const gap = parseFloat(style.rowGap || '0') || 0;
     const width = cardRect.width || 1;
-    const columns = width ? Math.max(1, Math.round(containerRect.width / width)) : 1;
+    const columns = width ? Math.max(1, Math.floor(containerRect.width / width)) : 1;
     const ready = filteredInstances.length > MAX_RENDERED_ITEMS && columns > 0 && cardRect.height > 0;
     const changed =
       virtualizationState.rowHeight !== cardRect.height ||
@@ -481,7 +481,7 @@ function createInstanceCard(inst, selectedId) {
       </div>
     </div>
 
-    <div class="grid grid-cols-2 gap-2 text-xs auto-rows-fr">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs auto-rows-fr">
       <div class="rounded-lg p-3 border ${queueBg} min-h-[92px]">
         <p class="text-[11px] uppercase tracking-wide text-slate-500">Fila</p>
         <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${queueSummary}</p>
@@ -512,7 +512,7 @@ function createInstanceCard(inst, selectedId) {
       </div>
     </div>
 
-    <div class="grid grid-cols-2 gap-2 text-xs">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
       <div class="rounded-lg p-3 border bg-slate-50">
         <p class="text-[11px] uppercase tracking-wide text-slate-500">Guardião</p>
         <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${queueInfo.paused ? 'Pausado' : 'Ativo'}</p>

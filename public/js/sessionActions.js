@@ -241,7 +241,8 @@ function bindDocumentShortcuts() {
   });
 
   document.addEventListener('click', async (ev) => {
-    const btn = ev.target.closest('[data-act]');
+    const target = ev.target instanceof Element ? ev.target : ev.target?.parentElement;
+    const btn = target?.closest('[data-act]');
     if (!btn) return;
     const act = btn.dataset.act;
 
@@ -254,7 +255,7 @@ function bindDocumentShortcuts() {
       return;
     }
 
-    const iid = btn.dataset.iid;
+    const iid = btn.dataset.iid || (act === 'delete' ? els.selInstance?.value : '');
     if (!iid) return;
 
     if (act === 'select') {
@@ -279,7 +280,10 @@ function bindDocumentShortcuts() {
     }
     if (act === 'delete') {
       const card = btn.closest('article');
-      const name = card?.querySelector('[data-field="name"]')?.value?.trim() || iid;
+      const name =
+        card?.querySelector('[data-field="name"]')?.value?.trim() ||
+        els.iabName?.textContent?.trim() ||
+        iid;
       openDeleteModal(iid, name);
       return;
     }

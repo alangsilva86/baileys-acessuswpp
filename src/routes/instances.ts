@@ -784,7 +784,7 @@ router.get(
       ensureInstanceStarted(inst.id).catch((err) => console.warn('qr.autostart.failed', { iid: inst.id, err }));
     }
     if (!inst.lastQR) {
-      res.status(404).send('no-qr-yet');
+      res.status(204).end();
       return;
     }
     const png = await QRCode.toBuffer(inst.lastQR, {

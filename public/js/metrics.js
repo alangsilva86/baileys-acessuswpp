@@ -649,9 +649,9 @@ async function loadQRCode(iid, options = {}) {
       return true;
     }
 
-    if (response.status === 404) {
-      const text = await response.text().catch(() => '');
-      const waiting = text?.includes('no-qr');
+    if (response.status === 404 || response.status === 204) {
+      const text = response.status === 404 ? await response.text().catch(() => '') : '';
+      const waiting = response.status === 204 || text?.includes('no-qr');
       toggleHidden(els.qrImg, true);
       setQrState('loading', waiting ? 'Gerando QR… aguarde alguns segundos.' : 'Instância sem QR. Verifique conexão.');
       qrCooldownUntil.set(iid, now + 5000);
