@@ -287,7 +287,14 @@ function bindDocumentShortcuts() {
     }
 
     const iid = btn.dataset.iid || (act === 'delete' ? els.selInstance?.value : '');
-    if (!iid) return;
+    if (!iid) {
+      if (act === 'delete') {
+        showError('Selecione uma instância antes de excluir.');
+      } else {
+        console.warn('[session] ação ignorada sem iid', { act });
+      }
+      return;
+    }
 
     if (act === 'select') {
       if (els.selInstance) els.selInstance.value = iid;
