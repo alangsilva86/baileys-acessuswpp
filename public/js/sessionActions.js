@@ -95,9 +95,10 @@ function closePairModal() {
 }
 
 async function performInstanceAction(action, iid, key, context = {}) {
+  const encodedIid = encodeURIComponent(iid);
   const endpoints = {
-    logout: `/instances/${iid}/logout`,
-    wipe: `/instances/${iid}/session/wipe`,
+    logout: `/instances/${encodedIid}/logout`,
+    wipe: `/instances/${encodedIid}/session/wipe`,
   };
   const badgeTypes = { logout: 'logout', wipe: 'wipe' };
   const fallbackMessages = {
@@ -124,7 +125,21 @@ async function performInstanceAction(action, iid, key, context = {}) {
       return true;
     }
     if (!response.ok) {
+      let body = null;
       const txt = await response.text().catch(() => '');
+      if (txt) {
+        try {
+          body = JSON.parse(txt);
+        } catch {}
+      }
+      if (response.status === 404 && body?.error === 'instance_not_found') {
+        setBadgeState('info', 'Instância não encontrada. Atualizando lista…', 5000);
+        await refreshInstances({ withSkeleton: true });
+        return false;
+      }
+      if (response.status === 503 && handleInstanceOfflineError({ status: response.status, body })) {
+        return false;
+      }
       alert('Falha ao executar ' + action + ': HTTP ' + response.status + (txt ? ' — ' + txt : ''));
       setBadgeState('error', 'Falha em ' + action + ' (' + name + ')', 5000);
       return false;
@@ -187,12 +202,28 @@ function bindModalEvents() {
       }
       setBusy(els.modalConfirm, true, 'Excluindo…');
       try {
-        const response = await fetch(`/instances/${iidTarget}`, {
+        const response = await fetch(`/instances/${encodeURIComponent(iidTarget)}`, {
           method: 'DELETE',
           headers: { 'x-api-key': key },
         });
         if (!response.ok) {
           const txt = await response.text().catch(() => '');
+          let body = null;
+          if (txt) {
+            try {
+              body = JSON.parse(txt);
+            } catch {}
+          }
+          if (response.status === 503) {
+            setBadgeState('error', 'Serviço indisponível para excluir a instância. Tente novamente.', 6000);
+            return;
+          }
+          if (response.status === 404 && body?.error === 'instance_not_found') {
+            setBadgeState('info', 'Instância já removida.', 5000);
+            closeDeleteModal();
+            await refreshInstances({ withSkeleton: true });
+            return;
+          }
           alert('Falha ao excluir: HTTP ' + response.status + (txt ? ' — ' + txt : ''));
           setBadgeState('error', 'Falha ao excluir ' + iidTarget, 5000);
           return;
