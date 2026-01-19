@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { existsSync } from 'node:fs';
 import path from 'path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import helmet from 'helmet';
@@ -21,9 +22,12 @@ interface RequestWithId extends Request {
   id?: string;
 }
 
-const PUBLIC_DIR = path.resolve(process.cwd(), 'public');
+const VITE_DIST_DIR = path.resolve(process.cwd(), 'dist/web');
+const LEGACY_PUBLIC_DIR = path.resolve(process.cwd(), 'public');
+const PUBLIC_DIR = existsSync(VITE_DIST_DIR) ? VITE_DIST_DIR : LEGACY_PUBLIC_DIR;
 const STREAM_PING_INTERVAL_MS = 15000;
 const STREAM_BACKLOG_LIMIT = 200;
+const SPA_FALLBACK_EXCLUDE_PREFIXES = ['/instances', '/webhooks'];
 
 const app = express();
 app.disable('x-powered-by');
@@ -164,6 +168,13 @@ app.get('/stream', (req, res) => {
   req.on('error', cleanup);
   res.on('close', cleanup);
   res.on('error', cleanup);
+});
+
+app.get('*', (req, res, next) => {
+  if (SPA_FALLBACK_EXCLUDE_PREFIXES.some((prefix) => req.path.startsWith(prefix))) {
+    return next();
+  }
+  res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
 app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
