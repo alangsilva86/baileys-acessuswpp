@@ -15,6 +15,8 @@ import type { DashboardInstance, InstanceStatus, MetricDatum, MetricTone } from 
 
 type DashboardMainProps = {
   instance?: DashboardInstance | null;
+  onRefresh?: () => void;
+  onDeleteInstance?: () => void;
 };
 
 const STATUS_META: Record<InstanceStatus, { label: string; tone: string; icon: ReactNode }> = {
@@ -76,7 +78,7 @@ const METRIC_ICONS: Record<string, ReactNode> = {
   transit: <Send className="h-4 w-4 text-slate-500" aria-hidden="true" />,
 };
 
-export default function DashboardMain({ instance }: DashboardMainProps) {
+export default function DashboardMain({ instance, onRefresh, onDeleteInstance }: DashboardMainProps) {
   if (!instance) {
     return (
       <section className="flex h-full flex-col items-center justify-center gap-2 px-6 py-10 text-center">
@@ -107,13 +109,17 @@ export default function DashboardMain({ instance }: DashboardMainProps) {
           <p className="text-xs text-slate-500">Atualizado {instance.updatedAt || '—'}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm hover:bg-slate-50">
+          <button
+            type="button"
+            onClick={onRefresh}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm hover:bg-slate-50"
+          >
             Atualizar dados
           </button>
           <button type="button" className="rounded-lg bg-slate-900 px-3 py-2 text-xs text-white shadow-sm hover:bg-slate-800">
             Envio rapido
           </button>
-          <SettingsMenu />
+          <SettingsMenu onDelete={onDeleteInstance} />
         </div>
       </header>
 
@@ -259,7 +265,8 @@ function HealthCard({ label, value, icon }: { label: string; value: string; icon
   );
 }
 
-function SettingsMenu() {
+function SettingsMenu({ onDelete }: { onDelete?: () => void }) {
+  const deleteDisabled = !onDelete;
   return (
     <details className="relative">
       <summary className="list-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm hover:bg-slate-50">
@@ -275,7 +282,12 @@ function SettingsMenu() {
         <button type="button" className="w-full rounded-lg px-3 py-2 text-left text-xs text-rose-600 hover:bg-rose-50">
           Logout da instancia
         </button>
-        <button type="button" className="w-full rounded-lg px-3 py-2 text-left text-xs text-rose-600 hover:bg-rose-50">
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={deleteDisabled}
+          className={`w-full rounded-lg px-3 py-2 text-left text-xs text-rose-600 ${deleteDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:bg-rose-50'}`}
+        >
           Excluir instancia
         </button>
       </div>
