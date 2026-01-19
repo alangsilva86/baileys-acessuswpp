@@ -20,6 +20,80 @@ function currentInstanceId() {
   return els.selInstance?.value || '';
 }
 
+let lastFocusedElement = null;
+const DEFAULT_DELETE_MESSAGE =
+  'A instância padrão não pode ser excluída. Defina outra instância como padrão antes de continuar.';
+
+function rememberFocus() {
+  if (typeof document === 'undefined') return;
+  const active = document.activeElement;
+  lastFocusedElement = active instanceof HTMLElement ? active : null;
+}
+
+function restoreFocus() {
+  if (lastFocusedElement && typeof lastFocusedElement.focus === 'function') {
+    lastFocusedElement.focus();
+  }
+  lastFocusedElement = null;
+}
+
+function setModalVisibility(modal, open) {
+  if (!modal) return;
+  modal.classList.toggle('hidden', !open);
+  modal.classList.toggle('flex', open);
+  modal.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+
+function getDialogElement(modal) {
+  if (!modal) return null;
+  return modal.querySelector('[role="dialog"]') || modal;
+}
+
+function getFocusableElements(container) {
+  if (!container) return [];
+  return Array.from(
+    container.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
+  ).filter((el) => !el.hasAttribute('disabled') && el.getAttribute('aria-hidden') !== 'true');
+}
+
+function focusModal(modal, preferred) {
+  const dialog = getDialogElement(modal);
+  if (!dialog) return;
+  const attemptFocus = () => {
+    const focusables = getFocusableElements(dialog);
+    const target = preferred && focusables.includes(preferred) ? preferred : focusables[0] || dialog;
+    if (target && typeof target.focus === 'function') target.focus();
+  };
+  setTimeout(attemptFocus, 0);
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(attemptFocus);
+  }
+}
+
+function trapModalFocus(ev, modal) {
+  if (ev.key !== 'Tab') return;
+  if (!modal || modal.classList.contains('hidden')) return;
+  const dialog = getDialogElement(modal);
+  if (!dialog) return;
+  const focusables = getFocusableElements(dialog);
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  if (!dialog.contains(active)) {
+    ev.preventDefault();
+    first.focus();
+    return;
+  }
+  if (ev.shiftKey && (active === first || active === dialog)) {
+    ev.preventDefault();
+    last.focus();
+  } else if (!ev.shiftKey && active === last) {
+    ev.preventDefault();
+    first.focus();
+  }
+}
+
 function hasCriticalToken(showFeedback = false) {
   const iid = currentInstanceId();
   if (!iid || !els.criticalConfirmInput) return false;
@@ -34,7 +108,7 @@ function hasCriticalToken(showFeedback = false) {
 
 function syncCriticalButtons() {
   const allow = hasCriticalToken(false);
-  const buttons = [els.btnLogout, els.btnWipe, els.btnPair].filter(Boolean);
+  const buttons = [els.btnLogout, els.btnWipe, els.btnPair, els.btnDelete].filter(Boolean);
   buttons.forEach((btn) => {
     btn.disabled = !allow;
     btn.classList.toggle('opacity-50', !allow);
@@ -66,32 +140,38 @@ function handleInstanceOfflineError(err) {
 
 function openDeleteModal(iid, name) {
   if (!els.modalDelete) return;
+  if (iid === 'default') {
+    setBadgeState('error', DEFAULT_DELETE_MESSAGE, 7000);
+    return;
+  }
+  rememberFocus();
   els.modalDelete.dataset.iid = iid;
   els.modalDelete.dataset.name = name;
   if (els.modalInstanceName) els.modalInstanceName.textContent = name;
-  els.modalDelete.classList.remove('hidden');
-  els.modalDelete.classList.add('flex');
+  setModalVisibility(els.modalDelete, true);
+  focusModal(els.modalDelete, els.modalCancel || els.modalConfirm);
 }
 
 function closeDeleteModal() {
   if (!els.modalDelete) return;
   delete els.modalDelete.dataset.iid;
   delete els.modalDelete.dataset.name;
-  els.modalDelete.classList.add('hidden');
-  els.modalDelete.classList.remove('flex');
+  setModalVisibility(els.modalDelete, false);
+  restoreFocus();
 }
 
 function openPairModal(code) {
   if (!els.pairModal) return;
+  rememberFocus();
   if (els.pairModalCode) els.pairModalCode.textContent = code || '—';
-  els.pairModal.classList.remove('hidden');
-  els.pairModal.classList.add('flex');
+  setModalVisibility(els.pairModal, true);
+  focusModal(els.pairModal, els.pairModalCopy || els.pairModalClose);
 }
 
 function closePairModal() {
   if (!els.pairModal) return;
-  els.pairModal.classList.add('hidden');
-  els.pairModal.classList.remove('flex');
+  setModalVisibility(els.pairModal, false);
+  restoreFocus();
 }
 
 async function performInstanceAction(action, iid, key, context = {}) {
@@ -173,6 +253,7 @@ async function performInstanceAction(action, iid, key, context = {}) {
 
 function bindModalEvents() {
   if (els.modalDelete) {
+    els.modalDelete.addEventListener('keydown', (ev) => trapModalFocus(ev, els.modalDelete));
     els.modalDelete.addEventListener('click', (ev) => {
       if (ev.target === els.modalDelete) closeDeleteModal();
     });
@@ -214,6 +295,11 @@ function bindModalEvents() {
               body = JSON.parse(txt);
             } catch {}
           }
+          if (response.status === 400 && body?.error === 'default_instance_cannot_be_deleted') {
+            setBadgeState('error', DEFAULT_DELETE_MESSAGE, 7000);
+            closeDeleteModal();
+            return;
+          }
           if (response.status === 503) {
             setBadgeState('error', 'Serviço indisponível para excluir a instância. Tente novamente.', 6000);
             return;
@@ -245,6 +331,7 @@ function bindModalEvents() {
 
 function bindPairModal() {
   if (!els.pairModal) return;
+  els.pairModal.addEventListener('keydown', (ev) => trapModalFocus(ev, els.pairModal));
   els.pairModal.addEventListener('click', (ev) => {
     if (ev.target === els.pairModal) closePairModal();
   });
@@ -266,6 +353,15 @@ function bindPairModal() {
 
 function bindDocumentShortcuts() {
   document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Tab') {
+      if (els.modalDelete && !els.modalDelete.classList.contains('hidden')) {
+        trapModalFocus(ev, els.modalDelete);
+      }
+      if (els.pairModal && !els.pairModal.classList.contains('hidden')) {
+        trapModalFocus(ev, els.pairModal);
+      }
+      return;
+    }
     if (ev.key !== 'Escape') return;
     if (els.modalDelete && !els.modalDelete.classList.contains('hidden')) closeDeleteModal();
     if (els.pairModal && !els.pairModal.classList.contains('hidden')) closePairModal();

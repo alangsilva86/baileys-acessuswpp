@@ -10,7 +10,6 @@ import {
   STATUS_META,
   describeConnection,
   els,
-  getStatusCounts,
   isInstanceLocked,
   setBadgeState,
   setCardsLoading,
@@ -430,8 +429,6 @@ function createInstanceCard(inst, selectedId) {
     ? connection.meta.cardLabel(connection.updatedText)
     : connection.meta?.label || 'Desconhecido';
   const sent = inst.counters?.sent || 0;
-  const statusCounts = getStatusCounts(inst.counters?.statusCounts || inst.counters?.status || {});
-  const statusCardsHtml = buildStatusCards(statusCounts);
   const usagePercent = percent(inst.rate?.usage || 0);
   const meterColor = usagePercent >= 90 ? 'bg-rose-400' : usagePercent >= 70 ? 'bg-amber-400' : 'bg-emerald-400';
   const userId = inst.user?.id ? escapeHtml(inst.user.id) : '—';
@@ -462,74 +459,86 @@ function createInstanceCard(inst, selectedId) {
     ? 'bg-emerald-50 border-emerald-100'
     : 'bg-slate-50 border-slate-100';
   const etaShort = etaLabel(queueInfo.metrics?.etaSeconds ?? queueInfo.etaSeconds);
-  const queueSummary = queueEnabled ? `${queueInfo.waiting ?? queueInfo.count ?? 0} pend. / ${queueInfo.active ?? queueInfo.activeCount ?? 0} exec.` : 'Envio direto';
+  const queueSummary = queueEnabled
+    ? `${queueInfo.waiting ?? queueInfo.count ?? 0} pendentes / ${queueInfo.active ?? queueInfo.activeCount ?? 0} em execução`
+    : 'Envio direto';
   const usageWidth = Math.min(Math.max(usagePercent, 0), 100);
   const riskWidth = Math.min(Math.max(riskRatio, 0), 100);
+  const networkStatusLabel =
+    network.status === 'ok'
+      ? 'ok'
+      : network.status === 'blocked'
+      ? 'bloqueado'
+      : network.status === 'failed'
+      ? 'falha'
+      : 'desconhecido';
 
   card.innerHTML = `
     <div class="flex items-start justify-between gap-3">
       <div class="flex-1 min-w-0 space-y-1">
         <label class="text-xs font-medium text-slate-500">Nome</label>
         <input data-field="name" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm font-semibold text-slate-900 truncate" value="${escapeHtml(inst.name)}" />
-        <p class="text-[11px] text-slate-500 truncate">WhatsApp: ${userId}</p>
+        <p class="text-xs text-slate-500 truncate">WhatsApp: ${userId}</p>
       </div>
       <div class="flex flex-col items-end gap-1 shrink-0 text-right">
         <div class="flex items-center gap-2 flex-wrap justify-end">
           <span class="px-2 py-0.5 rounded text-xs whitespace-nowrap ${badgeClass}">${escapeHtml(statusLabel)}</span>
-          <button data-act="select" data-iid="${inst.id}" class="px-2 py-1 text-[11px] border border-slate-200 rounded-lg hover:border-slate-300">Selecionar</button>
-          <button data-act="delete" data-iid="${inst.id}" class="px-2 py-1 text-[11px] border border-rose-200 text-rose-700 rounded-lg hover:border-rose-300">Excluir</button>
+          <button data-act="select" data-iid="${inst.id}" class="px-2 py-1 text-xs border border-slate-200 rounded-lg hover:border-slate-300">Selecionar</button>
         </div>
-        <span class="text-[11px] text-slate-500 whitespace-nowrap">${connection.updatedText || '—'}</span>
+        <span class="text-xs text-slate-500 whitespace-nowrap">Atualizado ${connection.updatedText || '—'}</span>
       </div>
     </div>
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs auto-rows-fr">
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs auto-rows-fr">
+      <div class="rounded-lg p-3 border bg-slate-50 min-h-[92px]">
+        <p class="text-xs uppercase tracking-wide text-slate-500">Conexão</p>
+        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${escapeHtml(statusLabel)}</p>
+        <p class="text-xs text-slate-500 truncate">Atualizado ${connection.updatedText || '—'}</p>
+      </div>
       <div class="rounded-lg p-3 border ${queueBg} min-h-[92px]">
-        <p class="text-[11px] uppercase tracking-wide text-slate-500">Fila</p>
+        <p class="text-xs uppercase tracking-wide text-slate-500">Fila</p>
         <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${queueSummary}</p>
-        <p class="text-[11px] text-slate-500 truncate">ETA: ${etaShort} • ${queueLabel}</p>
-        <p class="text-[11px] text-slate-500 truncate">Modo: ${modeGuess}</p>
+        <p class="text-xs text-slate-500 truncate">Tempo estimado: ${etaShort} • ${queueLabel}</p>
       </div>
       <div class="rounded-lg p-3 border bg-slate-50 min-h-[92px]">
-        <p class="text-[11px] uppercase tracking-wide text-slate-500">Risco</p>
-        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${riskRatio}% desconhecidos</p>
+        <p class="text-xs uppercase tracking-wide text-slate-500">Risco</p>
+        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${riskRatio}% desconhecido</p>
         <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden mt-1">
           <div class="h-full ${riskBarClass}" style="width:${riskWidth}%"></div>
         </div>
-        <p class="text-[11px] text-slate-500 truncate">Safe: ${safeCount} • Threshold: ${riskCfg.threshold ?? 0.7}</p>
-      </div>
-      <div class="rounded-lg p-3 border bg-slate-50 min-h-[92px]">
-        <p class="text-[11px] uppercase tracking-wide text-slate-500">Limite</p>
-        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${usagePercent}% em uso</p>
-        <div class="h-2 bg-slate-100 rounded-full overflow-hidden mt-1">
-          <div class="h-full ${meterColor}" style="width:${usageWidth}%"></div>
-        </div>
-        <p class="text-[11px] text-slate-500 truncate">Enviadas: ${sent}</p>
-      </div>
-      <div class="rounded-lg p-3 border ${proxyBg} min-h-[92px]">
-        <p class="text-[11px] uppercase tracking-wide ${proxyText}">Rede</p>
-        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${escapeHtml(network.isp || network.asn || '—')}</p>
-        <p class="text-[11px] text-slate-500 truncate">Latência: ${network.latencyMs != null ? escapeHtml(String(network.latencyMs)) + ' ms' : '—'}</p>
-        <p class="text-[11px] text-slate-500 truncate">Status: ${escapeHtml(network.status || 'unknown')}</p>
-      </div>
-    </div>
-
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-      <div class="rounded-lg p-3 border bg-slate-50">
-        <p class="text-[11px] uppercase tracking-wide text-slate-500">Guardião</p>
-        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${queueInfo.paused ? 'Pausado' : 'Ativo'}</p>
-        <p class="text-[11px] text-slate-500 truncate">Safe: ${safeCount} • Modo: ${modeGuess}</p>
-      </div>
-      <div class="rounded-lg p-3 border bg-slate-50">
-        <p class="text-[11px] uppercase tracking-wide text-slate-500">Tier & id</p>
-        <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${inst.id}</p>
-        <p class="text-[11px] text-slate-500 truncate">${tierBadge ? 'Tier ativo' : 'Sem tier'}</p>
+        <p class="text-xs text-slate-500 truncate">Contatos seguros: ${safeCount} • Limiar: ${riskCfg.threshold ?? 0.7}</p>
       </div>
     </div>
 
     <details class="rounded-lg border border-slate-200 bg-slate-50/80 p-3">
       <summary class="text-sm font-semibold text-slate-700 cursor-pointer select-none">Configurações e notas</summary>
       <div class="mt-2 space-y-2">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+          <div class="rounded-lg p-3 border bg-white/80">
+            <p class="text-xs uppercase tracking-wide text-slate-500">Limite</p>
+            <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${usagePercent}% em uso</p>
+            <div class="h-2 bg-slate-100 rounded-full overflow-hidden mt-1">
+              <div class="h-full ${meterColor}" style="width:${usageWidth}%"></div>
+            </div>
+            <p class="text-xs text-slate-500 truncate">Enviadas: ${sent}</p>
+          </div>
+          <div class="rounded-lg p-3 border ${proxyBg}">
+            <p class="text-xs uppercase tracking-wide ${proxyText}">Rede</p>
+            <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${escapeHtml(network.isp || network.asn || '—')}</p>
+            <p class="text-xs text-slate-500 truncate">Latência: ${network.latencyMs != null ? escapeHtml(String(network.latencyMs)) + ' ms' : '—'}</p>
+            <p class="text-xs text-slate-500 truncate">Status: ${escapeHtml(networkStatusLabel)}</p>
+          </div>
+          <div class="rounded-lg p-3 border bg-white/80">
+            <p class="text-xs uppercase tracking-wide text-slate-500">Guardião</p>
+            <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${queueInfo.paused ? 'Pausado' : 'Ativo'}</p>
+            <p class="text-xs text-slate-500 truncate">Modo: ${modeGuess}</p>
+          </div>
+          <div class="rounded-lg p-3 border bg-white/80">
+            <p class="text-xs uppercase tracking-wide text-slate-500">Tier e ID</p>
+            <p class="text-sm font-semibold text-slate-800 leading-tight truncate">${inst.id}</p>
+            <p class="text-xs text-slate-500 truncate">${tierBadge ? 'Tier ativo' : 'Sem tier'}</p>
+          </div>
+        </div>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <div>
             <label class="text-xs font-medium text-slate-500">Proxy (http/https)</label>
@@ -539,7 +548,7 @@ function createInstanceCard(inst, selectedId) {
           <div class="space-y-2">
             <div class="grid grid-cols-3 gap-2">
               <div>
-                <label class="text-[11px] font-medium text-slate-500">Modo</label>
+                <label class="text-xs font-medium text-slate-500">Modo</label>
                 <select data-act="mode" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs">
                   <option value="ninja"${modeGuess === 'ninja' ? ' selected' : ''}>Ninja</option>
                   <option value="equilibrado"${modeGuess === 'equilibrado' ? ' selected' : ''}>Equilibrado</option>
@@ -547,16 +556,16 @@ function createInstanceCard(inst, selectedId) {
                 </select>
               </div>
               <div>
-                <label class="text-[11px] font-medium text-slate-500">Threshold</label>
+                <label class="text-xs font-medium text-slate-500">Limiar</label>
                 <input data-field="risk-threshold" data-iid="${inst.id}" type="number" step="0.05" min="0.1" max="1" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" value="${riskCfg.threshold ?? 0.7}" />
               </div>
               <div>
-                <label class="text-[11px] font-medium text-slate-500">Interleave</label>
+                <label class="text-xs font-medium text-slate-500">Interleave</label>
                 <input data-field="risk-interleave" data-iid="${inst.id}" type="number" min="1" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" value="${riskCfg.interleaveEvery ?? 5}" />
               </div>
             </div>
             <div>
-              <label class="text-[11px] font-medium text-slate-500">Safe contacts (E164, separados por vírgula)</label>
+              <label class="text-xs font-medium text-slate-500">Contatos seguros (E.164, separados por vírgula)</label>
               <textarea data-field="risk-safe" data-iid="${inst.id}" rows="2" class="mt-1 w-full border rounded-lg px-2 py-1 text-xs" placeholder="5511999999999,551188888888">${Array.isArray(riskCfg.safeContacts) ? riskCfg.safeContacts.join(',') : ''}</textarea>
             </div>
             <button data-act="save-risk" data-iid="${inst.id}" class="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg">Salvar segurança</button>
@@ -874,7 +883,7 @@ function updateGlobalHealth() {
     .filter((n) => Number.isFinite(n));
   const avgRatio = ratios.length ? Math.round((ratios.reduce((a, b) => a + b, 0) / ratios.length) * 100) : null;
   els.ghRisk.textContent = avgRatio != null ? `${avgRatio}%` : '—';
-  els.ghRiskHint.textContent = 'Unknown ratio médio';
+  els.ghRiskHint.textContent = 'Percentual desconhecido médio';
   els.ghRisk.classList.toggle('text-amber-600', avgRatio != null && avgRatio >= 60);
   els.ghRisk.classList.toggle('text-emerald-600', avgRatio != null && avgRatio < 60);
 
@@ -886,7 +895,7 @@ function updateGlobalHealth() {
     els.ghQueue.textContent = `${totalQueue} msgs`;
     const eta = queue.metrics?.etaSeconds ?? queue.etaSeconds ?? null;
     const etaLabel = eta != null ? `${Math.ceil(eta / 60)} min` : 'calculando…';
-    els.ghQueueHint.textContent = `Na fila: ${waiting}, em execução: ${activeJobs} • ETA: ${etaLabel}`;
+    els.ghQueueHint.textContent = `Na fila: ${waiting}, em execução: ${activeJobs} • Tempo estimado (ETA): ${etaLabel}`;
     els.ghQueue.classList.toggle('text-rose-600', totalQueue > 1000);
     els.ghQueue.classList.toggle('text-amber-600', totalQueue > 200 && totalQueue <= 1000);
     els.ghQueue.classList.toggle('text-slate-700', totalQueue <= 200);
@@ -1029,8 +1038,8 @@ async function callInstanceAction(path, button, busyLabel, successMsg, errorMsg)
     console.error('[instances] ação rápida falhou', err);
     const code = err?.body?.error;
     if (code === 'no_safe_contacts') {
-      showError('Configure contatos seguros antes de enviar um safe (card da instância > Segurança).');
-      setBadgeState('error', 'Adicione safe contacts para usar esta ação.', 5000);
+      showError('Configure contatos seguros antes de enviar uma mensagem segura (card da instância > Segurança).');
+      setBadgeState('error', 'Adicione contatos seguros para usar esta ação.', 5000);
     } else {
       showError(errorMsg || 'Ação não concluída');
     }
@@ -1058,7 +1067,13 @@ if (typeof document !== 'undefined') {
   }
   if (els.btnSendSafe) {
     els.btnSendSafe.addEventListener('click', () => {
-      void callInstanceAction('/risk/send-safe', els.btnSendSafe, 'Enviando…', 'Safe enviado para diluir risco.', 'Falha ao enviar safe');
+      void callInstanceAction(
+        '/risk/send-safe',
+        els.btnSendSafe,
+        'Enviando…',
+        'Mensagem segura enviada para diluir risco (contatos seguros).',
+        'Falha ao enviar mensagem segura',
+      );
     });
   }
   if (els.btnRevalidateProxy) {

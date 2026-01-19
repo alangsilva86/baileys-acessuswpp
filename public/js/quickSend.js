@@ -66,6 +66,71 @@ const QUICK_TYPE_META = {
 const MAX_TEXT_LENGTH = 4096;
 const QUICK_RESULT_LIMIT = 5;
 
+let lastFocusedElement = null;
+
+function rememberFocus() {
+  if (typeof document === 'undefined') return;
+  const active = document.activeElement;
+  lastFocusedElement = active instanceof HTMLElement ? active : null;
+}
+
+function restoreFocus() {
+  if (lastFocusedElement && typeof lastFocusedElement.focus === 'function') {
+    lastFocusedElement.focus();
+  }
+  lastFocusedElement = null;
+}
+
+function getDialogElement(modal) {
+  if (!modal) return null;
+  return modal.querySelector('[role="dialog"]') || modal;
+}
+
+function getFocusableElements(container) {
+  if (!container) return [];
+  return Array.from(
+    container.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
+  ).filter((el) => !el.hasAttribute('disabled') && el.getAttribute('aria-hidden') !== 'true');
+}
+
+function focusModal(modal, preferred) {
+  const dialog = getDialogElement(modal);
+  if (!dialog) return;
+  const attemptFocus = () => {
+    const focusables = getFocusableElements(dialog);
+    const target = preferred && focusables.includes(preferred) ? preferred : focusables[0] || dialog;
+    if (target && typeof target.focus === 'function') target.focus();
+  };
+  setTimeout(attemptFocus, 0);
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(attemptFocus);
+  }
+}
+
+function trapModalFocus(ev, modal) {
+  if (ev.key !== 'Tab') return;
+  if (!modal || modal.classList.contains('hidden')) return;
+  const dialog = getDialogElement(modal);
+  if (!dialog) return;
+  const focusables = getFocusableElements(dialog);
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  if (!dialog.contains(active)) {
+    ev.preventDefault();
+    first.focus();
+    return;
+  }
+  if (ev.shiftKey && (active === first || active === dialog)) {
+    ev.preventDefault();
+    last.focus();
+  } else if (!ev.shiftKey && active === last) {
+    ev.preventDefault();
+    first.focus();
+  }
+}
+
 function createLabeledInput({ label, role, type = 'text', placeholder = '', initial = '' }) {
   const wrap = document.createElement('div');
   wrap.className = 'space-y-1';
@@ -86,7 +151,14 @@ function createLabeledInput({ label, role, type = 'text', placeholder = '', init
 function toggleQuickSendModal(open) {
   if (!els.quickSendModal) return;
   const shouldOpen = open === true || (open !== false && els.quickSendModal.classList.contains('hidden'));
+  if (shouldOpen) rememberFocus();
   els.quickSendModal.classList[shouldOpen ? 'remove' : 'add']('hidden');
+  els.quickSendModal.setAttribute('aria-hidden', shouldOpen ? 'false' : 'true');
+  if (shouldOpen) {
+    focusModal(els.quickSendModal, els.inpApiKey || els.inpPhone || els.btnSend);
+  } else {
+    restoreFocus();
+  }
 }
 
 function setSendOut(message, tone = 'info') {
@@ -571,7 +643,7 @@ async function handleQuickSend() {
   try {
     key = requireKey();
   } catch {
-    setSendOut('Informe a API Key para enviar mensagens.', 'error');
+    setSendOut('Informe a chave de API para enviar mensagens.', 'error');
     return;
   }
 
@@ -760,6 +832,14 @@ export function initQuickSend() {
     els.btnCloseQuickSend.addEventListener('click', () => toggleQuickSendModal(false));
   }
   if (els.quickSendModal) {
+    els.quickSendModal.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        toggleQuickSendModal(false);
+        return;
+      }
+      if (ev.key === 'Tab') trapModalFocus(ev, els.quickSendModal);
+    });
     els.quickSendModal.addEventListener('click', (ev) => {
       if (ev.target === els.quickSendModal) toggleQuickSendModal(false);
     });

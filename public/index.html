@@ -15,33 +15,33 @@
 
     <section class="p-4 bg-white rounded-2xl shadow">
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3" id="globalHealth">
-        <div class="p-3 rounded-xl border border-slate-100 bg-gradient-to-br from-emerald-50 to-emerald-100 backdrop-blur">
+        <div class="p-4 rounded-xl border border-slate-200 bg-emerald-50">
           <div class="flex items-center justify-between">
-            <div class="text-[11px] font-semibold uppercase tracking-wide text-emerald-700">Instâncias ativas</div>
+            <div class="text-xs font-semibold uppercase tracking-wide text-emerald-700">Instâncias ativas</div>
             <span class="text-emerald-700">🛰️</span>
           </div>
           <div id="ghInstances" class="mt-1 text-2xl font-semibold text-emerald-800">—</div>
-          <div id="ghInstancesHint" class="text-xs text-emerald-700/80 mt-1">Monitorando…</div>
+          <div id="ghInstancesHint" class="text-xs text-emerald-700/80 mt-1">Monitorando conexões</div>
         </div>
-        <div class="p-3 rounded-xl border border-slate-100 bg-gradient-to-br from-indigo-50 to-indigo-100 backdrop-blur">
+        <div class="p-4 rounded-xl border border-slate-200 bg-indigo-50">
           <div class="flex items-center justify-between">
-            <div class="text-[11px] font-semibold uppercase tracking-wide text-indigo-700">Fila</div>
+            <div class="text-xs font-semibold uppercase tracking-wide text-indigo-700">Fila</div>
             <span class="text-indigo-700">⏱️</span>
           </div>
           <div id="ghQueue" class="mt-1 text-2xl font-semibold text-indigo-800">—</div>
-          <div id="ghQueueHint" class="text-xs text-indigo-700/80 mt-1">Fila segura</div>
+          <div id="ghQueueHint" class="text-xs text-indigo-700/80 mt-1">Mensagens em andamento</div>
         </div>
-        <div class="p-3 rounded-xl border border-slate-100 bg-gradient-to-br from-sky-50 to-sky-100 backdrop-blur">
+        <div class="p-4 rounded-xl border border-slate-200 bg-sky-50">
           <div class="flex items-center justify-between">
-            <div class="text-[11px] font-semibold uppercase tracking-wide text-sky-700">Proxies</div>
+            <div class="text-xs font-semibold uppercase tracking-wide text-sky-700">Proxies</div>
             <span class="text-sky-700">📶</span>
           </div>
           <div id="ghProxy" class="mt-1 text-2xl font-semibold text-sky-800">—</div>
           <div id="ghProxyHint" class="text-xs text-sky-700/80 mt-1">Saúde da rede</div>
         </div>
-        <div class="p-3 rounded-xl border border-slate-100 bg-gradient-to-br from-amber-50 to-amber-100 backdrop-blur">
+        <div class="p-4 rounded-xl border border-slate-200 bg-amber-50">
           <div class="flex items-center justify-between">
-            <div class="text-[11px] font-semibold uppercase tracking-wide text-amber-700">Risco (Unknown)</div>
+            <div class="text-xs font-semibold uppercase tracking-wide text-amber-700">Risco (desconhecido)</div>
             <span class="text-amber-700">🛡️</span>
           </div>
           <div id="ghRisk" class="mt-1 text-2xl font-semibold text-amber-800">—</div>
@@ -61,29 +61,16 @@
           </div>
         </div>
         <button id="btnNew" class="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">+ Nova instância</button>
-        <span class="text-sm text-slate-500">Sessões em: <code id="sessionsRoot"></code></span>
-      </div>
-      <div id="noteCard" class="mt-3 hidden border border-sky-100 bg-sky-50 rounded-2xl p-3 space-y-2">
-        <div class="flex items-center justify-between gap-2">
-          <p class="text-xs font-semibold uppercase tracking-wide text-sky-700">Contexto da instância</p>
-          <span id="noteMeta" class="text-xs text-slate-500"></span>
-        </div>
-        <div class="space-y-2">
-          <textarea id="instanceNote" rows="3" class="w-full border rounded-lg p-2 text-sm" placeholder="Anotações sobre esta instância..."></textarea>
-          <div class="flex items-center justify-between text-[11px] text-slate-500">
-            <span id="noteStatus" aria-live="polite"></span>
-            <button id="noteRetry" class="hidden text-sky-600 hover:underline" type="button">Tentar novamente</button>
-          </div>
-        </div>
+        <span class="text-sm text-slate-500">Ambiente / sessões: <code id="sessionsRoot"></code></span>
       </div>
     </section>
 
-    <section id="selectedStateSection" class="p-4 rounded-2xl shadow bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 text-slate-100 border border-slate-800/70">
+    <section id="selectedStateSection" class="p-4 rounded-2xl shadow bg-slate-900 text-slate-100 border border-slate-800/70">
       <div id="selectedStateEmpty" class="text-sm text-slate-200">Selecione uma instância para ver seu estado operacional.</div>
       <div id="selectedStateContent" class="hidden space-y-3">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div class="space-y-1">
-            <p class="text-[11px] uppercase tracking-wide text-slate-300">Estado da instância selecionada</p>
+            <p class="text-xs uppercase tracking-wide text-slate-300">Estado da instância selecionada</p>
             <div class="flex items-center gap-3 flex-wrap">
               <h2 id="selectedName" class="text-lg font-semibold text-white truncate">—</h2>
               <span id="selectedBadge" class="px-3 py-1 rounded-full text-xs bg-slate-200 text-slate-800">—</span>
@@ -97,22 +84,22 @@
         </div>
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
           <div class="rounded-xl bg-white/10 border border-white/10 p-3">
-            <p class="text-[11px] uppercase tracking-wide text-slate-300">Conexão</p>
+            <p class="text-xs uppercase tracking-wide text-slate-300">Conexão</p>
             <p id="selectedConnection" class="text-sm font-semibold text-white mt-1">—</p>
             <p class="text-xs text-slate-200/80">Estado e última atualização.</p>
           </div>
           <div class="rounded-xl bg-white/10 border border-white/10 p-3">
-            <p class="text-[11px] uppercase tracking-wide text-slate-300">Fila</p>
+            <p class="text-xs uppercase tracking-wide text-slate-300">Fila</p>
             <p id="selectedQueue" class="text-sm font-semibold text-white mt-1">—</p>
-            <p class="text-xs text-slate-200/80">Pausa, ETA e pendências.</p>
+            <p class="text-xs text-slate-200/80">Pausa, tempo estimado (ETA) e pendências.</p>
           </div>
           <div class="rounded-xl bg-white/10 border border-white/10 p-3">
-            <p class="text-[11px] uppercase tracking-wide text-slate-300">Risco</p>
+            <p class="text-xs uppercase tracking-wide text-slate-300">Risco</p>
             <p id="selectedRisk" class="text-sm font-semibold text-white mt-1">—</p>
-            <p class="text-xs text-slate-200/80">Unknown ratio e safe contacts.</p>
+            <p class="text-xs text-slate-200/80">Percentual desconhecido e contatos seguros.</p>
           </div>
           <div class="rounded-xl bg-white/10 border border-white/10 p-3">
-            <p class="text-[11px] uppercase tracking-wide text-slate-300">Recomendação</p>
+            <p class="text-xs uppercase tracking-wide text-slate-300">Recomendação</p>
             <p id="selectedActionHint" class="text-sm font-semibold text-emerald-200 mt-1">—</p>
             <p class="text-xs text-slate-200/80">Ação sugerida agora.</p>
           </div>
@@ -122,6 +109,32 @@
 
     <section class="grid lg:grid-cols-[1.5fr_1fr] gap-6 items-start">
       <div class="space-y-4">
+        <div id="instanceActionBar" class="hidden sticky top-2 z-10 border border-slate-200 bg-white/90 backdrop-blur rounded-xl px-4 py-3 shadow flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-3 min-w-0">
+            <div class="flex flex-col min-w-0">
+              <span id="iabName" class="text-sm font-semibold text-slate-900 truncate">Selecione uma instância</span>
+              <span id="iabUpdated" class="text-xs text-slate-500 truncate">—</span>
+            </div>
+            <span id="iabStatus" class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700 whitespace-nowrap">—</span>
+          </div>
+          <div class="flex flex-wrap gap-2 justify-end">
+            <button id="iabSave" data-act="save" class="px-3 py-2 text-xs bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">Salvar</button>
+            <button id="iabQr" data-act="qr" class="px-3 py-2 text-xs border border-slate-200 text-slate-700 rounded-lg">Ver QR</button>
+          </div>
+        </div>
+        <details id="noteCard" class="hidden border border-sky-100 bg-sky-50 rounded-2xl p-3">
+          <summary class="flex items-center justify-between gap-2">
+            <span class="text-xs font-semibold uppercase tracking-wide text-sky-700">Notas e contexto</span>
+            <span id="noteMeta" class="text-xs text-slate-500"></span>
+          </summary>
+          <div class="mt-2 space-y-2">
+            <textarea id="instanceNote" rows="3" class="w-full border rounded-lg p-2 text-sm" placeholder="Anotações sobre esta instância..."></textarea>
+            <div class="flex items-center justify-between text-xs text-slate-500">
+              <span id="noteStatus" aria-live="polite"></span>
+              <button id="noteRetry" class="hidden text-sky-600 hover:underline" type="button">Tentar novamente</button>
+            </div>
+          </div>
+        </details>
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div class="flex flex-wrap items-center gap-2">
             <label class="sr-only" for="instanceSearch">Buscar instâncias</label>
@@ -147,22 +160,6 @@
             </select>
           </div>
           <span id="instanceCounter" class="text-sm text-slate-500">0/0</span>
-        </div>
-        <div id="instanceActionBar" class="hidden sticky top-2 z-10 border border-slate-200 bg-white/90 backdrop-blur rounded-xl px-4 py-3 shadow flex-wrap items-center justify-between gap-3">
-          <div class="flex items-center gap-3 min-w-0">
-            <div class="flex flex-col min-w-0">
-              <span id="iabName" class="text-sm font-semibold text-slate-900 truncate">Selecione uma instância</span>
-              <span id="iabUpdated" class="text-xs text-slate-500 truncate">—</span>
-            </div>
-            <span id="iabStatus" class="px-2 py-0.5 rounded text-xs bg-slate-100 text-slate-700 whitespace-nowrap">—</span>
-          </div>
-          <div class="flex flex-wrap gap-2 justify-end">
-            <button id="iabSave" data-act="save" class="px-3 py-2 text-xs bg-sky-600 hover:bg-sky-700 text-white rounded-lg">Salvar</button>
-            <button id="iabQr" data-act="qr" class="px-3 py-2 text-xs border border-slate-200 rounded-lg">Ver QR</button>
-            <button id="iabLogout" data-act="logout" class="px-3 py-2 text-xs border border-slate-200 rounded-lg">Logout</button>
-            <button id="iabWipe" data-act="wipe" class="px-3 py-2 text-xs border border-amber-200 text-amber-800 rounded-lg">Wipe</button>
-            <button id="iabDelete" data-act="delete" class="px-3 py-2 text-xs bg-rose-500 hover:bg-rose-600 text-white rounded-lg">Excluir</button>
-          </div>
         </div>
         <div id="cardsSkeleton" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 auto-rows-auto gap-4">
           <div class="p-4 bg-white/70 backdrop-blur border border-slate-100 rounded-2xl shadow-lg space-y-3 animate-pulse">
@@ -191,7 +188,7 @@
 
       <div class="space-y-4">
         <div class="p-4 bg-white rounded-2xl shadow">
-          <h2 class="font-semibold mb-2">QR Code (instância selecionada)</h2>
+          <h2 class="font-semibold mb-2">QR da instância selecionada</h2>
           <div id="qrWrap" class="border rounded-xl p-3 text-center transition-colors">
             <div id="qrLoader" class="hidden text-sm text-slate-500">
               <div class="flex flex-col items-center gap-2">
@@ -222,17 +219,18 @@
             <details class="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
               <summary class="text-sm font-semibold text-slate-700 cursor-pointer select-none flex items-center gap-2">
                 Ações críticas
-                <span class="text-[11px] text-slate-500 font-normal">(requer confirmação)</span>
+                <span class="text-xs text-slate-500 font-normal">(requer confirmação)</span>
               </summary>
               <div class="mt-2 space-y-2">
-                <label class="text-[11px] font-medium text-slate-600 flex items-center justify-between gap-2">
+                <label id="criticalConfirmHelp" class="text-xs font-medium text-slate-600 flex items-center justify-between gap-2">
                   Confirme digitando o nome da instância ou “WIPE”
                 </label>
-                <input id="criticalConfirmInput" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="ex.: instancia-01 ou WIPE" />
+                <input id="criticalConfirmInput" aria-describedby="criticalConfirmHelp" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="ex.: instancia-01 ou WIPE" />
                 <div class="flex gap-2 flex-wrap">
-                  <button id="btnLogout" class="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" disabled>Desconectar</button>
-                  <button id="btnWipe" class="px-3 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" disabled>Limpar sessão</button>
-                  <button id="btnPair" class="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" disabled>Parear por código</button>
+                  <button id="btnLogout" class="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" disabled>Desconectar</button>
+                  <button id="btnWipe" class="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" disabled>Limpar sessão</button>
+                  <button id="btnDelete" data-act="delete" class="px-4 py-2 bg-rose-500 hover:bg-rose-600 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" disabled>Excluir instância</button>
+                  <button id="btnPair" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" disabled>Parear por código</button>
                 </div>
               </div>
             </details>
@@ -246,37 +244,37 @@
               <p class="text-xs text-slate-500">Rede, risco e fila em tempo real da instância selecionada.</p>
             </div>
             <div class="flex flex-wrap gap-2 justify-end">
-              <button id="btnPauseQueue" class="px-3 py-2 text-xs bg-amber-100 text-amber-800 rounded-lg border border-amber-200">Pausar fila</button>
-              <button id="btnResumeQueue" class="px-3 py-2 text-xs bg-emerald-100 text-emerald-800 rounded-lg border border-emerald-200">Retomar</button>
-              <button id="btnSendSafe" class="px-3 py-2 text-xs bg-sky-100 text-sky-800 rounded-lg border border-sky-200">Enviar safe</button>
-              <button id="btnRevalidateProxy" class="px-3 py-2 text-xs bg-slate-100 text-slate-800 rounded-lg border border-slate-200">Revalidar proxy</button>
-              <button id="btnOpenQuickSend" class="px-3 py-2 text-xs bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg">Envio rápido</button>
-              <button id="btnOpenLogs" class="px-3 py-2 text-xs bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg">Ver logs</button>
+              <button id="btnPauseQueue" class="px-3 py-2 text-xs bg-slate-100 text-slate-700 rounded-lg border border-slate-200 hover:bg-slate-300">Pausar fila</button>
+              <button id="btnResumeQueue" class="px-3 py-2 text-xs bg-slate-100 text-slate-700 rounded-lg border border-slate-200 hover:bg-slate-300">Retomar</button>
+              <button id="btnSendSafe" class="px-3 py-2 text-xs bg-slate-100 text-slate-700 rounded-lg border border-slate-200 hover:bg-slate-300">Enviar seguro</button>
+              <button id="btnRevalidateProxy" class="px-3 py-2 text-xs bg-slate-100 text-slate-700 rounded-lg border border-slate-200 hover:bg-slate-300">Revalidar proxy</button>
+              <button id="btnOpenQuickSend" class="px-3 py-2 text-xs bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">Envio rápido</button>
+              <button id="btnOpenLogs" class="px-3 py-2 text-xs border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-100">Ver logs</button>
             </div>
           </div>
 
           <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
             <div id="inspectorProxy" class="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-1">
-              <div class="text-[11px] uppercase tracking-wide text-slate-400">Rede / Proxy</div>
+              <div class="text-xs uppercase tracking-wide text-slate-400">Rede / Provedor (ISP)</div>
               <div id="inspectorProxyValue" class="text-sm font-semibold text-slate-800">Aguardando instância…</div>
               <div id="inspectorProxyHint" class="text-xs text-slate-500">Validação ASN e latência aparecerão aqui.</div>
             </div>
             <div id="inspectorRisk" class="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-1">
-              <div class="text-[11px] uppercase tracking-wide text-slate-400">Risco</div>
+              <div class="text-xs uppercase tracking-wide text-slate-400">Risco</div>
               <div id="inspectorRiskValue" class="text-sm font-semibold text-slate-800">—</div>
-              <div id="inspectorRiskHint" class="text-xs text-slate-500">Unknown ratio aguardando dados.</div>
+              <div id="inspectorRiskHint" class="text-xs text-slate-500">Percentual desconhecido aguardando dados.</div>
             </div>
             <div id="inspectorQueue" class="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-1">
-              <div class="text-[11px] uppercase tracking-wide text-slate-400">Fila</div>
+              <div class="text-xs uppercase tracking-wide text-slate-400">Fila</div>
               <div id="inspectorQueueValue" class="text-sm font-semibold text-slate-800">—</div>
-              <div id="inspectorQueueHint" class="text-xs text-slate-500">ETA e pausas do guardião.</div>
+              <div id="inspectorQueueHint" class="text-xs text-slate-500">Tempo estimado (ETA) e pausas do guardião.</div>
             </div>
           </div>
 
           <div>
             <div class="flex items-center justify-between mb-2">
               <h3 class="text-sm font-semibold text-slate-700">Diagnósticos rápidos</h3>
-              <span class="text-[11px] text-slate-500">Proxy, risco e fila</span>
+              <span class="text-xs text-slate-500">Proxy, risco e fila</span>
             </div>
             <div id="inspectorLogs" class="text-xs text-slate-600 bg-slate-50 rounded-xl p-3 h-32 overflow-y-auto">Selecione uma instância para ver os últimos eventos.</div>
           </div>
@@ -344,7 +342,7 @@
           <p id="chartHint" class="text-xs text-slate-500" aria-live="polite">Nenhum dado disponível ainda.</p>
           <div
             id="metricsLegend"
-            class="flex flex-wrap gap-2 mt-2 text-[11px] text-slate-500"
+            class="flex flex-wrap gap-2 mt-2 text-xs text-slate-500"
             aria-label="Legenda das séries da linha do tempo"
           ></div>
         </div>
@@ -375,19 +373,19 @@
     </div>
 
     <!-- Modal de envio rápido -->
-    <div id="quickSendModal" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm z-50">
+    <div id="quickSendModal" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm z-50" aria-hidden="true">
       <div class="flex items-center justify-center min-h-full pointer-events-none">
-        <div class="bg-white rounded-2xl shadow-xl max-w-4xl w-full mx-4 p-6 space-y-4 pointer-events-auto">
+        <div role="dialog" aria-modal="true" aria-labelledby="quickSendTitle" aria-describedby="quickSendDesc" tabindex="-1" class="bg-white rounded-2xl shadow-xl max-w-4xl w-full mx-4 p-6 space-y-4 pointer-events-auto">
           <div class="flex items-start justify-between gap-3">
             <div>
-              <h3 class="text-lg font-semibold">Envio rápido</h3>
-              <p class="text-sm text-slate-500">Usa mimetismo, fila segura e configurações da instância selecionada.</p>
+              <h3 id="quickSendTitle" class="text-lg font-semibold">Envio rápido</h3>
+              <p id="quickSendDesc" class="text-sm text-slate-500">Usa mimetismo, fila segura e configurações da instância selecionada.</p>
             </div>
             <button id="btnCloseQuickSend" class="px-3 py-2 border rounded-lg">Fechar</button>
           </div>
           <div class="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
             <div>
-              <label class="block text-sm font-medium text-slate-700 mb-1">API Key</label>
+              <label class="block text-sm font-medium text-slate-700 mb-1">Chave de API</label>
               <input id="inpApiKey" type="password" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Sua chave de API" />
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -408,10 +406,10 @@
             <div id="quickMessageGroup" class="space-y-1">
               <div class="flex items-baseline justify-between gap-3">
                 <label id="quickMsgLabel" class="text-sm font-medium text-slate-700">Mensagem</label>
-                <span class="text-[11px] text-slate-500"><span id="msgCounter">0</span>/4096</span>
+                <span class="text-xs text-slate-500"><span id="msgCounter">0</span>/4096</span>
               </div>
               <textarea id="inpMsg" rows="3" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Sua mensagem aqui"></textarea>
-              <p id="quickMsgHint" class="text-[11px] text-slate-500">Texto simples enviado como mensagem padrão.</p>
+              <p id="quickMsgHint" class="text-xs text-slate-500">Texto simples enviado como mensagem padrão.</p>
             </div>
 
           <div id="quickButtonsFields" class="space-y-2 hidden">
@@ -425,7 +423,7 @@
                 <button type="button" id="quickButtonsAdd" class="text-xs px-2 py-1 border rounded-lg hover:bg-slate-100">Adicionar botão</button>
               </div>
               <div id="quickButtonsList" class="space-y-2"></div>
-              <p class="text-[11px] text-slate-500">Máximo de 3 botões. Informe identificador e rótulo.</p>
+              <p class="text-xs text-slate-500">Máximo de 3 botões. Informe identificador e rótulo.</p>
             </div>
           </div>
 
@@ -450,7 +448,7 @@
                 <button type="button" id="quickListAddSection" class="text-xs px-2 py-1 border rounded-lg hover:bg-slate-100">Adicionar seção</button>
               </div>
               <div id="quickListSections" class="space-y-3"></div>
-              <p class="text-[11px] text-slate-500">Inclua ao menos uma seção com opções (ID, título e descrição opcional).</p>
+              <p class="text-xs text-slate-500">Inclua ao menos uma seção com opções (ID, título e descrição opcional).</p>
             </div>
           </div>
 
@@ -491,7 +489,7 @@
           </div>
 
           <div class="flex gap-2">
-            <button id="btnSend" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Enviar</button>
+            <button id="btnSend" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg">Enviar</button>
           </div>
           <div id="sendOut" class="text-xs text-slate-600 bg-slate-50 rounded p-2 min-h-[2rem]" aria-live="polite"></div>
           <div id="quickResults" class="space-y-3" aria-live="polite"></div>
@@ -500,11 +498,11 @@
     </div>
 
     <!-- Modal de exclusão -->
-    <div id="modalDelete" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm items-center justify-center z-50">
-      <div class="bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 p-6 space-y-4">
+    <div id="modalDelete" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm items-center justify-center z-50" aria-hidden="true">
+      <div role="dialog" aria-modal="true" aria-labelledby="modalDeleteTitle" aria-describedby="modalDeleteDesc" tabindex="-1" class="bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 p-6 space-y-4">
         <div>
-          <h3 class="text-lg font-semibold">Confirmar exclusão</h3>
-          <p class="text-sm text-slate-500 mt-1">Deseja excluir a instância <span id="modalInstanceName" class="font-medium text-slate-900"></span>? A sessão será removida.</p>
+          <h3 id="modalDeleteTitle" class="text-lg font-semibold">Confirmar exclusão</h3>
+          <p id="modalDeleteDesc" class="text-sm text-slate-500 mt-1">Deseja excluir a instância <span id="modalInstanceName" class="font-medium text-slate-900"></span>? A sessão será removida.</p>
         </div>
         <div class="flex justify-end gap-2">
           <button data-act="modal-cancel" class="px-3 py-2 border rounded-lg">Cancelar</button>
@@ -514,11 +512,11 @@
     </div>
 
     <!-- Modal de pareamento -->
-    <div id="pairModal" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm items-center justify-center z-40">
-      <div class="bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 p-6 space-y-4">
+    <div id="pairModal" class="hidden fixed inset-0 bg-black/50 backdrop-blur-sm items-center justify-center z-40" aria-hidden="true">
+      <div role="dialog" aria-modal="true" aria-labelledby="pairModalTitle" aria-describedby="pairModalDesc" tabindex="-1" class="bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 p-6 space-y-4">
         <div class="space-y-1">
-          <h3 class="text-lg font-semibold">Código de pareamento gerado</h3>
-          <p class="text-sm text-slate-500">Use o código abaixo no aplicativo para conectar esta instância.</p>
+          <h3 id="pairModalTitle" class="text-lg font-semibold">Código de pareamento gerado</h3>
+          <p id="pairModalDesc" class="text-sm text-slate-500">Use o código abaixo no aplicativo para conectar esta instância.</p>
         </div>
         <div class="flex items-center justify-between gap-4 bg-slate-50 rounded-xl px-4 py-3">
           <code id="pairModalCode" class="text-lg font-semibold text-slate-900"></code>

@@ -78,12 +78,12 @@ export function resetInspector() {
     els.inspectorRiskValue.className = 'text-sm font-semibold text-slate-800';
     els.inspectorRiskValue.textContent = '—';
   }
-  if (els.inspectorRiskHint) els.inspectorRiskHint.textContent = 'Unknown ratio aguardando dados.';
+  if (els.inspectorRiskHint) els.inspectorRiskHint.textContent = 'Percentual desconhecido aguardando dados.';
   if (els.inspectorQueueValue) {
     els.inspectorQueueValue.className = 'text-sm font-semibold text-slate-800';
     els.inspectorQueueValue.textContent = '—';
   }
-  if (els.inspectorQueueHint) els.inspectorQueueHint.textContent = 'ETA e pausas do guardião.';
+  if (els.inspectorQueueHint) els.inspectorQueueHint.textContent = 'Tempo estimado (ETA) e pausas do guardião.';
   if (els.inspectorLogs) els.inspectorLogs.textContent = 'Selecione uma instância para ver os últimos eventos.';
 }
 
@@ -103,8 +103,17 @@ function updateInspector(snapshot) {
 
   const latency = network.latencyMs ?? network.latency ?? null;
   const proxyStatus = network.status || 'unknown';
-  const proxyLabel = proxyStatus === 'ok' ? 'Residencial' : proxyStatus === 'blocked' ? 'Datacenter' : proxyStatus;
-  const ispLabel = network.isp || network.asn || 'Sem dados de ISP';
+  const proxyLabel =
+    proxyStatus === 'ok'
+      ? 'Residencial'
+      : proxyStatus === 'blocked'
+      ? 'Datacenter'
+      : proxyStatus === 'failed'
+      ? 'Falha'
+      : proxyStatus === 'unknown'
+      ? 'Desconhecido'
+      : proxyStatus;
+  const ispLabel = network.isp || network.asn || 'Sem dados de ISP (provedor)';
   const proxyClass =
     proxyStatus === 'ok' ? 'text-emerald-700' : proxyStatus === 'blocked' ? 'text-rose-700' : 'text-amber-700';
   const globalProxyMetrics = (window.__healthSnapshot || null)?.proxyMetrics || null;
@@ -129,12 +138,12 @@ function updateInspector(snapshot) {
 
   if (els.inspectorRiskValue) {
     els.inspectorRiskValue.className = `text-sm font-semibold ${riskClass}`;
-    els.inspectorRiskValue.textContent = ratioPct != null ? `${ratioPct}% desconhecidos` : 'Sem dados';
+    els.inspectorRiskValue.textContent = ratioPct != null ? `${ratioPct}% desconhecido` : 'Sem dados';
   }
   if (els.inspectorRiskHint) {
     els.inspectorRiskHint.textContent = paused
       ? 'Fila pausada pelo guardião de risco'
-      : `Threshold ${riskCfg.threshold ?? 0.7} • Safe ${safeCount}`;
+      : `Limiar ${riskCfg.threshold ?? 0.7} • Contatos seguros ${safeCount}`;
   }
 
   const queueEnabled = queue.enabled !== false && queue.status !== 'disabled';
@@ -151,7 +160,7 @@ function updateInspector(snapshot) {
     const parts = [];
     if (queueEnabled) {
       if (paused) parts.push('Guardião pausado');
-      parts.push(`ETA ${formatEta(eta)}`);
+      parts.push(`Tempo estimado (ETA) ${formatEta(eta)}`);
     } else {
       parts.push('Fila desativada');
     }
@@ -162,15 +171,17 @@ function updateInspector(snapshot) {
     const lines = [
       `Proxy: ${proxyLabel} (${ispLabel})${latency != null ? ` • ${latency} ms` : ''}`,
       `Risco: ${ratioPct != null ? `${ratioPct}%` : 'sem dados'}${paused ? ' • pausado' : ''}`,
-      queueEnabled ? `Fila: ${waiting} pend. / ${active} exec. • ETA ${formatEta(eta)}` : 'Fila: envio direto',
+      queueEnabled
+        ? `Fila: ${waiting} pend. / ${active} exec. • Tempo estimado (ETA) ${formatEta(eta)}`
+        : 'Fila: envio direto',
     ];
     els.inspectorLogs.textContent = lines.join('\n');
   }
 
-  // Habilita/desabilita ação "Enviar safe" conforme contatos
+  // Habilita/desabilita ação "Enviar seguro" conforme contatos
   if (els.btnSendSafe) {
     els.btnSendSafe.disabled = safeCount === 0;
-    els.btnSendSafe.title = safeCount === 0 ? 'Adicione safe contacts para usar esta ação' : '';
+    els.btnSendSafe.title = safeCount === 0 ? 'Adicione contatos seguros para usar esta ação' : '';
   }
 }
 
@@ -614,7 +625,7 @@ async function loadQRCode(iid, options = {}) {
     const key = getApiKeyValue();
     if (!key) {
       toggleHidden(els.qrImg, true);
-      setQrState('needs-key', 'Informe a API Key para ver o QR code.');
+      setQrState('needs-key', 'Informe a chave de API para ver o QR.');
       return false;
     }
 
@@ -650,7 +661,7 @@ async function loadQRCode(iid, options = {}) {
       const nextState = qrState && qrState !== 'loading' ? qrState : 'disconnected';
       const nextMessage =
         nextState !== 'loading' && qrMessage === 'Sincronizando QR…'
-          ? 'Instância desconectada. Aponte o WhatsApp para o QR code.'
+          ? 'Instância desconectada. Aponte o WhatsApp para o QR.'
           : qrMessage;
       setQrState(nextState, nextMessage);
       return true;
@@ -667,15 +678,15 @@ async function loadQRCode(iid, options = {}) {
 
     if (response.status === 401) {
       toggleHidden(els.qrImg, true);
-      setQrState('needs-key', 'API Key inválida.');
+      setQrState('needs-key', 'Chave de API inválida.');
       return false;
     }
 
     throw new Error('HTTP ' + response.status);
   } catch (err) {
-    console.error('[metrics] erro ao carregar QR code', err);
+    console.error('[metrics] erro ao carregar QR', err);
     toggleHidden(els.qrImg, true);
-    setQrState('error', 'Erro ao carregar QR code.');
+    setQrState('error', 'Erro ao carregar QR.');
     return false;
   }
 }
@@ -707,7 +718,7 @@ async function exportMetrics(format) {
   const button = format === 'csv' ? els.btnExportCsv : els.btnExportJson;
   const apiKey = getApiKeyValue();
   if (!apiKey) {
-    showError('Informe a API Key para exportar os dados.');
+    showError('Informe a chave de API para exportar os dados.');
     return;
   }
 

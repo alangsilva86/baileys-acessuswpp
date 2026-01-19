@@ -81,6 +81,7 @@ export const els = {
   btnLogout: q('btnLogout'),
   btnWipe: q('btnWipe'),
   btnPair: q('btnPair'),
+  btnDelete: q('btnDelete'),
   criticalConfirmInput: q('criticalConfirmInput'),
 
   // Envio rápido
@@ -351,7 +352,7 @@ const CONNECTION_STATE_META = {
     badgeText: (name, ts) => (ts ? `Desconectado (${name}) • ${ts}` : `Desconectado (${name})`),
     qrState: 'disconnected',
     qrMessage: (ts) =>
-      ts ? `Instância desconectada. Atualizado em ${ts}.` : 'Instância desconectada. Aponte o WhatsApp para o QR code.',
+      ts ? `Instância desconectada. Atualizado em ${ts}.` : 'Instância desconectada. Aponte o WhatsApp para o QR.',
     shouldLoadQr: true,
   },
   qr_timeout: {
@@ -364,8 +365,8 @@ const CONNECTION_STATE_META = {
     qrState: 'qr-timeout',
     qrMessage: (ts) =>
       ts
-        ? `O QR code expirou. Atualizado em ${ts}. Solicite um novo código de pareamento no aplicativo.`
-        : 'O QR code expirou. Solicite um novo código de pareamento no aplicativo.',
+        ? `O QR expirou. Atualizado em ${ts}. Solicite um novo código de pareamento no aplicativo.`
+        : 'O QR expirou. Solicite um novo código de pareamento no aplicativo.',
     shouldLoadQr: false,
   },
 };
@@ -431,11 +432,11 @@ function buildRecommendation(connection, snapshot) {
   if (connection.state === 'close') return 'Gerar novo QR e confirmar conexão.';
   if (connection.state === 'connecting') return 'Aguardar reconexão e evitar novas filas.';
   if (queue.paused || riskRuntime.paused) return 'Revisar guardião de risco e retomar somente quando seguro.';
-  if (ratio != null && ratio >= 70) return 'Enviar safe e reduzir ritmo de envios.';
+  if (ratio != null && ratio >= 70) return 'Enviar seguro e reduzir ritmo de envios.';
   if (ratio != null && ratio >= 50) return 'Monitorar risco e validar proxy/ASN.';
-  if ((queue.waiting ?? 0) > 500) return 'Escalonar fila ou diluir com safe contacts.';
+  if ((queue.waiting ?? 0) > 500) return 'Escalonar fila ou diluir com contatos seguros.';
   if (riskCfg.safeContacts && Array.isArray(riskCfg.safeContacts) && !riskCfg.safeContacts.length) {
-    return 'Adicionar safe contacts antes de picos de envio.';
+    return 'Adicionar contatos seguros antes de picos de envio.';
   }
   return 'Operar normalmente e monitorar fila/risco.';
 }
@@ -480,9 +481,19 @@ export function setSelectedOverview(snapshot) {
   }
   if (els.selectedSummary) {
     const network = snapshot.network || {};
-    const proxyLabel = network.status ? `Proxy ${network.status}` : 'Proxy desconhecido';
+    const proxyStatus = network.status || 'unknown';
+    const proxyLabel =
+      proxyStatus === 'ok'
+        ? 'Proxy residencial'
+        : proxyStatus === 'blocked'
+        ? 'Proxy datacenter'
+        : proxyStatus === 'failed'
+        ? 'Proxy com falha'
+        : proxyStatus === 'unknown'
+        ? 'Proxy desconhecido'
+        : `Proxy ${proxyStatus}`;
     const connLabel = connection.meta?.label || 'Desconhecido';
-    els.selectedSummary.textContent = `${connLabel} • ${proxyLabel} • Safe ${safeCount}`;
+    els.selectedSummary.textContent = `${connLabel} • ${proxyLabel} • Contatos seguros ${safeCount}`;
   }
   if (els.selectedUpdated) {
     const updated = connection.updatedText || 'sem atualização recente';
@@ -496,15 +507,15 @@ export function setSelectedOverview(snapshot) {
     const queueParts = [];
     queueParts.push(queueEnabled ? `${waiting} pend. / ${active} exec.` : 'Envio direto');
     if (queue.paused) queueParts.push('Pausada');
-    if (eta != null) queueParts.push(`ETA ${formatEtaShort(eta)}`);
+    if (eta != null) queueParts.push(`Tempo estimado ${formatEtaShort(eta)}`);
     els.selectedQueue.textContent = queueParts.join(' • ');
   }
   if (els.selectedRisk) {
     const riskParts = [];
-    riskParts.push(ratioPct != null ? `${ratioPct}% unknown` : 'Sem dados');
+    riskParts.push(ratioPct != null ? `${ratioPct}% desconhecido` : 'Sem dados');
     if (riskRuntime.paused) riskParts.push('Guardião pausado');
-    riskParts.push(`Safe ${safeCount}`);
-    if (riskCfg.threshold != null) riskParts.push(`Threshold ${riskCfg.threshold}`);
+    riskParts.push(`Contatos seguros ${safeCount}`);
+    if (riskCfg.threshold != null) riskParts.push(`Limiar ${riskCfg.threshold}`);
     els.selectedRisk.textContent = riskParts.join(' • ');
   }
   if (els.selectedRecommendation) {
@@ -569,6 +580,7 @@ export function setSelectedInstanceActionsDisabled(iid, disabled) {
     els.btnLogout,
     els.btnWipe,
     els.btnPair,
+    els.btnDelete,
     els.btnSend,
     els.btnRefreshLogs,
     els.iabSave,

@@ -10,7 +10,7 @@ import {
 const NOTE_STATUS_VARIANTS = {
   synced: { text: 'Notas sincronizadas', className: 'text-emerald-600' },
   saving: { text: 'Salvando…', className: 'text-slate-500' },
-  needsKey: { text: 'Informe a API Key para salvar automaticamente.', className: 'text-amber-600' },
+  needsKey: { text: 'Informe a chave de API para salvar automaticamente.', className: 'text-amber-600' },
   error: { text: 'Erro ao salvar notas', className: 'text-rose-600' },
 };
 

@@ -1,4 +1,4 @@
-import { REFRESH_INTERVAL_MS, els } from './state.js';
+import { REFRESH_INTERVAL_MS, els, formatDateTime } from './state.js';
 import { refreshInstances } from './instances.js';
 import { initMetrics, refreshSelected } from './metrics.js';
 import { initNotes } from './notes.js';
@@ -220,7 +220,10 @@ export function bootDashboard() {
   }
 
   if (els.sessionsRoot) {
-    els.sessionsRoot.textContent = '';
+    const host = typeof window !== 'undefined' ? window.location.host : '';
+    const now = formatDateTime(new Date().toISOString());
+    const envLabel = host || 'local';
+    els.sessionsRoot.textContent = now ? `${envLabel} • ${now}` : envLabel;
   }
 
   initNotes();
