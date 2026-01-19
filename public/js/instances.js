@@ -425,9 +425,7 @@ function createInstanceCard(inst, selectedId) {
   const locked = isInstanceLocked(inst.id);
   card.classList.toggle('opacity-75', locked);
   const badgeClass = connection.meta?.badgeClass || 'bg-slate-100 text-slate-700';
-  const statusLabel = typeof connection.meta?.cardLabel === 'function'
-    ? connection.meta.cardLabel(connection.updatedText)
-    : connection.meta?.label || 'Desconhecido';
+  const statusLabel = connection.meta?.label || 'Desconhecido';
   const sent = inst.counters?.sent || 0;
   const usagePercent = percent(inst.rate?.usage || 0);
   const meterColor = usagePercent >= 90 ? 'bg-rose-400' : usagePercent >= 70 ? 'bg-amber-400' : 'bg-emerald-400';
@@ -474,18 +472,18 @@ function createInstanceCard(inst, selectedId) {
       : 'desconhecido';
 
   card.innerHTML = `
-    <div class="flex items-start justify-between gap-3">
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div class="flex-1 min-w-0 space-y-1">
-        <label class="text-xs font-medium text-slate-500">Nome</label>
+        <div class="flex items-center gap-2">
+          <label class="text-xs font-medium text-slate-500">Nome</label>
+          <span class="px-2 py-0.5 rounded-full text-[11px] font-medium ${badgeClass} max-w-[10rem] truncate">${escapeHtml(statusLabel)}</span>
+        </div>
         <input data-field="name" data-iid="${inst.id}" class="mt-1 w-full border rounded-lg px-2 py-1 text-sm font-semibold text-slate-900 truncate" value="${escapeHtml(inst.name)}" />
         <p class="text-xs text-slate-500 truncate">WhatsApp: ${userId}</p>
       </div>
-      <div class="flex flex-col items-end gap-1 shrink-0 text-right">
-        <div class="flex items-center gap-2 flex-wrap justify-end">
-          <span class="px-2 py-0.5 rounded text-xs whitespace-nowrap ${badgeClass}">${escapeHtml(statusLabel)}</span>
-          <button data-act="select" data-iid="${inst.id}" class="px-2 py-1 text-xs border border-slate-200 rounded-lg hover:border-slate-300">Selecionar</button>
-        </div>
-        <span class="text-xs text-slate-500 whitespace-nowrap">Atualizado ${connection.updatedText || '—'}</span>
+      <div class="flex flex-col gap-2 sm:items-end sm:text-right shrink-0">
+        <button data-act="select" data-iid="${inst.id}" class="px-3 py-1.5 text-xs border border-slate-200 rounded-lg hover:border-slate-300">Selecionar</button>
+        <span class="text-xs text-slate-500 sm:whitespace-nowrap">Atualizado ${connection.updatedText || '—'}</span>
       </div>
     </div>
 
