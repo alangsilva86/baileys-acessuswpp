@@ -1432,6 +1432,73 @@ router.get('/:iid/export.csv', (req, res) => {
   res.send(csv);
 });
 
+router.get(
+  '/:iid/check-number',
+  asyncHandler(async (req, res) => {
+    try {
+      const inst = getInstance(req.params.iid);
+      if (!ensureInstanceOnline(inst, res)) return;
+
+      const numberRaw = req.query.number;
+      const number =
+        typeof numberRaw === 'string'
+          ? numberRaw.trim()
+          : Array.isArray(numberRaw)
+          ? String(numberRaw[0] ?? '').trim()
+          : '';
+      if (!number) {
+        res.status(400).json({ error: 'Missing number parameter' });
+        return;
+      }
+
+      const jid = `${number}@s.whatsapp.net`;
+      const results = await inst.sock.onWhatsApp(jid);
+      const entry = Array.isArray(results) ? results[0] : null;
+      res.status(200).json({
+        exists: Boolean(entry?.exists),
+        jid: entry?.jid ?? null,
+      });
+    } catch (error) {
+      console.error('[instances] check-number.failed', error);
+      res.status(500).json({ error: 'Internal server error', exists: false, jid: null });
+    }
+  }),
+);
+
+router.get(
+  '/:iid/profile-pic',
+  asyncHandler(async (req, res) => {
+    try {
+      const inst = getInstance(req.params.iid);
+      if (!ensureInstanceOnline(inst, res)) return;
+
+      const numberRaw = req.query.number;
+      const number =
+        typeof numberRaw === 'string'
+          ? numberRaw.trim()
+          : Array.isArray(numberRaw)
+          ? String(numberRaw[0] ?? '').trim()
+          : '';
+      if (!number) {
+        res.status(400).json({ error: 'Missing number parameter' });
+        return;
+      }
+
+      const jid = `${number}@s.whatsapp.net`;
+
+      try {
+        const url = await inst.sock.profilePictureUrl(jid, 'image');
+        res.status(200).json({ profilePicUrl: url });
+      } catch (err) {
+        res.status(200).json({ profilePicUrl: null });
+      }
+    } catch (error) {
+      console.error('[instances] profile-pic.failed', error);
+      res.status(500).json({ error: 'Internal server error', profilePicUrl: null });
+    }
+  }),
+);
+
 router.post(
   '/:iid/exists',
   asyncHandler(async (req, res) => {
