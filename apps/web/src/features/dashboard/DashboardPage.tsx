@@ -153,11 +153,13 @@ export default function DashboardPage() {
           />
         )}
         main={(
-          <DashboardMain
-            instance={selectedInstance}
-            onRefresh={() => void actions.refreshInstances()}
-            onDeleteInstance={handleDeleteInstance}
-          />
+        <DashboardMain
+          instance={selectedInstance}
+          apiKey={apiKey}
+          onRefresh={() => void actions.refreshInstances()}
+          onDeleteInstance={handleDeleteInstance}
+          onNotify={pushToast}
+        />
         )}
       />
 

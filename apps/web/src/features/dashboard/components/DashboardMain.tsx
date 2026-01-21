@@ -1,3 +1,4 @@
+import { useCallback, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Activity,
@@ -12,6 +13,10 @@ import {
   WifiOff,
 } from 'lucide-react';
 import type { DashboardInstance, InstanceStatus, MetricDatum, MetricTone } from '../types';
+import type { ToastTone } from './ToastStack';
+import { fetchJson, formatApiError } from '../../../lib/api';
+import Modal from './Modal';
+import useInstanceMetrics from '../hooks/useInstanceMetrics';
 
 type DashboardMainProps = {
   instance?: DashboardInstance | null;
@@ -78,7 +83,63 @@ const METRIC_ICONS: Record<string, ReactNode> = {
   transit: <Send className="h-4 w-4 text-slate-500" aria-hidden="true" />,
 };
 
-export default function DashboardMain({ instance, onRefresh, onDeleteInstance }: DashboardMainProps) {
+export default function DashboardMain({
+  instance,
+  apiKey,
+  onRefresh,
+  onDeleteInstance,
+  onNotify,
+}: DashboardMainProps) {
+  const {
+    metrics,
+    isLoading: metricsLoading,
+    error: metricsError,
+    refresh: refreshMetrics,
+    lastUpdated,
+  } = useInstanceMetrics(instance?.id ?? null, apiKey);
+  const [quickSendOpen, setQuickSendOpen] = useState(false);
+  const [quickSendPhone, setQuickSendPhone] = useState('');
+  const [quickSendMessage, setQuickSendMessage] = useState('');
+  const [isQuickSending, setIsQuickSending] = useState(false);
+
+  const handleRefresh = useCallback(() => {
+    onRefresh?.();
+    void refreshMetrics();
+  }, [onRefresh, refreshMetrics]);
+
+  const quickSendReady = Boolean(quickSendPhone.trim() && quickSendMessage.trim());
+  const quickSendDisabled = isQuickSending || !quickSendReady;
+
+  const handleQuickSend = useCallback(async () => {
+    if (!instance) return;
+    const phone = quickSendPhone.trim();
+    const message = quickSendMessage.trim();
+    if (!phone || !message) {
+      onNotify?.('Informe o telefone e a mensagem.', 'error');
+      return;
+    }
+    if (!apiKey.trim()) {
+      onNotify?.('Informe a API key para envio rápido.', 'error');
+      return;
+    }
+    setIsQuickSending(true);
+    try {
+      await fetchJson(`/instances/${encodeURIComponent(instance.id)}/send-quick`, apiKey, {
+        method: 'POST',
+        body: JSON.stringify({ type: 'text', to: phone, text: message }),
+      });
+      onNotify?.('Mensagem enviada com sucesso.', 'success');
+      setQuickSendPhone('');
+      setQuickSendMessage('');
+      setQuickSendOpen(false);
+      void refreshMetrics();
+    } catch (err) {
+      onNotify?.(formatApiError(err), 'error', 'Envio rápido falhou');
+    } finally {
+      setIsQuickSending(false);
+    }
+  }, [apiKey, instance, onNotify, quickSendMessage, quickSendPhone, refreshMetrics]);
+
   if (!instance) {
     return (
       <section className="flex h-full flex-col items-center justify-center gap-2 px-6 py-10 text-center">
@@ -92,7 +153,14 @@ export default function DashboardMain({ instance, onRefresh, onDeleteInstance }:
 
   const meta = STATUS_META[instance.status] ?? STATUS_META.disconnected;
   const isConnected = instance.status === 'connected';
-  const metrics = instance.metrics?.length ? instance.metrics : DEFAULT_METRICS;
+  const metricsCards = metrics ?? DEFAULT_METRICS;
+  const formattedMetricsUpdated = lastUpdated
+    ? new Intl.DateTimeFormat('pt-BR', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }).format(lastUpdated)
+    : '—';
 
   return (
     <section className="flex h-full flex-col gap-6 px-6 py-6">
@@ -111,12 +179,16 @@ export default function DashboardMain({ instance, onRefresh, onDeleteInstance }:
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={onRefresh}
+            onClick={handleRefresh}
             className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm hover:bg-slate-50"
           >
             Atualizar dados
           </button>
-          <button type="button" className="rounded-lg bg-slate-900 px-3 py-2 text-xs text-white shadow-sm hover:bg-slate-800">
+          <button
+            type="button"
+            onClick={() => setQuickSendOpen(true)}
+            className="rounded-lg bg-slate-900 px-3 py-2 text-xs text-white shadow-sm hover:bg-slate-800"
+          >
             Envio rapido
           </button>
           <SettingsMenu onDelete={onDeleteInstance} />
@@ -157,13 +229,19 @@ export default function DashboardMain({ instance, onRefresh, onDeleteInstance }:
               <div>
                 <p className="text-sm font-semibold text-slate-900">Metricas</p>
                 <p className="text-xs text-slate-500">Ultimos indicadores da instancia.</p>
+                <p className="text-[11px] text-slate-400">
+                  {metricsLoading ? 'Atualizando métricas...' : `Última atualização ${formattedMetricsUpdated}`}
+                </p>
+                {metricsError ? (
+                  <p className="text-[11px] text-rose-600">{metricsError}</p>
+                ) : null}
               </div>
               <button type="button" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 hover:bg-slate-50">
                 Exportar
               </button>
             </div>
             <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              {metrics.map((metric) => (
+              {metricsCards.map((metric) => (
                 <MetricCard
                   key={metric.key}
                   icon={METRIC_ICONS[metric.key] ?? <Activity className="h-4 w-4 text-slate-500" aria-hidden="true" />}
@@ -223,6 +301,51 @@ export default function DashboardMain({ instance, onRefresh, onDeleteInstance }:
           </section>
         </div>
       </div>
+      <Modal
+        open={quickSendOpen}
+        title="Envio rápido"
+        description="Envie um texto simples para um contato sem sair do painel."
+        onClose={() => setQuickSendOpen(false)}
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => setQuickSendOpen(false)}
+              className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleQuickSend()}
+              disabled={quickSendDisabled}
+              className={`rounded-lg px-3 py-2 text-xs text-white ${quickSendDisabled ? 'bg-slate-400 cursor-not-allowed' : 'bg-slate-900 hover:bg-slate-800'}`}
+            >
+              {isQuickSending ? 'Enviando...' : 'Enviar mensagem'}
+            </button>
+          </>
+        }
+      >
+        <label className="text-xs font-semibold text-slate-600">Telefone (E.164)</label>
+        <input
+          type="text"
+          value={quickSendPhone}
+          onChange={(event) => setQuickSendPhone(event.target.value)}
+          placeholder="55DDDNUMERO"
+          disabled={isQuickSending}
+          className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
+        />
+        <p className="mt-1 text-[11px] text-slate-400">Sem sinais ou espaços, ex: 5511999991234.</p>
+        <label className="mt-4 text-xs font-semibold text-slate-600">Mensagem</label>
+        <textarea
+          rows={4}
+          value={quickSendMessage}
+          onChange={(event) => setQuickSendMessage(event.target.value)}
+          placeholder="Escreva uma mensagem de texto simples..."
+          disabled={isQuickSending}
+          className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
+        />
+      </Modal>
     </section>
   );
 }
