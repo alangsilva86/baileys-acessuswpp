@@ -75,13 +75,20 @@ function buildNetworkLabel(network?: ApiInstance['network']): string {
   return `${base}${latency}`;
 }
 
-function mapInstance(inst: ApiInstance): DashboardInstance {
+function buildQrUrl(instanceId: string, apiKey: string): string {
+  const encodedId = encodeURIComponent(instanceId);
+  if (!apiKey) return `/instances/${encodedId}/qr.png`;
+  const params = new URLSearchParams({ apiKey });
+  return `/instances/${encodedId}/qr.png?${params.toString()}`;
+}
+
+function mapInstance(inst: ApiInstance, apiKey: string): DashboardInstance {
   return {
     id: inst.id,
     name: inst.name,
     status: mapStatus(inst.connectionState),
     updatedAt: formatTimestamp(inst.connectionUpdatedAt) ?? undefined,
-    qrUrl: `/instances/${inst.id}/qr.png`,
+    qrUrl: buildQrUrl(inst.id, apiKey),
     health: {
       network: buildNetworkLabel(inst.network ?? undefined),
       risk: buildRiskLabel(inst.risk ?? undefined),
@@ -117,7 +124,7 @@ export default function useInstances(apiKey: string): UseInstancesResult {
     setError(null);
     try {
       const data = await fetchJson<ApiInstance[]>('/instances', apiKey);
-      setInstances(data.map(mapInstance));
+      setInstances(data.map((inst) => mapInstance(inst, apiKey)));
     } catch (err) {
       setError(formatApiError(err));
     } finally {
