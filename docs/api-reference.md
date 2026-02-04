@@ -321,6 +321,17 @@ Resposta (201):
 ```
 Erros: `media_source_missing`, `media_url_invalid`, `media_base64_invalid`, `media_too_large`.
 
+#### POST /instances/:iid/send-poll
+Body:
+```json
+{ "to": "55DDDNUMERO", "question": "Pergunta", "options": ["A", "B"], "selectableCount": 1 }
+```
+Resposta (201):
+```json
+{ "id": "MSGID", "status": 1 }
+```
+Erros: `poll_service_unavailable`.
+
 #### POST /instances/:iid/exists
 Body:
 ```json
@@ -538,6 +549,8 @@ Ou:
 2. `MessageService` gera `MESSAGE_INBOUND`.
 3. Evento vai para webhook e para broker (SSE `/stream` e `/instances/:iid/events`).
 
+### 4) Enquetes (poll)
+1. `POST /instances/:iid/send-poll`.
 2. Respostas sao processadas em `PollService`.
 3. Evento `POLL_CHOICE` publicado (webhook + broker).
 

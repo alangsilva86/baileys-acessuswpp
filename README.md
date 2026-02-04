@@ -12,7 +12,7 @@ Uma API completa para WhatsApp usando a biblioteca Baileys, com interface web pa
 - ✅ Autenticação por API Key
 - ✅ Logs estruturados com Pino
 - ✅ Suporte a QR Code e pareamento por código
-- ✅ Processamento de enquetes (polls) com feedback opcional
+- ✅ Envio de enquetes (polls) com feedback opcional
 
 ## Mapa dos módulos do dashboard
 
@@ -420,6 +420,7 @@ Para mensagens com mídia, o bloco `message` inclui o objeto `media` com detalhe
 - `POST /instances/:id/send-buttons` - Enviar botões de resposta rápida
 - `POST /instances/:id/send-list` - Enviar lista interativa com seções/opções
 - `POST /instances/:id/send-media` - Enviar mídia (imagem, vídeo, áudio ou documento)
+- `POST /instances/:id/send-poll` - Enviar enquete para um contato ou grupo
 - `POST /instances/:id/exists` - Verificar se número existe no WhatsApp
 - `GET /instances/:id/status` - Verificar status de mensagem
 

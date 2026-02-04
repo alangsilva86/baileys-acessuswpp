@@ -2422,6 +2422,74 @@ router.post(
   }),
 );
 
+router.post(
+  '/:iid/send-poll',
+  asyncHandler(async (req, res) => {
+    const inst = getInstance(req.params.iid);
+    if (!ensureInstanceOnline(inst, res)) return;
+    if (!allowSend(inst)) {
+      res.status(429).json({ error: 'rate limit exceeded' });
+      return;
+    }
+
+    const { to, question, options, selectableCount } = (req.body || {}) as {
+      to?: string;
+      question?: string;
+      options?: unknown;
+      selectableCount?: number;
+    };
+
+    const normalized = normalizeToE164BR(to);
+    if (!normalized) {
+      res.status(400).json({ error: 'to inválido. Use E.164: 55DDDNUMERO' });
+      return;
+    }
+
+    if (typeof question !== 'string' || !question.trim()) {
+      res.status(400).json({ error: 'question inválida' });
+      return;
+    }
+
+    const rawOptions = Array.isArray(options) ? options : [];
+    const sanitized = rawOptions
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter(Boolean);
+    if (sanitized.length < 2) {
+      res.status(400).json({ error: 'options inválidas (mínimo 2 opções)' });
+      return;
+    }
+
+    const pollService = inst.context?.pollService;
+    if (!pollService) {
+      res.status(503).json({ error: 'poll_service_unavailable' });
+      return;
+    }
+
+    const check = await inst.sock.onWhatsApp(normalized);
+    const entry = Array.isArray(check) ? check[0] : null;
+    if (!entry || !entry.exists) {
+      res.status(404).json({ error: 'whatsapp_not_found' });
+      return;
+    }
+
+    const selectableRaw = Number(selectableCount);
+    const selectable = Number.isFinite(selectableRaw)
+      ? Math.max(1, Math.min(Math.floor(selectableRaw), sanitized.length))
+      : 1;
+
+    const targetJid = entry?.jid ?? `${normalized}@s.whatsapp.net`;
+
+    const sent = (await pollService.sendPoll(targetJid, question.trim(), sanitized, {
+      selectableCount: selectable,
+    })) as any;
+    inst.metrics.sent += 1;
+    inst.metrics.sent_by_type.buttons += 1;
+    inst.metrics.last.sentId = sent.key?.id ?? null;
+
+    res.status(201).json({ id: sent.key?.id ?? null, status: sent.status });
+  }),
+);
+
 function serializeInstance(inst: Instance) {
   const connected = inst.connectionState === 'open';
   const statusCounts = { ...inst.metrics.status_counts };
