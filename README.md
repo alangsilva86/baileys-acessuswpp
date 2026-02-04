@@ -193,18 +193,188 @@ Mensagem recebida (`MESSAGE_INBOUND`):
 
 Esta integração expõe os endpoints exigidos pelo **Messaging App Extension** do Pipedrive e sincroniza mensagens usando a Channels API (quando disponível).
 
-1. Configure as variáveis de ambiente:
-   - `PIPEDRIVE_ENABLED=1`
-   - `PIPEDRIVE_CLIENT_ID` e `PIPEDRIVE_CLIENT_SECRET`
-   - `PIPEDRIVE_PUBLIC_BASE_URL` (base pública do seu servidor)
-   - `PIPEDRIVE_REDIRECT_URI` (opcional, padrão: `<base>/pipedrive/oauth/callback`)
-2. Gere o manifest: `GET /pipedrive/manifest.json`
-3. Faça o OAuth:
-   - `GET /pipedrive/oauth/start` (redireciona para o Pipedrive)
-   - Callback em `/pipedrive/oauth/callback`
-4. Registre o canal (admin):
-   - `POST /pipedrive/admin/register-channel` com `x-api-key`
-   - Body: `{ \"providerChannelId\": \"<id-da-instancia>\", \"name\": \"...\" }`
+> **Aviso**: a Channels API foi descontinuada em **1º de fevereiro de 2026**. Se o acesso foi liberado para vocês, prossigam; caso contrário, os endpoints podem falhar.
+
+#### 0) Pré-requisitos básicos
+
+0.1) Garanta acesso ao npm registry (para instalar `multer`)
+
+Comando padrão:
+
+```bash
+npm install
+```
+
+Se falhar por proxy, configure registry/proxy e tente novamente:
+
+```bash
+npm config set registry https://registry.npmjs.org/
+# se necessário:
+# npm config set proxy http://SEU_PROXY:PORT
+# npm config set https-proxy http://SEU_PROXY:PORT
+npm install
+```
+
+0.2) (Opcional) Instale `jq` para validar JSON via terminal.
+
+#### 1) Variáveis de ambiente (Render + local)
+
+1.1) Em produção (Render)
+
+Configure no painel do Render (Settings → Environment):
+
+```
+PIPEDRIVE_ENABLED=1
+PIPEDRIVE_CLIENT_ID=<PIPEDRIVE_CLIENT_ID>
+PIPEDRIVE_CLIENT_SECRET=<PIPEDRIVE_CLIENT_SECRET>
+PIPEDRIVE_PUBLIC_BASE_URL=<BASE_URL>
+PIPEDRIVE_REDIRECT_URI=<BASE_URL>/pipedrive/oauth/callback
+PIPEDRIVE_PROVIDER_TYPE=whatsapp
+PIPEDRIVE_TEMPLATE_SUPPORT=0
+API_KEY=<API_KEY>
+```
+
+Importante: ajuste o Redirect URI no Pipedrive também para `/pipedrive/oauth/callback`.
+
+1.2) Local (`.env`)
+
+Se quiser testar localmente, crie `.env`:
+
+```bash
+cat <<'EOF' > .env
+PORT=3000
+API_KEY=<API_KEY>
+
+PIPEDRIVE_ENABLED=1
+PIPEDRIVE_CLIENT_ID=<PIPEDRIVE_CLIENT_ID>
+PIPEDRIVE_CLIENT_SECRET=<PIPEDRIVE_CLIENT_SECRET>
+PIPEDRIVE_PUBLIC_BASE_URL=http://localhost:3000
+PIPEDRIVE_REDIRECT_URI=http://localhost:3000/pipedrive/oauth/callback
+PIPEDRIVE_PROVIDER_TYPE=whatsapp
+PIPEDRIVE_TEMPLATE_SUPPORT=0
+EOF
+```
+
+#### 2) Manifest (validação rápida)
+
+Comando:
+
+```bash
+curl -s <BASE_URL>/pipedrive/manifest.json | jq .
+```
+
+Esperado:
+
+- `provider_type: "whatsapp"`
+- endpoints com `/pipedrive/channels/...`
+
+Se falhar, o app não está rodando ou a base URL está incorreta.
+
+#### 3) OAuth (passo a passo completo)
+
+3.1) Gere a URL de autorização (via endpoint do app)
+
+```bash
+curl -s "<BASE_URL>/pipedrive/oauth/start" | jq .
+```
+
+Resposta esperada:
+
+```json
+{ "url": "https://oauth.pipedrive.com/oauth/authorize?..." }
+```
+
+3.2) Abra a URL no navegador
+
+Ela deve levar ao Pipedrive para autorizar.
+
+3.3) Após autorizar, você será redirecionado para:
+
+```
+<BASE_URL>/pipedrive/oauth/callback?code=XXXX
+```
+
+Confirme que a resposta é:
+
+```json
+{ "success": true, "data": { ... } }
+```
+
+Se retornar erro, confira:
+
+- `redirect_uri` cadastrado no Pipedrive
+- `PIPEDRIVE_CLIENT_ID` e `PIPEDRIVE_CLIENT_SECRET`
+- app reiniciado com as envs corretas
+
+#### 4) Registrar canal no Pipedrive (admin)
+
+Usa `x-api-key` (sua `API_KEY` interna).
+
+```bash
+curl -s -X POST "<BASE_URL>/pipedrive/admin/register-channel" \
+  -H "content-type: application/json" \
+  -H "x-api-key: <API_KEY>" \
+  -d '{
+    "providerChannelId": "<INSTANCE_ID>",
+    "name": "WhatsApp - <INSTANCE_ID>"
+  }' | jq .
+```
+
+Se retorno for `success: true`, o canal foi registrado.
+
+#### 5) Testar envio via postMessage (Pipedrive → seu sistema)
+
+Esse endpoint é chamado pelo Pipedrive usando **Basic Auth** com `client_id:client_secret`.
+
+5.1) Enviar mensagem de texto
+
+```bash
+curl -s -X POST \
+  "<BASE_URL>/pipedrive/channels/<INSTANCE_ID>/conversations/55DDDNUMERO@s.whatsapp.net/messages" \
+  -H "Authorization: Basic $(printf '<PIPEDRIVE_CLIENT_ID>:<PIPEDRIVE_CLIENT_SECRET>' | base64)" \
+  -F "senderId=source:<INSTANCE_ID>" \
+  -F "recipientIds[]=55DDDNUMERO@s.whatsapp.net" \
+  -F "message=Teste de mensagem via Pipedrive"
+```
+
+Observações:
+
+- Use o número real no formato WhatsApp JID (`55DDDNUMERO@s.whatsapp.net`).
+- Se quiser usar só o número (E.164), o backend tenta converter. **A normalização é BR**: prefixa `55` e aceita 10–11 dígitos.
+
+5.2) Enviar mensagem com anexo
+
+```bash
+curl -s -X POST \
+  "<BASE_URL>/pipedrive/channels/<INSTANCE_ID>/conversations/55DDDNUMERO@s.whatsapp.net/messages" \
+  -H "Authorization: Basic $(printf '<PIPEDRIVE_CLIENT_ID>:<PIPEDRIVE_CLIENT_SECRET>' | base64)" \
+  -F "senderId=source:<INSTANCE_ID>" \
+  -F "recipientIds[]=55DDDNUMERO@s.whatsapp.net" \
+  -F "message=Segue o arquivo" \
+  -F "file=@/caminho/arquivo.pdf"
+```
+
+#### 6) Validar conversa retornada (getConversations)
+
+Você pode simular:
+
+```bash
+curl -s \
+  "<BASE_URL>/pipedrive/channels/<INSTANCE_ID>/conversations?limit=10&messages_limit=10" \
+  -H "Authorization: Basic $(printf '<PIPEDRIVE_CLIENT_ID>:<PIPEDRIVE_CLIENT_SECRET>' | base64)" | jq .
+```
+
+Se houver paginação, o retorno inclui `additional_data.after`.
+
+#### 7) Erros comuns (e como corrigir)
+
+- `401 unauthorized`: Basic Auth errado (`client_id:secret`).
+- `pipedrive_not_configured`: faltam `PIPEDRIVE_CLIENT_ID/SECRET`.
+- `register_channel_failed`: OAuth não realizado ou token não salvo.
+- `instance_unavailable`: instância WhatsApp não conectada.
+- `group_conversations_not_supported`: use contato 1:1 (`@g.us` não suportado).
+- `senderId_and_recipientIds_required`: faltam `senderId` ou `recipientIds[]`.
+- `message_or_attachments_required`: faltam `message` e `file`.
 
 Notas:
 - As chamadas do Pipedrive para os endpoints do manifest usam **Basic Auth** com o `client_id` e `client_secret`.
