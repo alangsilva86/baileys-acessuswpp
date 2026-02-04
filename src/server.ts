@@ -8,9 +8,11 @@ import crypto from 'node:crypto';
 import pino from 'pino';
 import { getAllInstances, loadInstances, startAllInstances } from './instanceManager.js';
 import instanceRoutes from './routes/instances.js';
+import pipedriveRoutes from './routes/pipedrive.js';
 import { brokerEventEmitter, brokerEventStore, type BrokerEvent } from './broker/eventStore.js';
 import { initSendQueue, startSendWorker } from './queue/sendQueue.js';
 import { getProxyValidationMetrics } from './network/proxyValidator.js';
+import { startPipedriveBridge } from './services/pipedrive/bridge.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
@@ -27,7 +29,7 @@ const LEGACY_PUBLIC_DIR = path.resolve(process.cwd(), 'public');
 const PUBLIC_DIR = existsSync(VITE_DIST_DIR) ? VITE_DIST_DIR : LEGACY_PUBLIC_DIR;
 const STREAM_PING_INTERVAL_MS = 15000;
 const STREAM_BACKLOG_LIMIT = 200;
-const SPA_FALLBACK_EXCLUDE_PREFIXES = ['/instances', '/webhooks'];
+const SPA_FALLBACK_EXCLUDE_PREFIXES = ['/instances', '/webhooks', '/pipedrive'];
 
 const app = express();
 app.disable('x-powered-by');
@@ -82,6 +84,7 @@ app.use((req, res, next) => {
 });
 
 app.use('/instances', instanceRoutes);
+app.use('/pipedrive', pipedriveRoutes);
 
 app.get('/health', (_req, res) => {
   const instances = getAllInstances().map((inst) => ({
@@ -188,6 +191,7 @@ async function main(): Promise<void> {
   await initSendQueue();
   await startAllInstances();
   await startSendWorker();
+  startPipedriveBridge();
   app.listen(PORT, () => {
     logger.info({ port: PORT }, 'server.listening');
   });

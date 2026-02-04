@@ -20,3 +20,6 @@ sessions/
 
 # Instance data
 instances.json
+
+# Pipedrive integration data
+data/pipedrive-*.json

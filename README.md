@@ -12,7 +12,7 @@ Uma API completa para WhatsApp usando a biblioteca Baileys, com interface web pa
 - ✅ Autenticação por API Key
 - ✅ Logs estruturados com Pino
 - ✅ Suporte a QR Code e pareamento por código
-- ✅ Envio de enquetes (polls) com feedback opcional
+- ✅ Processamento de enquetes (polls) com feedback opcional
 
 ## Mapa dos módulos do dashboard
 
@@ -188,6 +188,28 @@ Mensagem recebida (`MESSAGE_INBOUND`):
   }
 }
 ```
+
+### Pipedrive (Messaging App Extension)
+
+Esta integração expõe os endpoints exigidos pelo **Messaging App Extension** do Pipedrive e sincroniza mensagens usando a Channels API (quando disponível).
+
+1. Configure as variáveis de ambiente:
+   - `PIPEDRIVE_ENABLED=1`
+   - `PIPEDRIVE_CLIENT_ID` e `PIPEDRIVE_CLIENT_SECRET`
+   - `PIPEDRIVE_PUBLIC_BASE_URL` (base pública do seu servidor)
+   - `PIPEDRIVE_REDIRECT_URI` (opcional, padrão: `<base>/pipedrive/oauth/callback`)
+2. Gere o manifest: `GET /pipedrive/manifest.json`
+3. Faça o OAuth:
+   - `GET /pipedrive/oauth/start` (redireciona para o Pipedrive)
+   - Callback em `/pipedrive/oauth/callback`
+4. Registre o canal (admin):
+   - `POST /pipedrive/admin/register-channel` com `x-api-key`
+   - Body: `{ \"providerChannelId\": \"<id-da-instancia>\", \"name\": \"...\" }`
+
+Notas:
+- As chamadas do Pipedrive para os endpoints do manifest usam **Basic Auth** com o `client_id` e `client_secret`.
+- Conversas de grupo (`@g.us`) são ignoradas, pois a Channels API suporta apenas 1:1.
+- Os dados locais ficam em `data/pipedrive-*.json`.
 
 Mensagem enviada (`MESSAGE_OUTBOUND`):
 
@@ -398,7 +420,6 @@ Para mensagens com mídia, o bloco `message` inclui o objeto `media` com detalhe
 - `POST /instances/:id/send-buttons` - Enviar botões de resposta rápida
 - `POST /instances/:id/send-list` - Enviar lista interativa com seções/opções
 - `POST /instances/:id/send-media` - Enviar mídia (imagem, vídeo, áudio ou documento)
-- `POST /instances/:id/send-poll` - Enviar enquete para um contato ou grupo
 - `POST /instances/:id/exists` - Verificar se número existe no WhatsApp
 - `GET /instances/:id/status` - Verificar status de mensagem
 
