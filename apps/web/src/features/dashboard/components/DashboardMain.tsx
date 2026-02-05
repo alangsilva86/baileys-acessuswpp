@@ -834,6 +834,110 @@ export default function DashboardMain({
     refreshMetrics,
   ]);
 
+  const notesDirty = noteDraft.trim() !== notesLastSaved;
+  const noteStatusVariant = NOTE_STATUS_VARIANTS[noteStatus];
+  const noteStatusText = noteStatusExtra
+    ? noteStatusVariant.text
+      ? `${noteStatusVariant.text} — ${noteStatusExtra}`
+      : noteStatusExtra
+    : noteStatusVariant.text;
+  const noteCharCount = noteDraft.length;
+  const sortedNoteRevisions = useMemo(() => {
+    const revisions = notesMeta?.revisions ?? [];
+    return [...revisions].sort((a, b) => {
+      const aTs = new Date(a.timestamp).getTime();
+      const bTs = new Date(b.timestamp).getTime();
+      return Number.isNaN(bTs) ? -1 : Number.isNaN(aTs) ? 1 : bTs - aTs;
+    });
+  }, [notesMeta?.revisions]);
+  const selectedRevision = useMemo(() => {
+    if (selectedNoteRevision === 'current') return null;
+    return sortedNoteRevisions.find((revision) => revision.timestamp === selectedNoteRevision) ?? null;
+  }, [selectedNoteRevision, sortedNoteRevisions]);
+  const revisionInfoText = useMemo(() => {
+    if (selectedNoteRevision === 'current') {
+      const relative = formatIsoRelativeTime(notesMeta?.updatedAt ?? null);
+      const absolute = formatIsoDateTime(notesMeta?.updatedAt ?? null);
+      const pieces = [];
+      if (absolute) pieces.push(absolute);
+      if (relative) pieces.push(relative);
+      return pieces.length ? `Versão atual • ${pieces.join(' • ')}` : 'Versão atual';
+    }
+    if (!selectedRevision) return 'Selecione uma versão válida.';
+    const absolute = formatIsoDateTime(selectedRevision.timestamp) || selectedRevision.timestamp;
+    const relative = formatIsoRelativeTime(selectedRevision.timestamp);
+    const author = selectedRevision.author || 'desconhecido';
+    const summary = truncate(selectedRevision.diff?.summary || selectedRevision.diff?.after || '');
+    const parts = [`${absolute}${relative ? ` (${relative})` : ''}`, `por ${author}`];
+    if (summary) parts.push(summary);
+    return parts.join(' • ');
+  }, [notesMeta?.updatedAt, selectedNoteRevision, selectedRevision]);
+  const noteMetaText = useMemo(() => {
+    const created = formatIsoDateTime(notesMeta?.createdAt ?? null);
+    const updated = formatIsoDateTime(notesMeta?.updatedAt ?? null);
+    const relative = formatIsoRelativeTime(notesMeta?.updatedAt ?? null);
+    const parts = [];
+    if (created) parts.push(`Criado: ${created}`);
+    if (updated) parts.push(`Atualizado: ${updated}${relative ? ` (${relative})` : ''}`);
+    return parts.join(' • ');
+  }, [notesMeta?.createdAt, notesMeta?.updatedAt]);
+
+  const handleNotesBlur = useCallback(() => {
+    if (!notesDirty) return;
+    if (notesAutosaveTimerRef.current != null) {
+      window.clearTimeout(notesAutosaveTimerRef.current);
+      notesAutosaveTimerRef.current = null;
+    }
+    void saveNotes(noteDraftRef.current, { silent: true });
+  }, [notesDirty, saveNotes]);
+
+  const handleRestoreSelectedRevision = useCallback(async () => {
+    if (!selectedRevision) return;
+    if (notesDirty) {
+      const ok = window.confirm(
+        'Você tem alterações não salvas. Restaurar esta versão vai substituir o texto atual. Continuar?',
+      );
+      if (!ok) return;
+    }
+    if (notesAutosaveTimerRef.current != null) {
+      window.clearTimeout(notesAutosaveTimerRef.current);
+      notesAutosaveTimerRef.current = null;
+    }
+    setIsNotesRestoring(true);
+    try {
+      await saveNotes(selectedRevision.diff?.after ?? '', {
+        restoreFrom: selectedRevision.timestamp,
+        statusExtra: 'Versão restaurada',
+        refreshAfter: true,
+      });
+    } finally {
+      setIsNotesRestoring(false);
+    }
+  }, [notesDirty, saveNotes, selectedRevision]);
+
+  useEffect(() => {
+    if (!instance) return;
+    if (isNotesSaving || isNotesRestoring) return;
+    if (notesAutosaveTimerRef.current != null) {
+      window.clearTimeout(notesAutosaveTimerRef.current);
+      notesAutosaveTimerRef.current = null;
+    }
+    if (!notesDirty) {
+      setNoteStatus('synced');
+      return;
+    }
+    if (!apiKey.trim()) {
+      setNoteStatus('needsKey');
+      setNoteStatusExtra('');
+      return;
+    }
+    setNoteStatus('saving');
+    setNoteStatusExtra('');
+    notesAutosaveTimerRef.current = window.setTimeout(() => {
+      void saveNotes(noteDraftRef.current, { silent: true });
+    }, NOTE_AUTOSAVE_DEBOUNCE);
+  }, [apiKey, instance?.id, isNotesRestoring, isNotesSaving, noteDraft, notesDirty, saveNotes]);
+
   if (!instance) {
     return (
       <section className="flex h-full flex-col items-center justify-center gap-2 px-6 py-10 text-center">
@@ -1069,107 +1173,6 @@ export default function DashboardMain({
       setExportingFormat(null);
     }
   };
-
-  const notesDirty = noteDraft.trim() !== notesLastSaved;
-  const noteStatusVariant = NOTE_STATUS_VARIANTS[noteStatus];
-  const noteStatusText = noteStatusExtra
-    ? noteStatusVariant.text
-      ? `${noteStatusVariant.text} — ${noteStatusExtra}`
-      : noteStatusExtra
-    : noteStatusVariant.text;
-  const noteCharCount = noteDraft.length;
-  const sortedNoteRevisions = useMemo(() => {
-    const revisions = notesMeta?.revisions ?? [];
-    return [...revisions].sort((a, b) => {
-      const aTs = new Date(a.timestamp).getTime();
-      const bTs = new Date(b.timestamp).getTime();
-      return Number.isNaN(bTs) ? -1 : Number.isNaN(aTs) ? 1 : bTs - aTs;
-    });
-  }, [notesMeta?.revisions]);
-  const selectedRevision = useMemo(() => {
-    if (selectedNoteRevision === 'current') return null;
-    return sortedNoteRevisions.find((revision) => revision.timestamp === selectedNoteRevision) ?? null;
-  }, [selectedNoteRevision, sortedNoteRevisions]);
-  const revisionInfoText = useMemo(() => {
-    if (selectedNoteRevision === 'current') {
-      const relative = formatIsoRelativeTime(notesMeta?.updatedAt ?? null);
-      const absolute = formatIsoDateTime(notesMeta?.updatedAt ?? null);
-      const pieces = [];
-      if (absolute) pieces.push(absolute);
-      if (relative) pieces.push(relative);
-      return pieces.length ? `Versão atual • ${pieces.join(' • ')}` : 'Versão atual';
-    }
-    if (!selectedRevision) return 'Selecione uma versão válida.';
-    const absolute = formatIsoDateTime(selectedRevision.timestamp) || selectedRevision.timestamp;
-    const relative = formatIsoRelativeTime(selectedRevision.timestamp);
-    const author = selectedRevision.author || 'desconhecido';
-    const summary = truncate(selectedRevision.diff?.summary || selectedRevision.diff?.after || '');
-    const parts = [`${absolute}${relative ? ` (${relative})` : ''}`, `por ${author}`];
-    if (summary) parts.push(summary);
-    return parts.join(' • ');
-  }, [notesMeta?.updatedAt, selectedNoteRevision, selectedRevision]);
-  const noteMetaText = useMemo(() => {
-    const created = formatIsoDateTime(notesMeta?.createdAt ?? null);
-    const updated = formatIsoDateTime(notesMeta?.updatedAt ?? null);
-    const relative = formatIsoRelativeTime(notesMeta?.updatedAt ?? null);
-    const parts = [];
-    if (created) parts.push(`Criado: ${created}`);
-    if (updated) parts.push(`Atualizado: ${updated}${relative ? ` (${relative})` : ''}`);
-    return parts.join(' • ');
-  }, [notesMeta?.createdAt, notesMeta?.updatedAt]);
-
-  const handleNotesBlur = useCallback(() => {
-    if (!notesDirty) return;
-    if (notesAutosaveTimerRef.current != null) {
-      window.clearTimeout(notesAutosaveTimerRef.current);
-      notesAutosaveTimerRef.current = null;
-    }
-    void saveNotes(noteDraftRef.current, { silent: true });
-  }, [notesDirty, saveNotes]);
-
-  const handleRestoreSelectedRevision = useCallback(async () => {
-    if (!selectedRevision) return;
-    if (notesDirty) {
-      const ok = window.confirm('Você tem alterações não salvas. Restaurar esta versão vai substituir o texto atual. Continuar?');
-      if (!ok) return;
-    }
-    if (notesAutosaveTimerRef.current != null) {
-      window.clearTimeout(notesAutosaveTimerRef.current);
-      notesAutosaveTimerRef.current = null;
-    }
-    setIsNotesRestoring(true);
-    try {
-      await saveNotes(selectedRevision.diff?.after ?? '', {
-        restoreFrom: selectedRevision.timestamp,
-        statusExtra: 'Versão restaurada',
-        refreshAfter: true,
-      });
-    } finally {
-      setIsNotesRestoring(false);
-    }
-  }, [notesDirty, saveNotes, selectedRevision]);
-
-  useEffect(() => {
-    if (isNotesSaving || isNotesRestoring) return;
-    if (notesAutosaveTimerRef.current != null) {
-      window.clearTimeout(notesAutosaveTimerRef.current);
-      notesAutosaveTimerRef.current = null;
-    }
-    if (!notesDirty) {
-      setNoteStatus('synced');
-      return;
-    }
-    if (!apiKey.trim()) {
-      setNoteStatus('needsKey');
-      setNoteStatusExtra('');
-      return;
-    }
-    setNoteStatus('saving');
-    setNoteStatusExtra('');
-    notesAutosaveTimerRef.current = window.setTimeout(() => {
-      void saveNotes(noteDraftRef.current, { silent: true });
-    }, NOTE_AUTOSAVE_DEBOUNCE);
-  }, [apiKey, isNotesRestoring, isNotesSaving, noteDraft, notesDirty, saveNotes]);
 
   const riskSafeDraftCount = parseSafeContacts(safeContactsDraft).length;
   const riskPercentUnknown = riskSnapshot?.runtime?.ratio != null
