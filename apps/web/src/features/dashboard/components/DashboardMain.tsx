@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Activity,
@@ -437,19 +437,17 @@ export default function DashboardMain({
     window.setTimeout(() => ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
   };
 
-  const safeSuggestions = useMemo(() => {
-    return allInstances
-      .filter((candidate) => candidate.id !== instance.id)
-      .filter((candidate) => candidate.status === 'connected')
-      .filter((candidate) => Boolean(candidate.userPhone))
-      .map((candidate) => ({
-        id: candidate.id,
-        name: candidate.name,
-        phone: candidate.userPhone!,
-      }));
-  }, [allInstances, instance.id]);
+  const safeSuggestions = allInstances
+    .filter((candidate) => candidate.id !== instance.id)
+    .filter((candidate) => candidate.status === 'connected')
+    .filter((candidate) => Boolean(candidate.userPhone))
+    .map((candidate) => ({
+      id: candidate.id,
+      name: candidate.name,
+      phone: candidate.userPhone!,
+    }));
 
-  const addSafeContact = useCallback((phone: string) => {
+  const addSafeContact = (phone: string) => {
     setSafeContactsDraft((current) => {
       const existing = new Set(parseSafeContacts(current).map((item) => item.replace(/\D+/g, '')).filter(Boolean));
       const next = phone.replace(/\D+/g, '');
@@ -457,11 +455,11 @@ export default function DashboardMain({
       if (existing.has(next)) return current;
       return current.trim() ? `${current.trim()}\n${next}` : next;
     });
-  }, [parseSafeContacts]);
+  };
 
-  const addAllSafeSuggestions = useCallback(() => {
+  const addAllSafeSuggestions = () => {
     safeSuggestions.forEach((entry) => addSafeContact(entry.phone));
-  }, [addSafeContact, safeSuggestions]);
+  };
 
   const resolvePresetRange = (preset: MetricsRangePreset): { from?: number; to?: number } => {
     if (preset === 'all') return {};
@@ -473,13 +471,11 @@ export default function DashboardMain({
     return { from: now - durationMs, to: now };
   };
 
-  const exportQuery = useMemo(() => {
-    const params = new URLSearchParams();
-    const range = resolvePresetRange(metricsPreset);
-    if (range.from != null) params.set('from', String(range.from));
-    if (range.to != null) params.set('to', String(range.to));
-    return params.toString();
-  }, [metricsPreset]);
+  const exportParams = new URLSearchParams();
+  const exportRange = resolvePresetRange(metricsPreset);
+  if (exportRange.from != null) exportParams.set('from', String(exportRange.from));
+  if (exportRange.to != null) exportParams.set('to', String(exportRange.to));
+  const exportQuery = exportParams.toString();
 
   const exportCsvUrl = `/instances/${encodeURIComponent(instance.id)}/export.csv${exportQuery ? `?${exportQuery}` : ''}`;
   const exportJsonUrl = `/instances/${encodeURIComponent(instance.id)}/export.json${exportQuery ? `?${exportQuery}` : ''}`;
@@ -535,7 +531,7 @@ export default function DashboardMain({
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
   };
 
-  const downloadExport = useCallback(async (format: 'csv' | 'json') => {
+  const downloadExport = async (format: 'csv' | 'json') => {
     if (!apiKey.trim()) {
       onNotify?.('Informe a API key para exportar.', 'error');
       return;
@@ -573,7 +569,7 @@ export default function DashboardMain({
     } catch (err) {
       onNotify?.(formatApiError(err), 'error', 'Falha ao exportar');
     }
-  }, [apiKey, exportCsvUrl, exportJsonUrl, instance.id, onNotify]);
+  };
 
   const notesDirty = noteDraft.trim() !== (instance.note ?? '').trim();
   const riskSafeDraftCount = parseSafeContacts(safeContactsDraft).length;
@@ -581,7 +577,7 @@ export default function DashboardMain({
     ? Math.max(0, Math.min(100, Math.round(Number(riskSnapshot.runtime.ratio) * 100)))
     : null;
 
-  const riskDirty = useMemo(() => {
+  const riskDirty = (() => {
     const current = riskSnapshot?.config;
     if (!current) return Boolean(riskDraft || safeContactsDraft.trim());
     const nextThreshold = Number(riskDraft?.threshold ?? current.threshold);
@@ -600,7 +596,7 @@ export default function DashboardMain({
       if (a[i] !== b[i]) return true;
     }
     return false;
-  }, [parseSafeContacts, riskDraft?.interleaveEvery, riskDraft?.threshold, riskSnapshot?.config, safeContactsDraft]);
+  })();
 
   type RecommendedActionItem = {
     key: string;
@@ -612,75 +608,62 @@ export default function DashboardMain({
     onAction: () => void;
   };
 
-  const recommendedActions = useMemo<RecommendedActionItem[]>(() => {
-    const items: RecommendedActionItem[] = [];
-    if (!isConnected) {
-      items.push({
-        key: 'scan_qr',
-        title: 'Escanear QR',
-        description: 'A instância está offline. Conecte no WhatsApp para liberar envios e eventos.',
-        icon: <QrCode className="h-4 w-4 text-slate-600" aria-hidden="true" />,
-        tone: 'info',
-        actionLabel: 'Ver QR',
-        onAction: () => ensureOverviewAndScroll(qrSectionRef),
-      });
-    }
-    if (riskPaused) {
-      items.push({
-        key: 'resume_risk',
-        title: 'Retomar envios (risco pausado)',
-        description: 'A proteção de risco pausou envios para contatos desconhecidos.',
-        icon: <PauseCircle className="h-4 w-4 text-rose-600" aria-hidden="true" />,
-        tone: 'danger',
-        actionLabel: 'Retomar',
-        onAction: () => void handleRiskResume(),
-      });
-    }
-    if (safeContactsCount === 0) {
-      items.push({
-        key: 'safe_contacts',
-        title: 'Configurar safe contacts',
-        description: 'Adicione números confiáveis para warm-up, testes e interleaving seguro.',
-        icon: <ShieldCheck className="h-4 w-4 text-emerald-600" aria-hidden="true" />,
-        tone: 'warning',
-        actionLabel: 'Configurar',
-        onAction: () => ensureOverviewAndScroll(riskSectionRef),
-      });
-    }
-    if (queueMetrics?.enabled && hasQueueFailures) {
-      items.push({
-        key: 'queue_failed',
-        title: 'Fila com falhas',
-        description: `Existem ${queueFailed} jobs falhos na fila global de envio.`,
-        icon: <AlertTriangle className="h-4 w-4 text-amber-600" aria-hidden="true" />,
-        tone: 'warning',
-        actionLabel: 'Abrir outbox',
-        onAction: () => setActiveTab('outbox'),
-      });
-    }
-    if (hasNetworkIssue) {
-      items.push({
-        key: 'proxy_blocked',
-        title: 'Proxy/Rede com problema',
-        description: 'A validação de rede indica bloqueio ou falha. Revalide e ajuste o proxy.',
-        icon: <WifiOff className="h-4 w-4 text-rose-600" aria-hidden="true" />,
-        tone: 'danger',
-        actionLabel: 'Revisar',
-        onAction: () => ensureOverviewAndScroll(networkSectionRef),
-      });
-    }
-    return items;
-  }, [
-    ensureOverviewAndScroll,
-    handleRiskResume,
-    hasNetworkIssue,
-    hasQueueFailures,
-    isConnected,
-    queueFailed,
-    queueMetrics?.enabled,
-    riskPaused,
-    safeContactsCount,
-  ]);
+  const recommendedActions: RecommendedActionItem[] = [];
+  if (!isConnected) {
+    recommendedActions.push({
+      key: 'scan_qr',
+      title: 'Escanear QR',
+      description: 'A instância está offline. Conecte no WhatsApp para liberar envios e eventos.',
+      icon: <QrCode className="h-4 w-4 text-slate-600" aria-hidden="true" />,
+      tone: 'info',
+      actionLabel: 'Ver QR',
+      onAction: () => ensureOverviewAndScroll(qrSectionRef),
+    });
+  }
+  if (riskPaused) {
+    recommendedActions.push({
+      key: 'resume_risk',
+      title: 'Retomar envios (risco pausado)',
+      description: 'A proteção de risco pausou envios para contatos desconhecidos.',
+      icon: <PauseCircle className="h-4 w-4 text-rose-600" aria-hidden="true" />,
+      tone: 'danger',
+      actionLabel: 'Retomar',
+      onAction: () => void handleRiskResume(),
+    });
+  }
+  if (safeContactsCount === 0) {
+    recommendedActions.push({
+      key: 'safe_contacts',
+      title: 'Configurar safe contacts',
+      description: 'Adicione números confiáveis para warm-up, testes e interleaving seguro.',
+      icon: <ShieldCheck className="h-4 w-4 text-emerald-600" aria-hidden="true" />,
+      tone: 'warning',
+      actionLabel: 'Configurar',
+      onAction: () => ensureOverviewAndScroll(riskSectionRef),
+    });
+  }
+  if (queueMetrics?.enabled && hasQueueFailures) {
+    recommendedActions.push({
+      key: 'queue_failed',
+      title: 'Fila com falhas',
+      description: `Existem ${queueFailed} jobs falhos na fila global de envio.`,
+      icon: <AlertTriangle className="h-4 w-4 text-amber-600" aria-hidden="true" />,
+      tone: 'warning',
+      actionLabel: 'Abrir outbox',
+      onAction: () => setActiveTab('outbox'),
+    });
+  }
+  if (hasNetworkIssue) {
+    recommendedActions.push({
+      key: 'proxy_blocked',
+      title: 'Proxy/Rede com problema',
+      description: 'A validação de rede indica bloqueio ou falha. Revalide e ajuste o proxy.',
+      icon: <WifiOff className="h-4 w-4 text-rose-600" aria-hidden="true" />,
+      tone: 'danger',
+      actionLabel: 'Revisar',
+      onAction: () => ensureOverviewAndScroll(networkSectionRef),
+    });
+  }
 
   return (
     <section className="flex h-full flex-col gap-6 px-6 py-6">
