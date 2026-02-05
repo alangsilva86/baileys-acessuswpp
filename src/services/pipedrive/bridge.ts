@@ -109,6 +109,11 @@ async function handleEvent(event: BrokerEvent): Promise<void> {
 
   const providerChannelId = event.instanceId;
   const instance = getInstance(providerChannelId);
+  const channel = await getChannelByProviderId(providerChannelId);
+  if (!channel) {
+    logger.debug({ providerChannelId }, 'bridge.channel.missing');
+    return;
+  }
   const sourceUserId = getSourceUserId(providerChannelId);
   const sourceUserName = instance?.name || providerChannelId;
 
@@ -154,11 +159,6 @@ async function handleEvent(event: BrokerEvent): Promise<void> {
   if (direction === 'outbound' && shouldSkipOutbound(messageId)) {
     logger.debug({ messageId }, 'bridge.skip.outbound');
     return;
-  }
-
-  const channel = await getChannelByProviderId(providerChannelId);
-  if (!channel) {
-    logger.debug({ providerChannelId }, 'bridge.channel.missing');
   }
 
   try {

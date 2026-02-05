@@ -344,6 +344,20 @@ curl -s -X POST "<BASE_URL>/pipedrive/admin/register-channel" \
 
 Se retorno for `success: true`, o canal foi registrado. Em `PIPEDRIVE_CHANNELS_MODE=dual`, se a Channels API falhar, o endpoint pode retornar `success: true` com `warning` e o fluxo seguirá via Notes (fallback).
 
+#### 4.1) Desregistrar canal (admin)
+
+Remove o vínculo do canal desta instância (e tenta remover também no Pipedrive quando possível).
+
+```bash
+curl -s -X POST "<BASE_URL>/pipedrive/admin/unregister-channel" \
+  -H "content-type: application/json" \
+  -H "x-api-key: <API_KEY>" \
+  -d '{
+    "providerChannelId": "<INSTANCE_ID>",
+    "deleteRemote": true
+  }' | jq .
+```
+
 #### 5) Testar envio via postMessage (Pipedrive → seu sistema)
 
 Esse endpoint é chamado pelo Pipedrive usando **Basic Auth** com `client_id:client_secret`.

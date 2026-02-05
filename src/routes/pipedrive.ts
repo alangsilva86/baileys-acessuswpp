@@ -48,6 +48,7 @@ import {
   getConversation,
   upsertChannel,
 } from '../services/pipedrive/store.js';
+import type { PipedriveChannelRecord } from '../services/pipedrive/store.js';
 import { markPipedriveOutbound } from '../services/pipedrive/bridge.js';
 import type { PipedriveMessage, PipedriveParticipant } from '../services/pipedrive/types.js';
 
@@ -164,6 +165,25 @@ function classifyUpstreamFailure(err: unknown): { type: string; status: number |
     }
   }
   return { type: 'upstream_error', status };
+}
+
+async function requireLinkedChannel(providerChannelId: string, res: Response): Promise<PipedriveChannelRecord | null> {
+  const channel = await getChannelByProviderId(providerChannelId);
+  if (!channel) {
+    res.status(404).json({ error: 'channel_inactive' });
+    return null;
+  }
+  return channel;
+}
+
+async function requireRealChannel(providerChannelId: string, res: Response): Promise<PipedriveChannelRecord | null> {
+  const channel = await requireLinkedChannel(providerChannelId, res);
+  if (!channel) return null;
+  if (String(channel.id ?? '').startsWith('fallback:')) {
+    res.status(410).json({ error: 'channels_unavailable' });
+    return null;
+  }
+  return channel;
 }
 
 function pipedriveAuth(req: Request, res: Response, next: NextFunction): void {
@@ -481,6 +501,59 @@ router.post('/admin/register-channel', apiKeyAuth, async (req, res) => {
   }
 });
 
+router.post('/admin/unregister-channel', apiKeyAuth, async (req, res) => {
+  const body = (req.body || {}) as Record<string, unknown>;
+  const providerChannelId = typeof body.providerChannelId === 'string' && body.providerChannelId.trim()
+    ? body.providerChannelId.trim()
+    : typeof body.instanceId === 'string' && body.instanceId.trim()
+    ? body.instanceId.trim()
+    : '';
+
+  if (!providerChannelId) {
+    res.status(400).json({ error: 'provider_channel_id_required' });
+    return;
+  }
+
+  const deleteRemote = body.deleteRemote === true || body.deleteRemote === '1' || body.deleteRemote === 'true';
+  const purge = body.purge === true || body.purge === '1' || body.purge === 'true';
+
+  const channel = await getChannelByProviderId(providerChannelId);
+  if (!channel) {
+    res.json({ success: true, data: { provider_channel_id: providerChannelId, removed: false, remote_deleted: false, purged: false } });
+    return;
+  }
+
+  let remoteDeleted = false;
+  let remoteWarning: unknown = null;
+  if (deleteRemote && !String(channel.id ?? '').startsWith('fallback:')) {
+    try {
+      await pipedriveClient.deleteChannel(channel);
+      remoteDeleted = true;
+    } catch (err: any) {
+      remoteWarning = {
+        message: 'remote_delete_failed',
+        upstream: serializeAxiosError(err),
+      };
+    }
+  }
+
+  await removeChannelByProviderId(providerChannelId);
+  if (purge) {
+    await removeConversationsByProviderId(providerChannelId);
+  }
+
+  res.json({
+    success: true,
+    data: {
+      provider_channel_id: providerChannelId,
+      removed: true,
+      remote_deleted: remoteDeleted,
+      purged: purge,
+    },
+    ...(remoteWarning ? { warning: remoteWarning } : {}),
+  });
+});
+
 router.post('/admin/register-all', apiKeyAuth, async (_req, res) => {
   const instances = getAllInstances();
   const results: Array<{ id: string; status: string; detail?: string; warning?: unknown }>= [];
@@ -766,12 +839,15 @@ router.post('/webhooks', pipedriveWebhookAuth, async (req, res) => {
 });
 
 router.get('/channels/:providerChannelId/conversations', pipedriveAuth, async (req, res) => {
+  const providerChannelId = req.params.providerChannelId;
+  const channel = await requireRealChannel(providerChannelId, res);
+  if (!channel) return;
   const limit = parseLimit(req.query.limit, 20, 100);
   const messagesLimit = parseLimit(req.query.messages_limit, 20, 100);
   const after = typeof req.query.after === 'string' ? req.query.after : null;
 
   const { items, nextAfter } = await listConversations({
-    providerChannelId: req.params.providerChannelId,
+    providerChannelId,
     limit,
     after,
     messagesLimit,
@@ -786,10 +862,13 @@ router.get('/channels/:providerChannelId/conversations', pipedriveAuth, async (r
 });
 
 router.get('/channels/:providerChannelId/conversations/:sourceConversationId', pipedriveAuth, async (req, res) => {
+  const providerChannelId = req.params.providerChannelId;
+  const channel = await requireRealChannel(providerChannelId, res);
+  if (!channel) return;
   const messagesLimit = parseLimit(req.query.messages_limit, 20, 100);
   const after = typeof req.query.after === 'string' ? req.query.after : null;
   const conversation = await getConversation({
-    providerChannelId: req.params.providerChannelId,
+    providerChannelId,
     conversationId: req.params.sourceConversationId,
     messagesLimit,
     after,
@@ -802,8 +881,11 @@ router.get('/channels/:providerChannelId/conversations/:sourceConversationId', p
 });
 
 router.get('/channels/:providerChannelId/conversations/:sourceConversationId/messages/:sourceMessageId', pipedriveAuth, async (req, res) => {
+  const providerChannelId = req.params.providerChannelId;
+  const channel = await requireRealChannel(providerChannelId, res);
+  if (!channel) return;
   const message = await findMessage({
-    providerChannelId: req.params.providerChannelId,
+    providerChannelId,
     conversationId: req.params.sourceConversationId,
     messageId: req.params.sourceMessageId,
   });
@@ -815,8 +897,11 @@ router.get('/channels/:providerChannelId/conversations/:sourceConversationId/mes
 });
 
 router.get('/channels/:providerChannelId/messages/:sourceMessageId', pipedriveAuth, async (req, res) => {
+  const providerChannelId = req.params.providerChannelId;
+  const channel = await requireRealChannel(providerChannelId, res);
+  if (!channel) return;
   const message = await findMessage({
-    providerChannelId: req.params.providerChannelId,
+    providerChannelId,
     messageId: req.params.sourceMessageId,
   });
   if (!message) {
@@ -827,8 +912,11 @@ router.get('/channels/:providerChannelId/messages/:sourceMessageId', pipedriveAu
 });
 
 router.get('/channels/:providerChannelId/senders/:senderId', pipedriveAuth, async (req, res) => {
+  const providerChannelId = req.params.providerChannelId;
+  const channel = await requireRealChannel(providerChannelId, res);
+  if (!channel) return;
   const participant = await findParticipant({
-    providerChannelId: req.params.providerChannelId,
+    providerChannelId,
     participantId: req.params.senderId,
   });
   if (!participant) {
@@ -844,7 +932,10 @@ router.get('/channels/:providerChannelId/senders/:senderId', pipedriveAuth, asyn
   res.json({ success: true, data: response });
 });
 
-router.get('/channels/:providerChannelId/templates', pipedriveAuth, async (_req, res) => {
+router.get('/channels/:providerChannelId/templates', pipedriveAuth, async (req, res) => {
+  const providerChannelId = req.params.providerChannelId;
+  const channel = await requireRealChannel(providerChannelId, res);
+  if (!channel) return;
   res.json({ success: true, data: [] });
 });
 
@@ -860,6 +951,8 @@ router.post(
   upload.any(),
   async (req, res) => {
     const providerChannelId = req.params.providerChannelId;
+    const channel = await requireRealChannel(providerChannelId, res);
+    if (!channel) return;
     const conversationId = req.params.sourceConversationId;
 
     if (conversationId.endsWith('@g.us')) {
@@ -955,7 +1048,6 @@ router.post(
       markPipedriveOutbound(msg.id);
     }
 
-    const channel = await getChannelByProviderId(providerChannelId);
     const sourceUserId = getSourceUserId(providerChannelId);
     if (senderIdRaw && senderIdRaw !== sourceUserId) {
       logger.debug({ senderIdRaw, expected: sourceUserId }, 'postMessage.senderId.mismatch');

@@ -17,11 +17,14 @@ import type { ToastTone } from './ToastStack';
 import { fetchJson, formatApiError } from '../../../lib/api';
 import Modal from './Modal';
 import useInstanceMetrics from '../hooks/useInstanceMetrics';
+import PipedriveIntegrationCard from './PipedriveIntegrationCard';
 
 type DashboardMainProps = {
   instance?: DashboardInstance | null;
+  apiKey: string;
   onRefresh?: () => void;
   onDeleteInstance?: () => void;
+  onNotify?: (message: string, tone?: ToastTone, title?: string) => void;
 };
 
 const STATUS_META: Record<InstanceStatus, { label: string; tone: string; icon: ReactNode }> = {
@@ -289,6 +292,14 @@ export default function DashboardMain({
               </div>
             </section>
           )}
+
+          <PipedriveIntegrationCard
+            instanceId={instance.id}
+            instanceName={instance.name}
+            isConnected={isConnected}
+            apiKey={apiKey}
+            onNotify={onNotify}
+          />
 
           <section className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm">
             <p className="text-sm font-semibold text-slate-900">Notas e contexto</p>

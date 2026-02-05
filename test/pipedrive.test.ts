@@ -209,6 +209,107 @@ test('admin/register-channel retorna warning com erro upstream (dual + fallback)
   }
 });
 
+test('admin/unregister-channel remove canal e tenta delete remoto quando possível', async (t) => {
+  const { server, baseUrl } = await createServer();
+  t.after(() =>
+    new Promise<void>((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve()));
+    }),
+  );
+
+  const { upsertChannel } = await import('../src/services/pipedrive/store.js');
+  await upsertChannel({
+    id: '111',
+    provider_channel_id: 'inst-unreg',
+    name: 'Test',
+    provider_type: 'whatsapp',
+    template_support: false,
+    avatar_url: null,
+    company_id: 123,
+    api_domain: null,
+  } as any);
+
+  const { pipedriveClient } = await import('../src/services/pipedrive/client.js');
+  const originalDeleteChannel = pipedriveClient.deleteChannel.bind(pipedriveClient);
+  const deleted: string[] = [];
+  pipedriveClient.deleteChannel = async (channel: any) => {
+    deleted.push(String(channel?.id ?? ''));
+  };
+
+  try {
+    const response = await fetch(`${baseUrl}/pipedrive/admin/unregister-channel`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': TEST_API_KEY,
+      },
+      body: JSON.stringify({ providerChannelId: 'inst-unreg', deleteRemote: true }),
+    });
+
+    assert.equal(response.status, 200);
+    const json = await response.json();
+    assert.equal(json.success, true);
+    assert.equal(json.data.removed, true);
+    assert.equal(json.data.remote_deleted, true);
+    assert.deepStrictEqual(deleted, ['111']);
+
+    const listRes = await fetch(`${baseUrl}/pipedrive/admin/channels`, {
+      headers: { 'x-api-key': TEST_API_KEY },
+    });
+    const listJson = await listRes.json();
+    assert.equal(Array.isArray(listJson.data), true);
+    assert.equal(listJson.data.some((item: any) => item.provider_channel_id === 'inst-unreg'), false);
+  } finally {
+    pipedriveClient.deleteChannel = originalDeleteChannel;
+  }
+});
+
+test('admin/unregister-channel ignora delete remoto para canal fallback', async (t) => {
+  const { server, baseUrl } = await createServer();
+  t.after(() =>
+    new Promise<void>((resolve, reject) => {
+      server.close((err) => (err ? reject(err) : resolve()));
+    }),
+  );
+
+  const { upsertChannel } = await import('../src/services/pipedrive/store.js');
+  await upsertChannel({
+    id: 'fallback:inst-fb',
+    provider_channel_id: 'inst-fb',
+    name: 'Fallback',
+    provider_type: 'whatsapp',
+    template_support: false,
+    avatar_url: null,
+    company_id: 123,
+    api_domain: null,
+  } as any);
+
+  const { pipedriveClient } = await import('../src/services/pipedrive/client.js');
+  const originalDeleteChannel = pipedriveClient.deleteChannel.bind(pipedriveClient);
+  pipedriveClient.deleteChannel = async () => {
+    throw new Error('should_not_call_delete_channel');
+  };
+
+  try {
+    const response = await fetch(`${baseUrl}/pipedrive/admin/unregister-channel`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': TEST_API_KEY,
+      },
+      body: JSON.stringify({ providerChannelId: 'inst-fb', deleteRemote: true }),
+    });
+
+    assert.equal(response.status, 200);
+    const json = await response.json();
+    assert.equal(json.success, true);
+    assert.equal(json.data.removed, true);
+    assert.equal(json.data.remote_deleted, false);
+  } finally {
+    pipedriveClient.deleteChannel = originalDeleteChannel;
+  }
+});
+
 test('webhook receiver exige Basic Auth', async (t) => {
   const { server, baseUrl } = await createServer();
   t.after(() =>
