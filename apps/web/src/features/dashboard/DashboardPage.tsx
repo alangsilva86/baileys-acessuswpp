@@ -5,11 +5,18 @@ import DashboardMain from './components/DashboardMain';
 import Modal from './components/Modal';
 import ToastStack, { type ToastItem, type ToastTone } from './components/ToastStack';
 import useInstances from './hooks/useInstances';
+import useQueueMetrics from './hooks/useQueueMetrics';
 import { formatApiError, readStoredApiKey, writeStoredApiKey } from '../../lib/api';
 
 export default function DashboardPage() {
   const [apiKey, setApiKey] = useState(() => readStoredApiKey());
   const { instances, isLoading, stats, error, actions } = useInstances(apiKey);
+  const {
+    metrics: queueMetrics,
+    isLoading: queueLoading,
+    error: queueError,
+    refresh: refreshQueueMetrics,
+  } = useQueueMetrics(apiKey);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
@@ -155,8 +162,16 @@ export default function DashboardPage() {
         main={(
         <DashboardMain
           instance={selectedInstance}
+          allInstances={instances}
           apiKey={apiKey}
-          onRefresh={() => void actions.refreshInstances()}
+          queueMetrics={queueMetrics}
+          queueLoading={queueLoading}
+          queueError={queueError}
+          onRefreshQueue={() => void refreshQueueMetrics()}
+          onRefresh={() => {
+            void actions.refreshInstances();
+            void refreshQueueMetrics();
+          }}
           onDeleteInstance={handleDeleteInstance}
           onNotify={pushToast}
         />

@@ -31,7 +31,7 @@ import {
   MAX_MEDIA_BYTES,
 } from '../baileys/messageService.js';
 import { riskGuardian } from '../risk/guardian.js';
-import { enqueueSendJob, getQueueMetrics, isSendQueueEnabled } from '../queue/sendQueue.js';
+import { enqueueSendJob, getQueueMetrics, getSendJobDetails, isSendQueueEnabled, listFailedSendJobs, retrySendJob } from '../queue/sendQueue.js';
 
 const router = Router();
 
@@ -909,7 +909,72 @@ router.get('/:iid/risk', (req, res) => {
 
 router.get('/queue/metrics', asyncHandler(async (_req, res) => {
   const metrics = await getQueueMetrics();
-  res.json(metrics ?? { enabled: false });
+  if (!metrics) {
+    res.json({ enabled: false });
+    return;
+  }
+  res.json({ enabled: true, ...metrics });
+}));
+
+router.get('/queue/failed', asyncHandler(async (req, res) => {
+  const limitRaw = req.query.limit;
+  const limit =
+    typeof limitRaw === 'string' && limitRaw.trim() && Number.isFinite(Number(limitRaw))
+      ? Math.max(1, Math.min(Math.floor(Number(limitRaw)), 200))
+      : 50;
+
+  if (!isSendQueueEnabled()) {
+    res.json({ enabled: false, jobs: [] });
+    return;
+  }
+
+  const jobs = await listFailedSendJobs(limit);
+  if (!jobs) {
+    res.json({ enabled: false, jobs: [] });
+    return;
+  }
+
+  res.json({ enabled: true, jobs });
+}));
+
+router.get('/queue/jobs/:jobId', asyncHandler(async (req, res) => {
+  if (!isSendQueueEnabled()) {
+    res.status(409).json({ error: 'send_queue_disabled' });
+    return;
+  }
+  const jobId = String(req.params.jobId ?? '').trim();
+  if (!jobId) {
+    res.status(400).json({ error: 'jobId_required' });
+    return;
+  }
+  const job = await getSendJobDetails(jobId);
+  if (!job) {
+    res.status(404).json({ error: 'job_not_found' });
+    return;
+  }
+  res.json({ enabled: true, job });
+}));
+
+router.post('/queue/jobs/:jobId/retry', asyncHandler(async (req, res) => {
+  if (!isSendQueueEnabled()) {
+    res.status(409).json({ error: 'send_queue_disabled' });
+    return;
+  }
+  const jobId = String(req.params.jobId ?? '').trim();
+  if (!jobId) {
+    res.status(400).json({ error: 'jobId_required' });
+    return;
+  }
+  const result = await retrySendJob(jobId);
+  if (!result) {
+    res.status(404).json({ error: 'job_not_found' });
+    return;
+  }
+  if (!result.ok) {
+    res.status(409).json({ error: 'job_not_failed', state: result.state });
+    return;
+  }
+  res.json({ ok: true, state: result.state });
 }));
 
 router.post(
@@ -924,7 +989,20 @@ router.post(
     const body = (req.body || {}) as Record<string, unknown>;
     const thresholdRaw = body.threshold ?? body.riskThreshold;
     const interleaveRaw = body.interleaveEvery ?? body.safeEvery ?? body.safeInterval;
-    const safeContacts = sanitizeSafeContacts(body.safeContacts ?? (body as any)?.safe_contacts ?? (body as any)?.safe);
+    const safeContactsInput =
+      Object.prototype.hasOwnProperty.call(body, 'safeContacts')
+        ? (body as any).safeContacts
+        : Object.prototype.hasOwnProperty.call(body, 'safe_contacts')
+        ? (body as any).safe_contacts
+        : Object.prototype.hasOwnProperty.call(body, 'safe')
+        ? (body as any).safe
+        : undefined;
+    const safeContactsProvided = safeContactsInput !== undefined;
+    if (safeContactsProvided && !Array.isArray(safeContactsInput)) {
+      res.status(400).json({ error: 'safe_contacts_invalid' });
+      return;
+    }
+    const safeContacts = safeContactsProvided ? sanitizeSafeContacts(safeContactsInput) : [];
 
     const threshold = Number(thresholdRaw);
     const interleave = Number(interleaveRaw);
@@ -935,7 +1013,7 @@ router.post(
     if (Number.isFinite(interleave) && interleave > 0) {
       inst.risk.interleaveEvery = interleave;
     }
-    if (safeContacts.length) {
+    if (safeContactsProvided) {
       inst.risk.safeContacts = safeContacts;
     }
 
@@ -976,12 +1054,21 @@ router.post(
   asyncHandler(async (req, res) => {
     const inst = getInstance(req.params.iid);
     if (!ensureInstanceOnline(inst, res)) return;
+    if (!allowSend(inst)) {
+      res.status(429).json({ error: 'rate limit exceeded' });
+      return;
+    }
     const safeContacts = Array.isArray(inst.risk?.safeContacts) ? inst.risk.safeContacts : [];
     if (!safeContacts.length) {
       res.status(400).json({ error: 'no_safe_contacts' });
       return;
     }
     const target = safeContacts[0];
+    const safeJid = target.includes('@') ? target.trim().toLowerCase() : `${target.replace(/\D+/g, '')}@s.whatsapp.net`;
+    if (!safeJid || !safeJid.includes('@')) {
+      res.status(400).json({ error: 'safe_contact_invalid' });
+      return;
+    }
     const messageRaw = (req.body as any)?.message;
     const message = typeof messageRaw === 'string' && messageRaw.trim() ? messageRaw.trim() : 'Safe ping automático';
     const msgService = inst.context?.messageService;
@@ -989,9 +1076,8 @@ router.post(
       res.status(503).json({ error: 'message_service_unavailable' });
       return;
     }
-    await msgService.sendText(target, message, {});
-    riskGuardian.afterSend(inst.id, target, true);
-    res.json({ ok: true, target, message });
+    await msgService.sendText(safeJid, message, {});
+    res.json({ ok: true, target: safeJid, message });
   }),
 );
 
@@ -1581,6 +1667,16 @@ router.post(
     const requestLog: Record<string, unknown> = { type, to: normalized };
     const meta: Record<string, unknown> = {};
 
+    const respondRiskPaused = (err: unknown): boolean => {
+      const code = (err as any)?.code ? String((err as any).code) : null;
+      if (code !== 'risk_paused') return false;
+      res.status(429).json({
+        error: 'risk_paused',
+        message: getErrorMessage(err),
+      });
+      return true;
+    };
+
     const respondSocketUnavailable = (err: unknown): boolean => {
       if (!isSocketUnavailableError(err)) return false;
       const message = getErrorMessage(err);
@@ -1633,6 +1729,7 @@ router.post(
             ? await inst.context.messageService.sendText(targetJid, messageText, { timeoutMs })
             : ((await sendWithTimeout(inst, targetJid, { text: messageText })) as WAMessage);
         } catch (err) {
+          if (respondRiskPaused(err)) return;
           if (respondSocketUnavailable(err)) return;
           res.status(500).json({ error: 'send_failed', detail: getErrorMessage(err) });
           return;
@@ -1712,6 +1809,7 @@ router.post(
             sent = (await sendWithTimeout(inst, targetJid, content)) as WAMessage;
           }
         } catch (err) {
+          if (respondRiskPaused(err)) return;
           if (respondSocketUnavailable(err)) return;
           res.status(500).json({ error: 'send_failed', detail: getErrorMessage(err) });
           return;
@@ -1826,6 +1924,7 @@ router.post(
             sent = (await sendWithTimeout(inst, targetJid, content)) as WAMessage;
           }
         } catch (err) {
+          if (respondRiskPaused(err)) return;
           if (respondSocketUnavailable(err)) return;
           res.status(500).json({ error: 'send_failed', detail: getErrorMessage(err) });
           return;
@@ -1914,6 +2013,7 @@ router.post(
             sent = (await sendWithTimeout(inst, targetJid, built.content)) as WAMessage;
           }
         } catch (err) {
+          if (respondRiskPaused(err)) return;
           if (respondSocketUnavailable(err)) return;
           res.status(500).json({ error: 'send_failed', detail: getErrorMessage(err) });
           return;
@@ -2401,7 +2501,21 @@ router.post(
           })
         : ((await sendWithTimeout(inst, targetJid, built.content)) as WAMessage);
     } catch (err) {
-      res.status(500).json({ error: 'send_failed', detail: (err as Error).message });
+      const code = (err as any)?.code ? String((err as any).code) : null;
+      if (code === 'risk_paused') {
+        res.status(429).json({ error: 'risk_paused', message: getErrorMessage(err) });
+        return;
+      }
+      if (isSocketUnavailableError(err)) {
+        const message = getErrorMessage(err);
+        res.status(503).json({
+          error: 'socket_unavailable',
+          detail: 'Conexão com o WhatsApp indisponível. Refaça o pareamento e tente novamente.',
+          message,
+        });
+        return;
+      }
+      res.status(500).json({ error: 'send_failed', detail: getErrorMessage(err) });
       return;
     }
 

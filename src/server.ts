@@ -243,6 +243,14 @@ app.get('*', (req, res, next) => {
 app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
   const request = req as RequestWithId;
   logger.error({ reqId: request.id, err }, 'request.error');
+  const code = (err as any)?.code ? String((err as any).code) : null;
+  if (code === 'risk_paused') {
+    res.status(429).json({
+      error: 'risk_paused',
+      message: err.message || 'Envios pausados por risco elevado',
+    });
+    return;
+  }
   res.status(500).json({ error: 'internal_server_error', message: err.message });
 });
 

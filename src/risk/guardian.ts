@@ -101,7 +101,10 @@ class RiskGuardian {
     }
 
     if (state.paused) {
-      return { allowed: false, reason: 'risk_paused', ratio: currentRatio, isKnown };
+      if (!isKnown) {
+        return { allowed: false, reason: 'risk_paused', ratio: currentRatio, isKnown };
+      }
+      return { allowed: true, ratio: currentRatio, isKnown, injectSafeJid: null };
     }
 
     if (!isKnown) {

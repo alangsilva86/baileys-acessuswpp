@@ -10,6 +10,8 @@ import {
 } from '../types';
 import { fetchJson, formatApiError } from '../../../lib/api';
 
+export type MetricsRangePreset = '30m' | '2h' | '24h' | 'all';
+
 type InstanceMetricsSnapshot = {
   counters: InstanceMetricCounters;
   delivery: InstanceMetricDelivery;
@@ -20,6 +22,7 @@ type InstanceMetricsSnapshot = {
 
 type UseInstanceMetricsResult = {
   metrics: MetricDatum[] | null;
+  snapshot: InstanceMetricsSnapshot | null;
   isLoading: boolean;
   error: string | null;
   lastUpdated: number | null;
@@ -103,8 +106,16 @@ function createSnapshotFromPayload(payload: InstanceMetricsPayload): InstanceMet
   };
 }
 
-function buildMetricCards(snapshot: InstanceMetricsSnapshot | null): MetricDatum[] | null {
+function formatRangeHelper(preset: MetricsRangePreset): string {
+  if (preset === '2h') return 'Últimas 2h';
+  if (preset === '24h') return 'Últimas 24h';
+  if (preset === 'all') return 'Desde o início';
+  return 'Últimos 30 min';
+}
+
+function buildMetricCards(snapshot: InstanceMetricsSnapshot | null, preset: MetricsRangePreset): MetricDatum[] | null {
   if (!snapshot) return null;
+  const rangeHelper = formatRangeHelper(preset);
   const sentDelta = snapshot.rangeSummary?.deltas.sent ?? snapshot.counters.sent;
   const deliveredDelta = snapshot.rangeSummary?.deltas.delivered ?? snapshot.delivery.delivered;
   const deliveryRate =
@@ -121,14 +132,14 @@ function buildMetricCards(snapshot: InstanceMetricsSnapshot | null): MetricDatum
       key: 'delivery',
       label: 'Taxa de entrega',
       value: `${deliveryRate}%`,
-      helper: 'Últimos 30 min',
+      helper: rangeHelper,
       tone: 'positive',
     },
     {
       key: 'failures',
       label: 'Falhas',
       value: String(failures),
-      helper: 'Últimos 30 min',
+      helper: rangeHelper,
       tone: failures > 0 ? 'warning' : 'neutral',
     },
     {
@@ -148,7 +159,21 @@ function buildMetricCards(snapshot: InstanceMetricsSnapshot | null): MetricDatum
   ];
 }
 
-export default function useInstanceMetrics(instanceId: string | null, apiKey: string): UseInstanceMetricsResult {
+function resolveRangeQuery(preset: MetricsRangePreset): { from?: number; to?: number } {
+  if (preset === 'all') return {};
+  const now = Date.now();
+  const durationMs =
+    preset === '30m' ? 30 * 60 * 1000
+    : preset === '2h' ? 2 * 60 * 60 * 1000
+    : 24 * 60 * 60 * 1000;
+  return { from: now - durationMs, to: now };
+}
+
+export default function useInstanceMetrics(
+  instanceId: string | null,
+  apiKey: string,
+  preset: MetricsRangePreset = '30m',
+): UseInstanceMetricsResult {
   const [snapshot, setSnapshot] = useState<InstanceMetricsSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -161,14 +186,22 @@ export default function useInstanceMetrics(instanceId: string | null, apiKey: st
     setIsLoading(true);
     setError(null);
     try {
-      const payload = await fetchJson<InstanceMetricsPayload>(`/instances/${encodeURIComponent(instanceId)}/metrics`, apiKey);
+      const qs = new URLSearchParams();
+      const range = resolveRangeQuery(preset);
+      if (range.from != null) qs.set('from', String(range.from));
+      if (range.to != null) qs.set('to', String(range.to));
+      const suffix = qs.toString() ? `?${qs.toString()}` : '';
+      const payload = await fetchJson<InstanceMetricsPayload>(
+        `/instances/${encodeURIComponent(instanceId)}/metrics${suffix}`,
+        apiKey,
+      );
       setSnapshot(createSnapshotFromPayload(payload));
     } catch (err) {
       setError(formatApiError(err));
     } finally {
       setIsLoading(false);
     }
-  }, [apiKey, instanceId]);
+  }, [apiKey, instanceId, preset]);
 
   useEffect(() => {
     if (!instanceId || !apiKey) {
@@ -224,10 +257,11 @@ export default function useInstanceMetrics(instanceId: string | null, apiKey: st
     };
   }, [apiKey, instanceId]);
 
-  const metrics = useMemo(() => buildMetricCards(snapshot), [snapshot]);
+  const metrics = useMemo(() => buildMetricCards(snapshot, preset), [preset, snapshot]);
 
   return {
     metrics,
+    snapshot,
     isLoading,
     error,
     lastUpdated: snapshot?.lastUpdated ?? null,
