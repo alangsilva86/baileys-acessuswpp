@@ -81,7 +81,7 @@ Campos principais (resumo):
   "sequence": 123,
   "instanceId": "inst-1",
   "direction": "inbound|outbound|system",
-  "type": "MESSAGE_INBOUND|MESSAGE_OUTBOUND|POLL_CHOICE|WEBHOOK_DELIVERY|QUICK_SEND_RESULT|...",
+  "type": "MESSAGE_INBOUND|MESSAGE_OUTBOUND|MESSAGE_STATUS|POLL_CHOICE|WEBHOOK_DELIVERY|QUICK_SEND_RESULT|...",
   "payload": { "...": "..." },
   "createdAt": 1730000000000,
   "acknowledged": false,
@@ -92,8 +92,9 @@ Campos principais (resumo):
 ## SSE
 
 ### GET /stream (global)
-- Sem auth.
+- Requer auth (`x-api-key` header ou `?apiKey=...`).
 - Envia `broker:event` (payload = BrokerEvent) e `ping`.
+- Suporta `?iid=<instanceId>` para filtrar eventos por instância.
 - Suporta `Last-Event-ID` para backlog.
 
 ### GET /instances/events?apiKey=...&iid=...

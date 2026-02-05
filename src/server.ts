@@ -33,6 +33,10 @@ const PUBLIC_DIR = existsSync(VITE_DIST_DIR) ? VITE_DIST_DIR : LEGACY_PUBLIC_DIR
 const STREAM_PING_INTERVAL_MS = 15000;
 const STREAM_BACKLOG_LIMIT = 200;
 const SPA_FALLBACK_EXCLUDE_PREFIXES = ['/instances', '/webhooks', '/pipedrive'];
+const API_KEYS = String(process.env.API_KEY || 'change-me')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 const app = express();
 app.disable('x-powered-by');
@@ -65,6 +69,34 @@ function sanitizeUrlForLog(raw: string): string {
   } catch {
     return raw.replace(/([?&])(apiKey|api_key|token|access_token|refresh_token|authorization|code)=([^&]+)/gi, '$1$2=[REDACTED]');
   }
+}
+
+function safeEquals(a: unknown, b: unknown): boolean {
+  const A = Buffer.from(String(a ?? ''));
+  const B = Buffer.from(String(b ?? ''));
+  if (A.length !== B.length) return false;
+  return crypto.timingSafeEqual(A, B);
+}
+
+function extractApiKey(req: Request): string {
+  const headerKey = req.header('x-api-key');
+  if (headerKey && headerKey.trim()) return headerKey.trim();
+  const queryKey = req.query.apiKey;
+  if (typeof queryKey === 'string' && queryKey.trim()) return queryKey.trim();
+  if (Array.isArray(queryKey)) {
+    const [first] = queryKey;
+    if (typeof first === 'string') {
+      const trimmed = first.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return '';
+}
+
+function isAuthorized(req: Request): boolean {
+  const key = extractApiKey(req);
+  if (!key) return false;
+  return API_KEYS.some((candidate) => safeEquals(candidate, key));
 }
 
 function parseFrameAncestors(value: string | undefined): string[] {
@@ -165,6 +197,10 @@ app.get('/', (_req, res) => {
 const streamClients = new Map<Response, { id: string }>();
 
 app.get('/stream', (req, res) => {
+  if (!isAuthorized(req)) {
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -180,8 +216,12 @@ app.get('/stream', (req, res) => {
   streamClients.set(res, { id: clientId });
   logger.info({ clientId, ip: req.ip, connections: streamClients.size }, 'stream.client.connected');
 
+  const iidFilterRaw = req.query.iid;
+  const iidFilter = typeof iidFilterRaw === 'string' && iidFilterRaw.trim() ? iidFilterRaw.trim() : null;
+
   const sendEvent = (event: BrokerEvent) => {
     try {
+      if (iidFilter && event.instanceId !== iidFilter) return;
       res.write(`id: ${event.id}\n`);
       res.write('event: broker:event\n');
       res.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -191,7 +231,7 @@ app.get('/stream', (req, res) => {
   };
 
   const lastEventId = req.get('last-event-id') || req.get('Last-Event-ID');
-  const recent = brokerEventStore.recent({ limit: STREAM_BACKLOG_LIMIT });
+  const recent = brokerEventStore.recent({ limit: STREAM_BACKLOG_LIMIT, instanceId: iidFilter });
   const cutoffSequence = lastEventId
     ? recent.find((item) => item.id === lastEventId)?.sequence ?? 0
     : 0;

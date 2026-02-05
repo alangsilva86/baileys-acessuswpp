@@ -37,6 +37,7 @@ import useInstanceMetrics, { type MetricsRangePreset } from '../hooks/useInstanc
 import useInstanceLogs from '../hooks/useInstanceLogs';
 import useQueueFailedJobs from '../hooks/useQueueFailedJobs';
 import PipedriveIntegrationCard from './PipedriveIntegrationCard';
+import MessageMonitorDrawer from './MessageMonitorDrawer';
 
 type DashboardMainProps = {
   instance?: DashboardInstance | null;
@@ -149,6 +150,7 @@ export default function DashboardMain({
   const [quickSendPhone, setQuickSendPhone] = useState('');
   const [quickSendMessage, setQuickSendMessage] = useState('');
   const [isQuickSending, setIsQuickSending] = useState(false);
+  const [monitorOpen, setMonitorOpen] = useState(false);
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
   const [isRiskSaving, setIsRiskSaving] = useState(false);
   const [riskDraft, setRiskDraft] = useState<InstanceRiskConfig | null>(null);
@@ -724,6 +726,13 @@ export default function DashboardMain({
             className="rounded-lg bg-slate-900 px-3 py-2 text-xs text-white shadow-sm hover:bg-slate-800"
           >
             Envio rapido
+          </button>
+          <button
+            type="button"
+            onClick={() => setMonitorOpen(true)}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm hover:bg-slate-50"
+          >
+            Monitor
           </button>
           <SettingsMenu
             onAdvanced={() => ensureOverviewAndScroll(riskSectionRef)}
@@ -1702,6 +1711,14 @@ export default function DashboardMain({
           className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
         />
       </Modal>
+
+      <MessageMonitorDrawer
+        open={monitorOpen}
+        apiKey={apiKey}
+        instanceId={instance.id}
+        instanceName={instance.name}
+        onClose={() => setMonitorOpen(false)}
+      />
     </section>
   );
 }

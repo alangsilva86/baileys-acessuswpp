@@ -414,11 +414,29 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
 
     for (const u of updates) {
       const mid = u.key?.id ?? null;
+      const chatId = u.key?.remoteJid ?? null;
       const rawStatus = u.update ? ((u.update as Record<string, unknown>).statusV3 ?? (u.update as Record<string, unknown>).status) : null;
       const status = normalizeStatusCode(rawStatus);
       const changed = mid && status != null ? applyStatus(inst, mid, status) : false;
 
       logger.info({ iid, mid, status, changed, source: 'messages.update', rawStatus }, 'messages.status');
+
+      if (changed && mid && status != null) {
+        brokerEventStore.enqueue({
+          instanceId: inst.id,
+          direction: 'system',
+          type: 'MESSAGE_STATUS',
+          payload: {
+            messageId: mid,
+            chatId,
+            status,
+            source: 'messages.update',
+            rawStatus,
+            timestamp: new Date().toISOString(),
+          },
+          delivery: null,
+        });
+      }
     }
 
     try { await webhook.emit('WHATSAPP_MESSAGES_UPDATE', { iid, raw: { updates } }); }
@@ -430,12 +448,29 @@ export async function startWhatsAppInstance(inst: Instance): Promise<Instance> {
 
     for (const update of updates) {
       const mid = update?.key?.id ?? null;
+      const chatId = update?.key?.remoteJid ?? null;
       if (!mid) continue;
       const receipt = update.receipt as MessageReceipt;
       const status = deriveStatusFromReceipt(receipt);
       const changed = status != null ? applyStatus(inst, mid, status) : false;
 
       logger.info({ iid, mid, status, changed, source: 'message-receipt.update' }, 'messages.status');
+
+      if (changed && status != null) {
+        brokerEventStore.enqueue({
+          instanceId: inst.id,
+          direction: 'system',
+          type: 'MESSAGE_STATUS',
+          payload: {
+            messageId: mid,
+            chatId,
+            status,
+            source: 'message-receipt.update',
+            timestamp: new Date().toISOString(),
+          },
+          delivery: null,
+        });
+      }
     }
   });
 
