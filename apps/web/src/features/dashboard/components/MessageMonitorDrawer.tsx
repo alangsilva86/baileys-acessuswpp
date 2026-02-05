@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import type { BrokerEvent } from '../types';
 import { fetchJson, formatApiError } from '../../../lib/api';
+import { getSseToken } from '../../../lib/sseToken';
 
 type MessageMonitorDrawerProps = {
   open: boolean;
@@ -278,11 +279,8 @@ export default function MessageMonitorDrawer({
     if (!open) return undefined;
     if (!apiKey.trim()) return undefined;
 
-    const params = new URLSearchParams({
-      apiKey: apiKey.trim(),
-      iid: instanceId,
-    });
-    const source = new EventSource(`/stream?${params.toString()}`);
+    let cancelled = false;
+    let source: EventSource | null = null;
 
     const onBrokerEvent = (evt: MessageEvent) => {
       try {
@@ -327,13 +325,31 @@ export default function MessageMonitorDrawer({
       }
     };
 
-    source.addEventListener('broker:event', onBrokerEvent);
-    source.onopen = () => setStreamState('connected');
-    source.onerror = () => setStreamState('error');
+    (async () => {
+      const token = await getSseToken(apiKey).catch(() => null);
+      if (cancelled) return;
+      if (!token) {
+        setStreamState('error');
+        return;
+      }
+
+      const params = new URLSearchParams({
+        sseToken: token,
+        iid: instanceId,
+      });
+      source = new EventSource(`/stream?${params.toString()}`);
+
+      source.addEventListener('broker:event', onBrokerEvent);
+      source.onopen = () => setStreamState('connected');
+      source.onerror = () => setStreamState('error');
+    })();
 
     return () => {
-      source.removeEventListener('broker:event', onBrokerEvent);
-      source.close();
+      cancelled = true;
+      if (source) {
+        source.removeEventListener('broker:event', onBrokerEvent);
+        source.close();
+      }
     };
   }, [apiKey, followTail, instanceId, open]);
 

@@ -32,6 +32,7 @@ import {
 } from '../baileys/messageService.js';
 import { riskGuardian } from '../risk/guardian.js';
 import { enqueueSendJob, getQueueMetrics, getSendJobDetails, isSendQueueEnabled, listFailedSendJobs, retrySendJob } from '../queue/sendQueue.js';
+import { mintSseToken, resolveSseToken } from '../services/sseTokens.js';
 
 const router = Router();
 
@@ -73,6 +74,19 @@ function extractApiKey(req: Request): string {
   return '';
 }
 
+function extractSseToken(req: Request): string {
+  const queryToken = req.query.sseToken;
+  if (typeof queryToken === 'string' && queryToken.trim()) return queryToken.trim();
+  if (Array.isArray(queryToken)) {
+    const [first] = queryToken;
+    if (typeof first === 'string') {
+      const trimmed = first.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return '';
+}
+
 function isAuthorized(req: Request): boolean {
   const key = extractApiKey(req);
   if (!key) return false;
@@ -104,6 +118,18 @@ function auth(req: Request, res: Response, next: NextFunction): void {
   const provided = extractApiKey(req);
   const matched = resolveApiKeyMatch(provided);
   if (!matched) {
+    const allowSseToken =
+      req.method === 'GET' && (req.path === '/events' || /^\/[^/]+\/qr\.png$/i.test(req.path));
+    if (allowSseToken) {
+      const token = extractSseToken(req);
+      const entry = token ? resolveSseToken(token) : null;
+      if (entry) {
+        (req as AuthedRequest).authorizedKeyId = entry.keyId ?? null;
+        next();
+        return;
+      }
+    }
+
     res.status(401).json({ error: 'unauthorized' });
     return;
   }
@@ -112,6 +138,12 @@ function auth(req: Request, res: Response, next: NextFunction): void {
 }
 
 router.use(auth);
+
+router.post('/sse-token', (req, res) => {
+  const keyId = getAuthorizedKeyId(req);
+  const minted = mintSseToken({ keyId });
+  res.json(minted);
+});
 
 router.get('/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');

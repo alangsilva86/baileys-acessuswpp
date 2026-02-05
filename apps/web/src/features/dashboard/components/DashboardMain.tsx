@@ -27,11 +27,14 @@ import type {
   InstanceStatus,
   MetricDatum,
   MetricTone,
+  NoteRevision,
   SendQueueJobSummary,
   SendQueueMetrics,
 } from '../types';
 import type { ToastTone } from './ToastStack';
 import { fetchJson, formatApiError } from '../../../lib/api';
+import { formatDateTime as formatIsoDateTime, formatRelativeTime as formatIsoRelativeTime } from '../../../lib/time';
+import { getSseToken } from '../../../lib/sseToken';
 import Modal from './Modal';
 import useInstanceMetrics, { type MetricsRangePreset } from '../hooks/useInstanceMetrics';
 import useInstanceLogs from '../hooks/useInstanceLogs';
@@ -73,6 +76,38 @@ const STATUS_META: Record<InstanceStatus, { label: string; tone: string; icon: R
     icon: <QrCode className="h-4 w-4 text-rose-500" aria-hidden="true" />,
   },
 };
+
+type NoteStatus = 'synced' | 'saving' | 'needsKey' | 'error';
+
+const NOTE_STATUS_VARIANTS: Record<NoteStatus, { text: string; className: string }> = {
+  synced: { text: 'Notas sincronizadas', className: 'text-emerald-600' },
+  saving: { text: 'Salvando…', className: 'text-slate-500' },
+  needsKey: { text: 'Informe a API key para salvar automaticamente.', className: 'text-amber-600' },
+  error: { text: 'Erro ao salvar notas', className: 'text-rose-600' },
+};
+
+const NOTE_AUTOSAVE_DEBOUNCE = 800;
+
+function truncate(text: string, max = 120) {
+  if (!text) return '';
+  const value = String(text).trim();
+  if (value.length <= max) return value;
+  return value.slice(0, max - 1) + '…';
+}
+
+function buildRevisionLabel(revision: NoteRevision) {
+  const absolute = formatIsoDateTime(revision.timestamp) || revision.timestamp || '—';
+  const relative = formatIsoRelativeTime(revision.timestamp);
+  const author = revision.author ? ` • ${revision.author}` : '';
+  return `${absolute}${relative ? ` (${relative})` : ''}${author}`;
+}
+
+function normalizeToE164BR(value: string): string | null {
+  const digits = String(value ?? '').replace(/\D+/g, '');
+  if (/^55\d{10,11}$/.test(digits)) return digits;
+  if (/^\d{10,11}$/.test(digits)) return `55${digits}`;
+  return null;
+}
 
 const DEFAULT_METRICS: MetricDatum[] = [
   {
@@ -124,10 +159,13 @@ export default function DashboardMain({
 }: DashboardMainProps) {
   const [activeTab, setActiveTab] = useState<'overview' | 'messages' | 'logs' | 'outbox'>('overview');
   const [metricsPreset, setMetricsPreset] = useState<MetricsRangePreset>('30m');
+  const [exportingFormat, setExportingFormat] = useState<'csv' | 'json' | null>(null);
   const {
     metrics,
     isLoading: metricsLoading,
     error: metricsError,
+    streamState: metricsStreamState,
+    streamError: metricsStreamError,
     refresh: refreshMetrics,
     lastUpdated,
     snapshot: metricsSnapshot,
@@ -146,24 +184,110 @@ export default function DashboardMain({
     refresh: refreshFailedJobs,
   } = useQueueFailedJobs(apiKey, 80, activeTab === 'outbox');
   const [quickSendOpen, setQuickSendOpen] = useState(false);
+  const [quickSendType, setQuickSendType] = useState<'text' | 'buttons' | 'list' | 'media'>('text');
   const [quickSendPhone, setQuickSendPhone] = useState('');
   const [quickSendMessage, setQuickSendMessage] = useState('');
+  const [quickSendFooter, setQuickSendFooter] = useState('');
+  const [quickSendButtons, setQuickSendButtons] = useState<Array<{ id: string; title: string }>>([
+    { id: '', title: '' },
+  ]);
+  const [quickSendListButtonText, setQuickSendListButtonText] = useState('Ver opções');
+  const [quickSendListTitle, setQuickSendListTitle] = useState('');
+  const [quickSendListSections, setQuickSendListSections] = useState<
+    Array<{
+      title: string;
+      options: Array<{ id: string; title: string; description: string }>;
+    }>
+  >([{ title: '', options: [{ id: '', title: '', description: '' }] }]);
+  const [quickSendMediaType, setQuickSendMediaType] = useState<'image' | 'video' | 'audio' | 'document'>('image');
+  const [quickSendMediaUrl, setQuickSendMediaUrl] = useState('');
+  const [quickSendMediaMimeType, setQuickSendMediaMimeType] = useState('');
+  const [quickSendMediaFileName, setQuickSendMediaFileName] = useState('');
+  const [quickSendMediaPtt, setQuickSendMediaPtt] = useState(false);
+  const [quickSendMediaGifPlayback, setQuickSendMediaGifPlayback] = useState(false);
+  const [quickSendExists, setQuickSendExists] = useState<boolean | null>(null);
+  const [quickSendExistsJid, setQuickSendExistsJid] = useState<string | null>(null);
+  const [quickSendExistsLoading, setQuickSendExistsLoading] = useState(false);
+  const [quickSendExistsError, setQuickSendExistsError] = useState<string | null>(null);
+  const [quickSendResult, setQuickSendResult] = useState<Record<string, any> | null>(null);
   const [isQuickSending, setIsQuickSending] = useState(false);
   const [monitorOpen, setMonitorOpen] = useState(false);
+  const [qrSseToken, setQrSseToken] = useState<string | null>(null);
+  const [qrTokenError, setQrTokenError] = useState<string | null>(null);
+  const [qrNonce, setQrNonce] = useState(() => Date.now());
+  const [qrImageError, setQrImageError] = useState(false);
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
   const [isRiskSaving, setIsRiskSaving] = useState(false);
   const [riskDraft, setRiskDraft] = useState<InstanceRiskConfig | null>(null);
   const [safeContactsDraft, setSafeContactsDraft] = useState('');
   const [isNotesSaving, setIsNotesSaving] = useState(false);
   const [noteDraft, setNoteDraft] = useState('');
+  const [notesLastSaved, setNotesLastSaved] = useState('');
+  const [noteStatus, setNoteStatus] = useState<NoteStatus>('synced');
+  const [noteStatusExtra, setNoteStatusExtra] = useState('');
+  const [notesMeta, setNotesMeta] = useState<{
+    createdAt: string | null;
+    updatedAt: string | null;
+    revisions: NoteRevision[];
+  } | null>(null);
+  const [selectedNoteRevision, setSelectedNoteRevision] = useState<string>('current');
+  const [isNotesRestoring, setIsNotesRestoring] = useState(false);
   const [proxyModalOpen, setProxyModalOpen] = useState(false);
   const [proxyDraft, setProxyDraft] = useState('');
   const [isProxySaving, setIsProxySaving] = useState(false);
+
+  const noteDraftRef = useRef(noteDraft);
+  const instanceIdRef = useRef<string | null>(instance?.id ?? null);
+  const notesAutosaveTimerRef = useRef<number | null>(null);
 
   const qrSectionRef = useRef<HTMLDivElement>(null);
   const riskSectionRef = useRef<HTMLDivElement>(null);
   const queueSectionRef = useRef<HTMLDivElement>(null);
   const networkSectionRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    noteDraftRef.current = noteDraft;
+  }, [noteDraft]);
+
+  useEffect(() => {
+    instanceIdRef.current = instance?.id ?? null;
+  }, [instance?.id]);
+
+  useEffect(() => {
+    if (!instance || instance.status === 'connected') return;
+    setQrNonce(Date.now());
+  }, [instance?.id, instance?.status]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!instance || instance.status === 'connected' || !apiKey.trim()) {
+      setQrSseToken(null);
+      setQrTokenError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setQrTokenError(null);
+    void getSseToken(apiKey)
+      .then((token) => {
+        if (cancelled) return;
+        setQrSseToken(token);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setQrSseToken(null);
+        setQrTokenError(formatApiError(err));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiKey, instance?.id, instance?.status]);
+
+  useEffect(() => {
+    setQrImageError(false);
+  }, [instance?.id, qrSseToken, qrNonce]);
 
   const handleRefresh = useCallback(() => {
     onRefresh?.();
@@ -171,8 +295,145 @@ export default function DashboardMain({
     void refreshMetrics();
   }, [onRefresh, onRefreshQueue, refreshMetrics]);
 
-  const quickSendReady = Boolean(quickSendPhone.trim() && quickSendMessage.trim());
-  const quickSendDisabled = isQuickSending || !quickSendReady;
+  const quickSendNormalizedTo = useMemo(() => normalizeToE164BR(quickSendPhone), [quickSendPhone]);
+  const quickSendSanitizedButtons = useMemo(() => {
+    const seen = new Set<string>();
+    return quickSendButtons
+      .map((button) => ({ id: button.id.trim(), title: button.title.trim() }))
+      .filter((button) => Boolean(button.id && button.title))
+      .filter((button) => {
+        if (seen.has(button.id)) return false;
+        seen.add(button.id);
+        return true;
+      })
+      .slice(0, 3);
+  }, [quickSendButtons]);
+  const quickSendSanitizedSections = useMemo(() => {
+    const seen = new Set<string>();
+    return quickSendListSections
+      .map((section) => {
+        const title = section.title.trim();
+        const options = section.options
+          .map((option) => ({
+            id: option.id.trim(),
+            title: option.title.trim(),
+            description: option.description.trim(),
+          }))
+          .filter((option) => Boolean(option.id && option.title))
+          .filter((option) => {
+            if (seen.has(option.id)) return false;
+            seen.add(option.id);
+            return true;
+          })
+          .slice(0, 10)
+          .map((option) => (option.description ? option : { id: option.id, title: option.title }));
+        if (!options.length) return null;
+        return title ? { title, options } : { options };
+      })
+      .filter(Boolean)
+      .slice(0, 3) as Array<{ title?: string; options: Array<{ id: string; title: string; description?: string }> }>;
+  }, [quickSendListSections]);
+  const quickSendReady = useMemo(() => {
+    if (!quickSendNormalizedTo) return false;
+    if (quickSendExists === false) return false;
+    if (quickSendType === 'text') return Boolean(quickSendMessage.trim());
+    if (quickSendType === 'buttons') return Boolean(quickSendMessage.trim() && quickSendSanitizedButtons.length);
+    if (quickSendType === 'list') return Boolean(quickSendMessage.trim() && quickSendListButtonText.trim() && quickSendSanitizedSections.length);
+    return Boolean(quickSendMediaUrl.trim());
+  }, [
+    quickSendExists,
+    quickSendListButtonText,
+    quickSendMediaUrl,
+    quickSendMessage,
+    quickSendNormalizedTo,
+    quickSendSanitizedButtons.length,
+    quickSendSanitizedSections.length,
+    quickSendType,
+  ]);
+  const quickSendDisabled = isQuickSending || quickSendExistsLoading || !quickSendReady;
+
+  useEffect(() => {
+    if (!quickSendOpen) {
+      setQuickSendType('text');
+      setQuickSendPhone('');
+      setQuickSendMessage('');
+      setQuickSendFooter('');
+      setQuickSendButtons([{ id: '', title: '' }]);
+      setQuickSendListButtonText('Ver opções');
+      setQuickSendListTitle('');
+      setQuickSendListSections([{ title: '', options: [{ id: '', title: '', description: '' }] }]);
+      setQuickSendMediaType('image');
+      setQuickSendMediaUrl('');
+      setQuickSendMediaMimeType('');
+      setQuickSendMediaFileName('');
+      setQuickSendMediaPtt(false);
+      setQuickSendMediaGifPlayback(false);
+      setQuickSendExists(null);
+      setQuickSendExistsJid(null);
+      setQuickSendExistsError(null);
+      setQuickSendExistsLoading(false);
+      setQuickSendResult(null);
+      return;
+    }
+    setQuickSendResult(null);
+  }, [quickSendOpen]);
+
+  useEffect(() => {
+    if (!quickSendOpen) return undefined;
+    if (!instance) return undefined;
+
+    if (!quickSendNormalizedTo) {
+      setQuickSendExists(null);
+      setQuickSendExistsJid(null);
+      setQuickSendExistsError(null);
+      setQuickSendExistsLoading(false);
+      return undefined;
+    }
+
+    if (!apiKey.trim()) {
+      setQuickSendExists(null);
+      setQuickSendExistsJid(null);
+      setQuickSendExistsError('Informe a API key para validar o número.');
+      setQuickSendExistsLoading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    setQuickSendExistsLoading(true);
+    setQuickSendExistsError(null);
+
+    const timer = window.setTimeout(() => {
+      void fetchJson<{ results: Array<{ jid?: string; exists?: boolean }> }>(
+        `/instances/${encodeURIComponent(instance.id)}/exists`,
+        apiKey,
+        {
+          method: 'POST',
+          body: JSON.stringify({ to: quickSendNormalizedTo }),
+        },
+      )
+        .then((payload) => {
+          if (cancelled) return;
+          const first = Array.isArray(payload.results) ? payload.results[0] : null;
+          setQuickSendExists(Boolean(first?.exists));
+          setQuickSendExistsJid(typeof first?.jid === 'string' ? first.jid : null);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setQuickSendExists(null);
+          setQuickSendExistsJid(null);
+          setQuickSendExistsError(formatApiError(err));
+        })
+        .finally(() => {
+          if (cancelled) return;
+          setQuickSendExistsLoading(false);
+        });
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [apiKey, instance, quickSendNormalizedTo, quickSendOpen]);
 
   const handleRetryFailedJob = useCallback(async (jobId: string) => {
     if (!apiKey.trim()) {
@@ -192,14 +453,24 @@ export default function DashboardMain({
     }
   }, [apiKey, onNotify, onRefreshQueue, refreshFailedJobs]);
 
-  useEffect(() => {
-    if (!instance) {
-      setRiskDraft(null);
-      setSafeContactsDraft('');
-      setNoteDraft('');
-      setProxyDraft('');
-      return;
-    }
+	  useEffect(() => {
+	    if (notesAutosaveTimerRef.current != null) {
+	      window.clearTimeout(notesAutosaveTimerRef.current);
+	      notesAutosaveTimerRef.current = null;
+	    }
+	    if (!instance) {
+	      setRiskDraft(null);
+	      setSafeContactsDraft('');
+	      setNoteDraft('');
+	      setNotesLastSaved('');
+	      setNotesMeta(null);
+	      setSelectedNoteRevision('current');
+	      setNoteStatus('synced');
+	      setNoteStatusExtra('');
+	      setIsNotesRestoring(false);
+	      setProxyDraft('');
+	      return;
+	    }
 
     const cfg = instance.risk?.config;
     const safeContacts = Array.isArray(cfg?.safeContacts) ? cfg!.safeContacts : [];
@@ -207,11 +478,24 @@ export default function DashboardMain({
       threshold: Number(cfg?.threshold ?? 0.7),
       interleaveEvery: Number(cfg?.interleaveEvery ?? 5),
       safeContacts,
-    });
-    setSafeContactsDraft(safeContacts.join('\n'));
-    setNoteDraft(instance.note ?? '');
-    setProxyDraft(instance.network?.proxyUrl ?? '');
-  }, [instance?.id]);
+	    });
+	    setSafeContactsDraft(safeContacts.join('\n'));
+	    {
+	      const note = (instance.note ?? '').slice(0, 280);
+	      setNoteDraft(note);
+	      setNotesLastSaved(note.trim());
+	      setNotesMeta({
+	        createdAt: instance.metadata?.createdAt ?? null,
+	        updatedAt: instance.metadata?.updatedAt ?? null,
+	        revisions: Array.isArray(instance.metadata?.revisions) ? instance.metadata.revisions : instance.revisions ?? [],
+	      });
+	      setSelectedNoteRevision('current');
+	      setNoteStatus('synced');
+	      setNoteStatusExtra('');
+	      setIsNotesRestoring(false);
+	    }
+	    setProxyDraft(instance.network?.proxyUrl ?? '');
+	  }, [instance?.id]);
 
   const parseSafeContacts = useCallback((value: string): string[] => {
     if (!value.trim()) return [];
@@ -291,28 +575,85 @@ export default function DashboardMain({
     } catch (err) {
       onNotify?.(formatApiError(err), 'error', 'Falha ao enviar ping');
     }
-  }, [apiKey, handleRefresh, instance, onNotify]);
+	  }, [apiKey, handleRefresh, instance, onNotify]);
 
-  const handleNotesSave = useCallback(async () => {
-    if (!instance || isNotesSaving) return;
-    if (!apiKey.trim()) {
-      onNotify?.('Informe a API key para salvar notas.', 'error');
-      return;
-    }
-    setIsNotesSaving(true);
-    try {
-      await fetchJson(`/instances/${encodeURIComponent(instance.id)}`, apiKey, {
-        method: 'PATCH',
-        body: JSON.stringify({ note: noteDraft }),
-      });
-      onNotify?.('Notas salvas.', 'success');
-      handleRefresh();
-    } catch (err) {
-      onNotify?.(formatApiError(err), 'error', 'Falha ao salvar notas');
-    } finally {
-      setIsNotesSaving(false);
-    }
-  }, [apiKey, handleRefresh, instance, isNotesSaving, noteDraft, onNotify]);
+	  type SaveNotesOptions = {
+	    silent?: boolean;
+	    restoreFrom?: string;
+	    statusExtra?: string;
+	    refreshAfter?: boolean;
+	  };
+
+	  const saveNotes = useCallback(async (nextNote: string, options: SaveNotesOptions = {}) => {
+	    if (!instance || isNotesSaving) return;
+	    const key = apiKey.trim();
+	    if (!key) {
+	      setNoteStatus('needsKey');
+	      setNoteStatusExtra('');
+	      if (!options.silent) onNotify?.('Informe a API key para salvar notas.', 'error');
+	      return;
+	    }
+
+	    const iid = instance.id;
+	    const noteToSave = nextNote.slice(0, 280);
+	    setIsNotesSaving(true);
+	    setNoteStatus('saving');
+	    setNoteStatusExtra(options.statusExtra ?? '');
+	    try {
+	      const payload = await fetchJson<any>(`/instances/${encodeURIComponent(iid)}`, key, {
+	        method: 'PATCH',
+	        body: JSON.stringify({ note: noteToSave, restoreFrom: options.restoreFrom || undefined }),
+	      });
+	      if (instanceIdRef.current !== iid) return;
+	      const savedNote =
+	        typeof payload?.note === 'string'
+	          ? payload.note
+	          : typeof payload?.metadata?.note === 'string'
+	          ? payload.metadata.note
+	          : noteToSave;
+	      const metadata = payload?.metadata && typeof payload.metadata === 'object' ? (payload.metadata as any) : null;
+	      const revisions = Array.isArray(metadata?.revisions)
+	        ? (metadata.revisions as NoteRevision[])
+	        : Array.isArray(payload?.revisions)
+	        ? (payload.revisions as NoteRevision[])
+	        : [];
+
+	      setNotesLastSaved(savedNote.trim());
+	      if (noteDraftRef.current.trim() === noteToSave.trim()) {
+	        setNoteDraft(savedNote);
+	      }
+	      setNotesMeta({
+	        createdAt: typeof metadata?.createdAt === 'string' ? metadata.createdAt : metadata?.createdAt ?? null,
+	        updatedAt: typeof metadata?.updatedAt === 'string' ? metadata.updatedAt : metadata?.updatedAt ?? null,
+	        revisions,
+	      });
+	      setSelectedNoteRevision('current');
+	      setNoteStatus('synced');
+	      setNoteStatusExtra(options.statusExtra ?? '');
+	      setIsNotesRestoring(false);
+	      if (options.refreshAfter) onRefresh?.();
+	      if (!options.silent) {
+	        onNotify?.(options.restoreFrom ? 'Versão restaurada.' : 'Notas salvas.', 'success');
+	      }
+	    } catch (err) {
+	      if (instanceIdRef.current !== iid) return;
+	      setNoteStatus('error');
+	      setNoteStatusExtra(formatApiError(err));
+	      if (!options.silent) {
+	        onNotify?.(formatApiError(err), 'error', options.restoreFrom ? 'Falha ao restaurar notas' : 'Falha ao salvar notas');
+	      }
+	    } finally {
+	      if (instanceIdRef.current === iid) setIsNotesSaving(false);
+	    }
+	  }, [apiKey, instance, isNotesSaving, onNotify, onRefresh]);
+
+	  const handleNotesSave = useCallback(async () => {
+	    if (notesAutosaveTimerRef.current != null) {
+	      window.clearTimeout(notesAutosaveTimerRef.current);
+	      notesAutosaveTimerRef.current = null;
+	    }
+	    await saveNotes(noteDraft, { refreshAfter: true });
+	  }, [noteDraft, saveNotes]);
 
   const handleLogout = useCallback(async () => {
     if (!instance) return;
@@ -320,13 +661,15 @@ export default function DashboardMain({
       onNotify?.('Informe a API key para desconectar.', 'error');
       return;
     }
-    try {
-      await fetchJson(`/instances/${encodeURIComponent(instance.id)}/logout`, apiKey, { method: 'POST' });
-      onNotify?.('Sessão desconectada. Um novo QR deve aparecer em breve.', 'success');
-      handleRefresh();
-    } catch (err) {
-      onNotify?.(formatApiError(err), 'error', 'Falha ao desconectar');
-    }
+	    try {
+	      await fetchJson(`/instances/${encodeURIComponent(instance.id)}/logout`, apiKey, { method: 'POST' });
+	      onNotify?.('Sessão desconectada. Um novo QR deve aparecer em breve.', 'success');
+	      setQrImageError(false);
+	      setQrNonce(Date.now());
+	      handleRefresh();
+	    } catch (err) {
+	      onNotify?.(formatApiError(err), 'error', 'Falha ao desconectar');
+	    }
   }, [apiKey, handleRefresh, instance, onNotify]);
 
   const handleProxyRevalidate = useCallback(async () => {
@@ -373,46 +716,143 @@ export default function DashboardMain({
 
   const handleQuickSend = useCallback(async () => {
     if (!instance) return;
-    const phone = quickSendPhone.trim();
-    const message = quickSendMessage.trim();
-    if (!phone || !message) {
-      onNotify?.('Informe o telefone e a mensagem.', 'error');
-      return;
-    }
     if (!apiKey.trim()) {
       onNotify?.('Informe a API key para envio rápido.', 'error');
       return;
     }
+    const normalizedTo = quickSendNormalizedTo;
+    if (!normalizedTo) {
+      onNotify?.('Telefone inválido. Use 55DDDNUMERO (ou apenas DDD+NUMERO).', 'error');
+      return;
+    }
+    if (quickSendExists === false) {
+      onNotify?.('Número não encontrado no WhatsApp.', 'error');
+      return;
+    }
+
+    const text = quickSendMessage.trim();
+    const footer = quickSendFooter.trim() || undefined;
+
+    const payload: Record<string, unknown> = {
+      type: quickSendType,
+      to: normalizedTo,
+    };
+
+    if (quickSendType === 'text') {
+      if (!text) {
+        onNotify?.('Informe a mensagem.', 'error');
+        return;
+      }
+      payload.text = text;
+    } else if (quickSendType === 'buttons') {
+      if (!text) {
+        onNotify?.('Informe o texto da mensagem.', 'error');
+        return;
+      }
+      if (!quickSendSanitizedButtons.length) {
+        onNotify?.('Informe ao menos 1 botão com id e título.', 'error');
+        return;
+      }
+      payload.text = text;
+      if (footer) payload.footer = footer;
+      payload.buttons = quickSendSanitizedButtons;
+    } else if (quickSendType === 'list') {
+      const buttonText = quickSendListButtonText.trim();
+      const title = quickSendListTitle.trim();
+      if (!text) {
+        onNotify?.('Informe o texto da mensagem.', 'error');
+        return;
+      }
+      if (!buttonText) {
+        onNotify?.('Informe o texto do botão (ex: "Ver opções").', 'error');
+        return;
+      }
+      if (!quickSendSanitizedSections.length) {
+        onNotify?.('Informe ao menos 1 seção com opções (id e título).', 'error');
+        return;
+      }
+      payload.text = text;
+      payload.buttonText = buttonText;
+      if (title) payload.title = title;
+      if (footer) payload.footer = footer;
+      payload.sections = quickSendSanitizedSections;
+    } else {
+      const mediaUrl = quickSendMediaUrl.trim();
+      if (!mediaUrl) {
+        onNotify?.('Informe a URL da mídia.', 'error');
+        return;
+      }
+      payload.mediaType = quickSendMediaType;
+      payload.media = {
+        url: mediaUrl,
+        mimetype: quickSendMediaMimeType.trim() || undefined,
+        fileName: quickSendMediaFileName.trim() || undefined,
+        ptt: quickSendMediaPtt || undefined,
+        gifPlayback: quickSendMediaGifPlayback || undefined,
+      };
+      if (text) payload.caption = text;
+    }
+
     setIsQuickSending(true);
+    setQuickSendResult(null);
     try {
-      await fetchJson(`/instances/${encodeURIComponent(instance.id)}/send-quick`, apiKey, {
-        method: 'POST',
-        body: JSON.stringify({ type: 'text', to: phone, text: message }),
-      });
-      onNotify?.('Mensagem enviada com sucesso.', 'success');
-      setQuickSendPhone('');
-      setQuickSendMessage('');
-      setQuickSendOpen(false);
+      const result = await fetchJson<Record<string, any>>(
+        `/instances/${encodeURIComponent(instance.id)}/send-quick`,
+        apiKey,
+        {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        },
+      );
+      setQuickSendResult(result);
+      onNotify?.(result.enqueued ? 'Envio enfileirado.' : 'Envio realizado.', result.enqueued ? 'info' : 'success');
       void refreshMetrics();
     } catch (err) {
       onNotify?.(formatApiError(err), 'error', 'Envio rápido falhou');
     } finally {
       setIsQuickSending(false);
     }
-  }, [apiKey, instance, onNotify, quickSendMessage, quickSendPhone, refreshMetrics]);
+  }, [
+    apiKey,
+    instance,
+    onNotify,
+    quickSendExists,
+    quickSendFooter,
+    quickSendListButtonText,
+    quickSendListTitle,
+    quickSendMediaFileName,
+    quickSendMediaGifPlayback,
+    quickSendMediaMimeType,
+    quickSendMediaPtt,
+    quickSendMediaType,
+    quickSendMediaUrl,
+    quickSendMessage,
+    quickSendNormalizedTo,
+    quickSendSanitizedButtons,
+    quickSendSanitizedSections,
+    quickSendType,
+    refreshMetrics,
+  ]);
 
   if (!instance) {
     return (
       <section className="flex h-full flex-col items-center justify-center gap-2 px-6 py-10 text-center">
         <div className="rounded-2xl border border-dashed border-slate-200 bg-white px-6 py-6 shadow-sm">
-          <p className="text-sm font-semibold text-slate-700">Selecione uma instancia</p>
-          <p className="text-sm text-slate-500">Escolha uma instancia na barra lateral para ver os detalhes.</p>
+          <p className="text-sm font-semibold text-slate-700">Selecione uma instância</p>
+          <p className="text-sm text-slate-500">Escolha uma instância na barra lateral para ver os detalhes.</p>
         </div>
       </section>
     );
   }
 
   const meta = STATUS_META[instance.status] ?? STATUS_META.disconnected;
+  const qrImageSrc =
+    instance.status === 'connected' || !instance.qrUrl || !qrSseToken || qrTokenError
+      ? null
+      : `${instance.qrUrl}?${new URLSearchParams({ sseToken: qrSseToken, nonce: String(qrNonce) }).toString()}`;
+  const instanceUpdatedAbsolute = instance.updatedAt ? formatIsoDateTime(instance.updatedAt) : '';
+  const instanceUpdatedRelative = instance.updatedAt ? formatIsoRelativeTime(instance.updatedAt) : '';
+  const instanceUpdatedLabel = instanceUpdatedRelative || instanceUpdatedAbsolute || '—';
   const isConnected = instance.status === 'connected';
   const metricsCards = metrics ?? DEFAULT_METRICS;
   const formattedMetricsUpdated = lastUpdated
@@ -422,6 +862,39 @@ export default function DashboardMain({
         second: '2-digit',
       }).format(lastUpdated)
     : '—';
+
+  const realtimeMeta = (() => {
+    if (metricsStreamState === 'connected') {
+      return {
+        label: 'Tempo real: conectado',
+        tone: 'bg-emerald-50 text-emerald-800',
+        dot: 'bg-emerald-500',
+        title: 'Atualizações chegando via SSE.',
+      };
+    }
+    if (metricsStreamState === 'connecting') {
+      return {
+        label: 'Tempo real: conectando',
+        tone: 'bg-amber-50 text-amber-800',
+        dot: 'bg-amber-500',
+        title: 'Tentando conectar ao fluxo em tempo real…',
+      };
+    }
+    if (metricsStreamState === 'error') {
+      return {
+        label: 'Tempo real: fallback',
+        tone: 'bg-slate-100 text-slate-700',
+        dot: 'bg-slate-400',
+        title: metricsStreamError || 'Fluxo em tempo real indisponível; usando atualização periódica.',
+      };
+    }
+    return {
+      label: 'Tempo real: —',
+      tone: 'bg-slate-100 text-slate-700',
+      dot: 'bg-slate-300',
+      title: metricsStreamError || 'Aguardando dados.',
+    };
+  })();
 
   const riskSnapshot = (instance.risk ?? null) as InstanceRiskSnapshot | null;
   const riskPaused = Boolean(riskSnapshot?.runtime?.paused);
@@ -471,7 +944,13 @@ export default function DashboardMain({
   };
 
   const exportParams = new URLSearchParams();
-  const exportRange = resolvePresetRange(metricsPreset);
+  const exportRange = (() => {
+    const effective = metricsSnapshot?.range?.effective;
+    if (effective?.from != null && effective?.to != null) {
+      return { from: effective.from, to: effective.to };
+    }
+    return resolvePresetRange(metricsPreset);
+  })();
   if (exportRange.from != null) exportParams.set('from', String(exportRange.from));
   if (exportRange.to != null) exportParams.set('to', String(exportRange.to));
   const exportQuery = exportParams.toString();
@@ -491,6 +970,23 @@ export default function DashboardMain({
       minute: '2-digit',
     }).format(parsed);
   };
+
+  const formatClockTime = (value: number | null | undefined): string => {
+    if (!value) return '—';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return '—';
+    return new Intl.DateTimeFormat('pt-BR', {
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(parsed);
+  };
+
+  const exportRangeText =
+    metricsPreset === 'all'
+      ? 'Desde o início'
+      : exportRange.from != null && exportRange.to != null
+      ? `${formatClockTime(exportRange.from)} → ${formatClockTime(exportRange.to)}`
+      : '—';
 
   const maskProxyUrl = (value: string | null | undefined): string => {
     if (!value) return '—';
@@ -535,7 +1031,9 @@ export default function DashboardMain({
       onNotify?.('Informe a API key para exportar.', 'error');
       return;
     }
+    if (exportingFormat) return;
     const url = format === 'csv' ? exportCsvUrl : exportJsonUrl;
+    setExportingFormat(format);
     try {
       const response = await fetch(url, {
         cache: 'no-store',
@@ -564,13 +1062,115 @@ export default function DashboardMain({
         parseContentDispositionFilename(response.headers.get('content-disposition')) ??
         `${instance.id}-metrics.${format}`;
       triggerDownload(blob, filename);
-      onNotify?.('Export iniciado.', 'success');
+      onNotify?.(`Export ${format.toUpperCase()} pronto. Download iniciado.`, 'success');
     } catch (err) {
       onNotify?.(formatApiError(err), 'error', 'Falha ao exportar');
+    } finally {
+      setExportingFormat(null);
     }
   };
 
-  const notesDirty = noteDraft.trim() !== (instance.note ?? '').trim();
+  const notesDirty = noteDraft.trim() !== notesLastSaved;
+  const noteStatusVariant = NOTE_STATUS_VARIANTS[noteStatus];
+  const noteStatusText = noteStatusExtra
+    ? noteStatusVariant.text
+      ? `${noteStatusVariant.text} — ${noteStatusExtra}`
+      : noteStatusExtra
+    : noteStatusVariant.text;
+  const noteCharCount = noteDraft.length;
+  const sortedNoteRevisions = useMemo(() => {
+    const revisions = notesMeta?.revisions ?? [];
+    return [...revisions].sort((a, b) => {
+      const aTs = new Date(a.timestamp).getTime();
+      const bTs = new Date(b.timestamp).getTime();
+      return Number.isNaN(bTs) ? -1 : Number.isNaN(aTs) ? 1 : bTs - aTs;
+    });
+  }, [notesMeta?.revisions]);
+  const selectedRevision = useMemo(() => {
+    if (selectedNoteRevision === 'current') return null;
+    return sortedNoteRevisions.find((revision) => revision.timestamp === selectedNoteRevision) ?? null;
+  }, [selectedNoteRevision, sortedNoteRevisions]);
+  const revisionInfoText = useMemo(() => {
+    if (selectedNoteRevision === 'current') {
+      const relative = formatIsoRelativeTime(notesMeta?.updatedAt ?? null);
+      const absolute = formatIsoDateTime(notesMeta?.updatedAt ?? null);
+      const pieces = [];
+      if (absolute) pieces.push(absolute);
+      if (relative) pieces.push(relative);
+      return pieces.length ? `Versão atual • ${pieces.join(' • ')}` : 'Versão atual';
+    }
+    if (!selectedRevision) return 'Selecione uma versão válida.';
+    const absolute = formatIsoDateTime(selectedRevision.timestamp) || selectedRevision.timestamp;
+    const relative = formatIsoRelativeTime(selectedRevision.timestamp);
+    const author = selectedRevision.author || 'desconhecido';
+    const summary = truncate(selectedRevision.diff?.summary || selectedRevision.diff?.after || '');
+    const parts = [`${absolute}${relative ? ` (${relative})` : ''}`, `por ${author}`];
+    if (summary) parts.push(summary);
+    return parts.join(' • ');
+  }, [notesMeta?.updatedAt, selectedNoteRevision, selectedRevision]);
+  const noteMetaText = useMemo(() => {
+    const created = formatIsoDateTime(notesMeta?.createdAt ?? null);
+    const updated = formatIsoDateTime(notesMeta?.updatedAt ?? null);
+    const relative = formatIsoRelativeTime(notesMeta?.updatedAt ?? null);
+    const parts = [];
+    if (created) parts.push(`Criado: ${created}`);
+    if (updated) parts.push(`Atualizado: ${updated}${relative ? ` (${relative})` : ''}`);
+    return parts.join(' • ');
+  }, [notesMeta?.createdAt, notesMeta?.updatedAt]);
+
+  const handleNotesBlur = useCallback(() => {
+    if (!notesDirty) return;
+    if (notesAutosaveTimerRef.current != null) {
+      window.clearTimeout(notesAutosaveTimerRef.current);
+      notesAutosaveTimerRef.current = null;
+    }
+    void saveNotes(noteDraftRef.current, { silent: true });
+  }, [notesDirty, saveNotes]);
+
+  const handleRestoreSelectedRevision = useCallback(async () => {
+    if (!selectedRevision) return;
+    if (notesDirty) {
+      const ok = window.confirm('Você tem alterações não salvas. Restaurar esta versão vai substituir o texto atual. Continuar?');
+      if (!ok) return;
+    }
+    if (notesAutosaveTimerRef.current != null) {
+      window.clearTimeout(notesAutosaveTimerRef.current);
+      notesAutosaveTimerRef.current = null;
+    }
+    setIsNotesRestoring(true);
+    try {
+      await saveNotes(selectedRevision.diff?.after ?? '', {
+        restoreFrom: selectedRevision.timestamp,
+        statusExtra: 'Versão restaurada',
+        refreshAfter: true,
+      });
+    } finally {
+      setIsNotesRestoring(false);
+    }
+  }, [notesDirty, saveNotes, selectedRevision]);
+
+  useEffect(() => {
+    if (isNotesSaving || isNotesRestoring) return;
+    if (notesAutosaveTimerRef.current != null) {
+      window.clearTimeout(notesAutosaveTimerRef.current);
+      notesAutosaveTimerRef.current = null;
+    }
+    if (!notesDirty) {
+      setNoteStatus('synced');
+      return;
+    }
+    if (!apiKey.trim()) {
+      setNoteStatus('needsKey');
+      setNoteStatusExtra('');
+      return;
+    }
+    setNoteStatus('saving');
+    setNoteStatusExtra('');
+    notesAutosaveTimerRef.current = window.setTimeout(() => {
+      void saveNotes(noteDraftRef.current, { silent: true });
+    }, NOTE_AUTOSAVE_DEBOUNCE);
+  }, [apiKey, isNotesRestoring, isNotesSaving, noteDraft, notesDirty, saveNotes]);
+
   const riskSafeDraftCount = parseSafeContacts(safeContactsDraft).length;
   const riskPercentUnknown = riskSnapshot?.runtime?.ratio != null
     ? Math.max(0, Math.min(100, Math.round(Number(riskSnapshot.runtime.ratio) * 100)))
@@ -668,12 +1268,19 @@ export default function DashboardMain({
     <section className="flex h-full flex-col gap-6 px-6 py-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Instancia selecionada</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Instância selecionada</p>
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-semibold text-slate-900">{instance.name}</h1>
             <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${meta.tone}`}>
               {meta.icon}
               {meta.label}
+            </span>
+            <span
+              title={realtimeMeta.title}
+              className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${realtimeMeta.tone}`}
+            >
+              <span className={`h-2 w-2 rounded-full ${realtimeMeta.dot}`} aria-hidden="true" />
+              {realtimeMeta.label}
             </span>
             {riskPaused ? (
               <span className="inline-flex items-center gap-2 rounded-full bg-rose-100 px-3 py-1 text-xs font-medium text-rose-700">
@@ -687,7 +1294,12 @@ export default function DashboardMain({
               </span>
             ) : null}
           </div>
-          <p className="text-xs text-slate-500">Atualizado {instance.updatedAt || '—'}</p>
+          <p
+            className="text-xs text-slate-500"
+            title={instanceUpdatedAbsolute ? `Atualizado em ${instanceUpdatedAbsolute}` : undefined}
+          >
+            Atualizado {instanceUpdatedLabel}
+          </p>
           {instance.userPhone ? (
             <p className="text-[11px] text-slate-400">
               Número: <span className="font-medium text-slate-600">{instance.userPhone}</span>
@@ -707,7 +1319,7 @@ export default function DashboardMain({
             onClick={() => setQuickSendOpen(true)}
             className="rounded-lg bg-slate-900 px-3 py-2 text-xs text-white shadow-sm hover:bg-slate-800"
           >
-            Envio rapido
+            Envio rápido
           </button>
           <button
             type="button"
@@ -861,9 +1473,25 @@ export default function DashboardMain({
                 <div>
                   <p className="text-sm font-semibold text-slate-900">Métricas</p>
                   <p className="text-xs text-slate-500">Indicadores e export por período.</p>
-                  <p className="text-[11px] text-slate-400">
-                    {metricsLoading ? 'Atualizando métricas...' : `Última atualização ${formattedMetricsUpdated}`}
-                  </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                    <span
+                      className={`inline-flex items-center gap-2 rounded-full px-3 py-1 font-medium ${
+                        metricsLoading ? 'bg-amber-50 text-amber-800' : 'bg-slate-100 text-slate-700'
+                      }`}
+                    >
+                      <span
+                        className={`h-2 w-2 rounded-full ${metricsLoading ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`}
+                        aria-hidden="true"
+                      />
+                      {metricsLoading ? 'Atualizando métricas…' : `Última atualização ${formattedMetricsUpdated}`}
+                    </span>
+                    <span
+                      className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-700"
+                      title="Range efetivo do período selecionado."
+                    >
+                      Range {exportRangeText}
+                    </span>
+                  </div>
                   {metricsError ? <p className="text-[11px] text-rose-600">{metricsError}</p> : null}
                 </div>
 
@@ -880,39 +1508,56 @@ export default function DashboardMain({
                     <option value="all">Tudo</option>
                   </select>
 
-                  <details className="relative">
-                    <summary className="list-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 hover:bg-slate-50">
-                      <span className="inline-flex items-center gap-2">
-                        <Download className="h-4 w-4 text-slate-500" aria-hidden="true" />
-                        Exportar
-                      </span>
-                    </summary>
-                    <div className="absolute right-0 z-10 mt-2 w-56 rounded-xl border border-slate-100 bg-white p-2 shadow-lg">
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          (event.currentTarget.closest('details') as HTMLDetailsElement | null)?.removeAttribute('open');
-                          void downloadExport('csv');
-                        }}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
-                      >
-                        <span className="inline-flex items-center gap-2">
-                          <FileSpreadsheet className="h-4 w-4 text-emerald-600" aria-hidden="true" />
-                          Exportar CSV
+	                  <details className="relative">
+	                    <summary
+	                      className={`list-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 hover:bg-slate-50 ${
+	                        exportingFormat ? 'opacity-70 cursor-wait' : ''
+	                      }`}
+	                      aria-busy={exportingFormat ? 'true' : undefined}
+	                      title={exportingFormat ? `Exportando ${exportingFormat.toUpperCase()}…` : `Range ${exportRangeText}`}
+	                    >
+	                      <span className="inline-flex items-center gap-2">
+	                        {exportingFormat ? (
+	                          <RefreshCw className="h-4 w-4 animate-spin text-slate-500" aria-hidden="true" />
+	                        ) : (
+	                          <Download className="h-4 w-4 text-slate-500" aria-hidden="true" />
+	                        )}
+	                        {exportingFormat ? 'Exportando…' : 'Exportar'}
+	                      </span>
+	                    </summary>
+	                    <div className="absolute right-0 z-10 mt-2 w-56 rounded-xl border border-slate-100 bg-white p-2 shadow-lg">
+	                      <p className="px-3 py-2 text-[11px] text-slate-500">Range {exportRangeText}</p>
+	                      <button
+	                        type="button"
+	                        disabled={Boolean(exportingFormat)}
+	                        onClick={(event) => {
+	                          (event.currentTarget.closest('details') as HTMLDetailsElement | null)?.removeAttribute('open');
+	                          void downloadExport('csv');
+	                        }}
+	                        className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50 ${
+	                          exportingFormat ? 'opacity-60 cursor-wait' : ''
+	                        }`}
+	                      >
+	                        <span className="inline-flex items-center gap-2">
+	                          <FileSpreadsheet className="h-4 w-4 text-emerald-600" aria-hidden="true" />
+	                          Exportar CSV
                         </span>
                         <ChevronRight className="h-4 w-4 text-slate-400" aria-hidden="true" />
                       </button>
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          (event.currentTarget.closest('details') as HTMLDetailsElement | null)?.removeAttribute('open');
-                          void downloadExport('json');
-                        }}
-                        className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
-                      >
-                        <span className="inline-flex items-center gap-2">
-                          <FileJson className="h-4 w-4 text-slate-600" aria-hidden="true" />
-                          Exportar JSON
+	                      <button
+	                        type="button"
+	                        disabled={Boolean(exportingFormat)}
+	                        onClick={(event) => {
+	                          (event.currentTarget.closest('details') as HTMLDetailsElement | null)?.removeAttribute('open');
+	                          void downloadExport('json');
+	                        }}
+	                        className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50 ${
+	                          exportingFormat ? 'opacity-60 cursor-wait' : ''
+	                        }`}
+	                      >
+	                        <span className="inline-flex items-center gap-2">
+	                          <FileJson className="h-4 w-4 text-slate-600" aria-hidden="true" />
+	                          Exportar JSON
                         </span>
                         <ChevronRight className="h-4 w-4 text-slate-400" aria-hidden="true" />
                       </button>
@@ -1267,12 +1912,21 @@ export default function DashboardMain({
                     <span className={`rounded-full px-3 py-1 text-[11px] font-medium ${meta.tone}`}>{meta.label}</span>
                   </div>
                   <div className="mt-4 flex min-h-[220px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50">
-                    {instance.qrUrl ? (
-                      <img src={instance.qrUrl} alt="QR de conexão" className="h-40 w-40 rounded-xl bg-white p-2 shadow-sm" />
+                    {qrImageSrc && !qrImageError ? (
+                      <img
+                        src={qrImageSrc}
+                        alt="QR de conexão"
+                        onError={() => setQrImageError(true)}
+                        className="h-40 w-40 rounded-xl bg-white p-2 shadow-sm"
+                      />
                     ) : (
                       <div className="flex flex-col items-center gap-2 text-center text-xs text-slate-500">
                         <QrCode className="h-6 w-6 text-slate-400" aria-hidden="true" />
-                        QR indisponível no momento
+                        {qrTokenError
+                          ? `QR indisponível: ${qrTokenError}`
+                          : !apiKey.trim()
+                          ? 'Informe a API key para exibir o QR.'
+                          : 'Carregando QR…'}
                       </div>
                     )}
                   </div>
@@ -1291,34 +1945,80 @@ export default function DashboardMain({
             </section>
 
             <section className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <p className="text-sm font-semibold text-slate-900">Notas</p>
                   <p className="text-xs text-slate-500">Contexto operacional e lembretes para esta instância.</p>
+                  <p
+                    className={`mt-1 text-[11px] ${noteStatusVariant.className}`}
+                    title={noteStatusText || undefined}
+                  >
+                    {noteStatusText}
+                  </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => void handleNotesSave()}
-                  disabled={isNotesSaving || !notesDirty}
+                  disabled={isNotesSaving || isNotesRestoring || !notesDirty}
                   className={`rounded-lg px-3 py-2 text-xs font-medium text-white shadow-sm ${
-                    isNotesSaving || !notesDirty ? 'bg-slate-400 cursor-not-allowed' : 'bg-slate-900 hover:bg-slate-800'
+                    isNotesSaving || isNotesRestoring || !notesDirty
+                      ? 'bg-slate-400 cursor-not-allowed'
+                      : 'bg-slate-900 hover:bg-slate-800'
                   }`}
                 >
-                  {isNotesSaving ? 'Salvando...' : 'Salvar'}
+                  {isNotesSaving ? 'Salvando…' : 'Salvar agora'}
                 </button>
+              </div>
+              <div className="mt-3 flex flex-col gap-1 text-[11px] text-slate-500">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="uppercase font-semibold tracking-wide text-sky-700">Histórico</span>
+                  <select
+                    value={selectedNoteRevision}
+                    onChange={(event) => setSelectedNoteRevision(event.target.value)}
+                    disabled={isNotesSaving || isNotesRestoring}
+                    className="flex-1 min-w-[10rem] rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+                    aria-label="Selecionar revisão"
+                  >
+                    <option value="current">Versão atual</option>
+                    {sortedNoteRevisions.map((revision) => (
+                      <option key={revision.timestamp} value={revision.timestamp}>
+                        {buildRevisionLabel(revision)}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => void handleRestoreSelectedRevision()}
+                    disabled={!selectedRevision || isNotesSaving || isNotesRestoring}
+                    className="text-sky-600 hover:underline disabled:text-slate-400 disabled:hover:no-underline"
+                  >
+                    {isNotesRestoring ? 'Restaurando…' : 'Restaurar'}
+                  </button>
+                </div>
+                <div className="min-h-[1rem]" title={revisionInfoText}>
+                  {revisionInfoText}
+                </div>
               </div>
               <textarea
                 rows={5}
                 value={noteDraft}
-                onChange={(event) => setNoteDraft(event.target.value)}
+                maxLength={280}
+                onChange={(event) => {
+                  setNoteDraft(event.target.value);
+                  setSelectedNoteRevision('current');
+                }}
+                onBlur={handleNotesBlur}
                 placeholder="Adicione observações importantes..."
                 className="mt-3 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
               />
-              {notesDirty ? (
-                <p className="mt-2 text-[11px] text-amber-700">Alterações não salvas.</p>
-              ) : (
-                <p className="mt-2 text-[11px] text-slate-400">Até 280 caracteres. Salva via PATCH /instances/:iid.</p>
-              )}
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                <p className={`text-[11px] ${notesDirty ? 'text-amber-700' : 'text-slate-400'}`}>
+                  {notesDirty
+                    ? 'Alterações não salvas.'
+                    : noteMetaText || 'Até 280 caracteres. Salva automaticamente.'}
+                </p>
+                <span className="text-[11px] text-slate-400">{noteCharCount}/280</span>
+              </div>
             </section>
 
           </div>
@@ -1341,6 +2041,25 @@ export default function DashboardMain({
                 </span>
                 .
               </p>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                <span
+                  className={`inline-flex items-center gap-2 rounded-full px-3 py-1 font-medium ${
+                    metricsLoading ? 'bg-amber-50 text-amber-800' : 'bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${metricsLoading ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`}
+                    aria-hidden="true"
+                  />
+                  {metricsLoading ? 'Atualizando…' : `Última atualização ${formattedMetricsUpdated}`}
+                </span>
+                <span
+                  className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-700"
+                  title="Range efetivo do período selecionado."
+                >
+                  Range {exportRangeText}
+                </span>
+              </div>
             </div>
             <button
               type="button"
@@ -1354,39 +2073,113 @@ export default function DashboardMain({
 
           {metricsSnapshot ? (
             <>
+              <details className="mt-4 rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+                <summary className="cursor-pointer list-none text-xs font-medium text-slate-700">
+                  Legenda dos buckets de status
+                </summary>
+                <div className="mt-2 grid gap-2 text-xs text-slate-600 md:grid-cols-2">
+                  <div>
+                    <span className="font-semibold text-slate-700">Pending</span>: aguardando envio/ack (status 1).
+                  </div>
+                  <div>
+                    <span className="font-semibold text-slate-700">ServerAck</span>: WhatsApp confirmou recebimento (status 2).
+                  </div>
+                  <div>
+                    <span className="font-semibold text-slate-700">Delivered</span>: entregue no destinatário (status 3).
+                  </div>
+                  <div>
+                    <span className="font-semibold text-slate-700">Read</span>: marcada como lida (status 4).
+                  </div>
+                  <div>
+                    <span className="font-semibold text-slate-700">Failed</span>: falhou/erro (status 0 ou ≥ 6).
+                  </div>
+                  <div>
+                    <span className="font-semibold text-slate-700">Em voo</span>: Pending + ServerAck (a caminho).
+                  </div>
+                </div>
+              </details>
+
               <div className="mt-4 grid gap-3 md:grid-cols-3 lg:grid-cols-6">
-                <QueueMetric label="Pending" value={metricsSnapshot.delivery.pending} />
-                <QueueMetric label="ServerAck" value={metricsSnapshot.delivery.serverAck} />
-                <QueueMetric label="Delivered" value={metricsSnapshot.delivery.delivered} />
-                <QueueMetric label="Read" value={metricsSnapshot.delivery.read} />
+                <QueueMetric
+                  label="Pending"
+                  value={metricsSnapshot.delivery.pending}
+                  title="Aguardando envio/ack (status 1)."
+                />
+                <QueueMetric
+                  label="ServerAck"
+                  value={metricsSnapshot.delivery.serverAck}
+                  title="WhatsApp confirmou recebimento (status 2)."
+                />
+                <QueueMetric
+                  label="Delivered"
+                  value={metricsSnapshot.delivery.delivered}
+                  title="Entregue no destinatário (status 3)."
+                />
+                <QueueMetric
+                  label="Read"
+                  value={metricsSnapshot.delivery.read}
+                  title="Marcada como lida (status 4)."
+                />
                 <QueueMetric
                   label="Failed"
                   value={metricsSnapshot.delivery.failed}
                   tone={metricsSnapshot.delivery.failed ? 'danger' : 'neutral'}
+                  title="Falhou/erro (status 0 ou ≥ 6)."
                 />
                 <QueueMetric
                   label="Em voo"
                   value={metricsSnapshot.delivery.inFlight}
                   tone={metricsSnapshot.delivery.inFlight ? 'warning' : 'neutral'}
+                  title="Pending + ServerAck (a caminho)."
                 />
               </div>
 
               {metricsSnapshot.rangeSummary ? (
                 <div className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-                  <QueueMetric label="Enviadas (Δ)" value={metricsSnapshot.rangeSummary.deltas.sent} />
-                  <QueueMetric label="Entregues (Δ)" value={metricsSnapshot.rangeSummary.deltas.delivered} />
-                  <QueueMetric label="Lidas (Δ)" value={metricsSnapshot.rangeSummary.deltas.read} />
+                  <QueueMetric
+                    label="Enviadas (Δ)"
+                    value={metricsSnapshot.rangeSummary.deltas.sent}
+                    title="Quantidade enviada no range selecionado."
+                  />
+                  <QueueMetric
+                    label="Entregues (Δ)"
+                    value={metricsSnapshot.rangeSummary.deltas.delivered}
+                    title="Quantidade entregue no range selecionado."
+                  />
+                  <QueueMetric
+                    label="Lidas (Δ)"
+                    value={metricsSnapshot.rangeSummary.deltas.read}
+                    title="Quantidade lida no range selecionado."
+                  />
                   <QueueMetric
                     label="Falhas (Δ)"
                     value={metricsSnapshot.rangeSummary.deltas.failed}
                     tone={metricsSnapshot.rangeSummary.deltas.failed ? 'danger' : 'neutral'}
+                    title="Falhas registradas no range selecionado."
                   />
                 </div>
               ) : null}
             </>
           ) : (
-            <div className="mt-4 rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">
-              Carregando métricas...
+            <div className="mt-4 space-y-4">
+              {metricsLoading ? (
+                <>
+                  <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-6">
+                    {Array.from({ length: 6 }).map((_, index) => (
+                      <div key={index} className="h-20 rounded-xl border border-slate-100 bg-white/80 shadow-sm animate-pulse" />
+                    ))}
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+                    {Array.from({ length: 4 }).map((_, index) => (
+                      <div key={index} className="h-20 rounded-xl border border-slate-100 bg-white/80 shadow-sm animate-pulse" />
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-xs text-slate-500">
+                  {metricsError ? `Sem métricas: ${metricsError}` : 'Sem métricas disponíveis.'}
+                </div>
+              )}
             </div>
           )}
         </section>
@@ -1639,53 +2432,431 @@ export default function DashboardMain({
         </p>
       </Modal>
 
-      <Modal
-        open={quickSendOpen}
-        title="Envio rápido"
-        description="Envie um texto simples para um contato sem sair do painel."
-        onClose={() => setQuickSendOpen(false)}
-        footer={
-          <>
-            <button
-              type="button"
-              onClick={() => setQuickSendOpen(false)}
-              className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600"
-            >
-              Cancelar
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleQuickSend()}
-              disabled={quickSendDisabled}
-              className={`rounded-lg px-3 py-2 text-xs text-white ${
-                quickSendDisabled ? 'bg-slate-400 cursor-not-allowed' : 'bg-slate-900 hover:bg-slate-800'
-              }`}
-            >
-              {isQuickSending ? 'Enviando...' : 'Enviar mensagem'}
-            </button>
-          </>
-        }
-      >
-        <label className="text-xs font-semibold text-slate-600">Telefone (E.164)</label>
-        <input
-          type="text"
-          value={quickSendPhone}
-          onChange={(event) => setQuickSendPhone(event.target.value)}
-          placeholder="55DDDNUMERO"
-          disabled={isQuickSending}
-          className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
-        />
-        <p className="mt-1 text-[11px] text-slate-400">Sem sinais ou espaços, ex: 5511999991234.</p>
-        <label className="mt-4 text-xs font-semibold text-slate-600">Mensagem</label>
-        <textarea
-          rows={4}
-          value={quickSendMessage}
-          onChange={(event) => setQuickSendMessage(event.target.value)}
-          placeholder="Escreva uma mensagem de texto simples..."
-          disabled={isQuickSending}
-          className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
-        />
-      </Modal>
+	      <Modal
+	        open={quickSendOpen}
+	        title="Envio rápido"
+	        description="Envie texto, botões, lista ou mídia sem sair do painel."
+	        onClose={() => setQuickSendOpen(false)}
+	        footer={
+	          <>
+	            <button
+	              type="button"
+	              onClick={() => setQuickSendOpen(false)}
+	              className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600"
+	            >
+	              Fechar
+	            </button>
+	            <button
+	              type="button"
+	              onClick={() => void handleQuickSend()}
+	              disabled={quickSendDisabled}
+	              className={`rounded-lg px-3 py-2 text-xs text-white ${
+	                quickSendDisabled ? 'bg-slate-400 cursor-not-allowed' : 'bg-slate-900 hover:bg-slate-800'
+	              }`}
+	            >
+	              {isQuickSending ? 'Enviando…' : 'Enviar'}
+	            </button>
+	          </>
+	        }
+	      >
+	        <label className="text-xs font-semibold text-slate-600">Tipo</label>
+	        <select
+	          value={quickSendType}
+	          onChange={(event) => setQuickSendType(event.target.value as typeof quickSendType)}
+	          disabled={isQuickSending}
+	          className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
+	        >
+	          <option value="text">Texto</option>
+	          <option value="buttons">Botões</option>
+	          <option value="list">Lista</option>
+	          <option value="media">Mídia</option>
+	        </select>
+
+	        <label className="mt-4 text-xs font-semibold text-slate-600">Telefone (E.164 BR)</label>
+	        <input
+	          type="text"
+	          value={quickSendPhone}
+	          onChange={(event) => setQuickSendPhone(event.target.value)}
+	          placeholder="55DDDNUMERO"
+	          disabled={isQuickSending}
+	          className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
+	        />
+	        <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+	          <span>Ex: 5511999991234 (ou apenas DDD+NUMERO).</span>
+	          {quickSendNormalizedTo ? (
+	            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-700">
+	              Normalizado {quickSendNormalizedTo}
+	            </span>
+	          ) : quickSendPhone.trim() ? (
+	            <span className="rounded-full bg-rose-50 px-2 py-0.5 text-rose-700">Telefone inválido</span>
+	          ) : null}
+	          {quickSendExistsLoading ? (
+	            <span className="inline-flex items-center gap-2 rounded-full bg-amber-50 px-2 py-0.5 text-amber-800">
+	              <RefreshCw className="h-3 w-3 animate-spin" aria-hidden="true" />
+	              Verificando…
+	            </span>
+	          ) : quickSendExists === true ? (
+	            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">WhatsApp OK</span>
+	          ) : quickSendExists === false ? (
+	            <span className="rounded-full bg-rose-50 px-2 py-0.5 text-rose-700">Não encontrado</span>
+	          ) : quickSendExistsError ? (
+	            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-700" title={quickSendExistsError}>
+	              Pré-checagem falhou
+	            </span>
+	          ) : null}
+	        </div>
+
+	        <label className="mt-4 text-xs font-semibold text-slate-600">
+	          {quickSendType === 'media' ? 'Legenda (opcional)' : 'Mensagem'}
+	        </label>
+	        <textarea
+	          rows={4}
+	          value={quickSendMessage}
+	          onChange={(event) => setQuickSendMessage(event.target.value)}
+	          maxLength={4096}
+	          placeholder={quickSendType === 'text' ? 'Escreva uma mensagem de texto…' : 'Texto da mensagem…'}
+	          disabled={isQuickSending}
+	          className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
+	        />
+	        <div className="mt-1 flex items-center justify-between text-[11px] text-slate-400">
+	          <span>{quickSendType === 'text' ? 'Texto simples.' : 'Campo usado como texto/legenda conforme o tipo.'}</span>
+	          <span>{quickSendMessage.length}/4096</span>
+	        </div>
+
+	        {quickSendType === 'buttons' ? (
+	          <>
+	            <label className="mt-4 text-xs font-semibold text-slate-600">Footer (opcional)</label>
+	            <input
+	              type="text"
+	              value={quickSendFooter}
+	              onChange={(event) => setQuickSendFooter(event.target.value)}
+	              placeholder="Texto de rodapé…"
+	              disabled={isQuickSending}
+	              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
+	            />
+
+	            <div className="mt-4 flex items-center justify-between gap-2">
+	              <p className="text-xs font-semibold text-slate-600">Botões (até 3)</p>
+	              <button
+	                type="button"
+	                onClick={() => setQuickSendButtons((current) => (current.length >= 3 ? current : [...current, { id: '', title: '' }]))}
+	                disabled={isQuickSending || quickSendButtons.length >= 3}
+	                className="text-xs text-sky-700 hover:underline disabled:text-slate-400 disabled:hover:no-underline"
+	              >
+	                Adicionar
+	              </button>
+	            </div>
+	            <div className="mt-2 space-y-2">
+	              {quickSendButtons.map((button, index) => (
+	                <div key={index} className="grid gap-2 rounded-xl border border-slate-100 bg-slate-50 p-3 md:grid-cols-[1fr_1fr_auto]">
+	                  <input
+	                    type="text"
+	                    value={button.id}
+	                    onChange={(event) => {
+	                      const value = event.target.value;
+	                      setQuickSendButtons((current) => current.map((entry, idx) => (idx === index ? { ...entry, id: value } : entry)));
+	                    }}
+	                    placeholder="id (ex: opt_1)"
+	                    disabled={isQuickSending}
+	                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+	                  />
+	                  <input
+	                    type="text"
+	                    value={button.title}
+	                    onChange={(event) => {
+	                      const value = event.target.value;
+	                      setQuickSendButtons((current) => current.map((entry, idx) => (idx === index ? { ...entry, title: value } : entry)));
+	                    }}
+	                    placeholder="título (ex: Confirmar)"
+	                    disabled={isQuickSending}
+	                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+	                  />
+	                  <button
+	                    type="button"
+	                    onClick={() => setQuickSendButtons((current) => current.filter((_, idx) => idx !== index))}
+	                    disabled={isQuickSending || quickSendButtons.length <= 1}
+	                    className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed"
+	                  >
+	                    Remover
+	                  </button>
+	                </div>
+	              ))}
+	            </div>
+	          </>
+	        ) : null}
+
+	        {quickSendType === 'list' ? (
+	          <>
+	            <label className="mt-4 text-xs font-semibold text-slate-600">Texto do botão</label>
+	            <input
+	              type="text"
+	              value={quickSendListButtonText}
+	              onChange={(event) => setQuickSendListButtonText(event.target.value)}
+	              placeholder="Ver opções"
+	              disabled={isQuickSending}
+	              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
+	            />
+
+	            <label className="mt-4 text-xs font-semibold text-slate-600">Título (opcional)</label>
+	            <input
+	              type="text"
+	              value={quickSendListTitle}
+	              onChange={(event) => setQuickSendListTitle(event.target.value)}
+	              placeholder="Título da lista…"
+	              disabled={isQuickSending}
+	              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
+	            />
+
+	            <label className="mt-4 text-xs font-semibold text-slate-600">Footer (opcional)</label>
+	            <input
+	              type="text"
+	              value={quickSendFooter}
+	              onChange={(event) => setQuickSendFooter(event.target.value)}
+	              placeholder="Texto de rodapé…"
+	              disabled={isQuickSending}
+	              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
+	            />
+
+	            <div className="mt-4 flex items-center justify-between gap-2">
+	              <p className="text-xs font-semibold text-slate-600">Seções (até 3)</p>
+	              <button
+	                type="button"
+	                onClick={() =>
+	                  setQuickSendListSections((current) =>
+	                    current.length >= 3 ? current : [...current, { title: '', options: [{ id: '', title: '', description: '' }] }],
+	                  )
+	                }
+	                disabled={isQuickSending || quickSendListSections.length >= 3}
+	                className="text-xs text-sky-700 hover:underline disabled:text-slate-400 disabled:hover:no-underline"
+	              >
+	                Adicionar seção
+	              </button>
+	            </div>
+
+	            <div className="mt-2 space-y-3">
+	              {quickSendListSections.map((section, sectionIndex) => (
+	                <div key={sectionIndex} className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+	                  <div className="flex items-center justify-between gap-2">
+	                    <p className="text-xs font-semibold text-slate-700">Seção {sectionIndex + 1}</p>
+	                    <button
+	                      type="button"
+	                      onClick={() => setQuickSendListSections((current) => current.filter((_, idx) => idx !== sectionIndex))}
+	                      disabled={isQuickSending || quickSendListSections.length <= 1}
+	                      className="text-xs text-slate-600 hover:underline disabled:text-slate-400 disabled:hover:no-underline"
+	                    >
+	                      Remover
+	                    </button>
+	                  </div>
+	                  <input
+	                    type="text"
+	                    value={section.title}
+	                    onChange={(event) => {
+	                      const value = event.target.value;
+	                      setQuickSendListSections((current) =>
+	                        current.map((entry, idx) => (idx === sectionIndex ? { ...entry, title: value } : entry)),
+	                      );
+	                    }}
+	                    placeholder="Título da seção (opcional)"
+	                    disabled={isQuickSending}
+	                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+	                  />
+
+	                  <div className="mt-3 flex items-center justify-between gap-2">
+	                    <p className="text-xs font-semibold text-slate-600">Opções (até 10)</p>
+	                    <button
+	                      type="button"
+	                      onClick={() =>
+	                        setQuickSendListSections((current) =>
+	                          current.map((entry, idx) => {
+	                            if (idx !== sectionIndex) return entry;
+	                            if (entry.options.length >= 10) return entry;
+	                            return { ...entry, options: [...entry.options, { id: '', title: '', description: '' }] };
+	                          }),
+	                        )
+	                      }
+	                      disabled={isQuickSending || section.options.length >= 10}
+	                      className="text-xs text-sky-700 hover:underline disabled:text-slate-400 disabled:hover:no-underline"
+	                    >
+	                      Adicionar opção
+	                    </button>
+	                  </div>
+
+	                  <div className="mt-2 space-y-2">
+	                    {section.options.map((option, optionIndex) => (
+	                      <div key={optionIndex} className="grid gap-2 md:grid-cols-[1fr_1fr_1fr_auto]">
+	                        <input
+	                          type="text"
+	                          value={option.id}
+	                          onChange={(event) => {
+	                            const value = event.target.value;
+	                            setQuickSendListSections((current) =>
+	                              current.map((entry, idx) => {
+	                                if (idx !== sectionIndex) return entry;
+	                                const nextOptions = entry.options.map((row, rIdx) => (rIdx === optionIndex ? { ...row, id: value } : row));
+	                                return { ...entry, options: nextOptions };
+	                              }),
+	                            );
+	                          }}
+	                          placeholder="id"
+	                          disabled={isQuickSending}
+	                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+	                        />
+	                        <input
+	                          type="text"
+	                          value={option.title}
+	                          onChange={(event) => {
+	                            const value = event.target.value;
+	                            setQuickSendListSections((current) =>
+	                              current.map((entry, idx) => {
+	                                if (idx !== sectionIndex) return entry;
+	                                const nextOptions = entry.options.map((row, rIdx) => (rIdx === optionIndex ? { ...row, title: value } : row));
+	                                return { ...entry, options: nextOptions };
+	                              }),
+	                            );
+	                          }}
+	                          placeholder="título"
+	                          disabled={isQuickSending}
+	                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+	                        />
+	                        <input
+	                          type="text"
+	                          value={option.description}
+	                          onChange={(event) => {
+	                            const value = event.target.value;
+	                            setQuickSendListSections((current) =>
+	                              current.map((entry, idx) => {
+	                                if (idx !== sectionIndex) return entry;
+	                                const nextOptions = entry.options.map((row, rIdx) =>
+	                                  rIdx === optionIndex ? { ...row, description: value } : row,
+	                                );
+	                                return { ...entry, options: nextOptions };
+	                              }),
+	                            );
+	                          }}
+	                          placeholder="descrição (opcional)"
+	                          disabled={isQuickSending}
+	                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+	                        />
+	                        <button
+	                          type="button"
+	                          onClick={() =>
+	                            setQuickSendListSections((current) =>
+	                              current.map((entry, idx) => {
+	                                if (idx !== sectionIndex) return entry;
+	                                return { ...entry, options: entry.options.filter((_, rIdx) => rIdx !== optionIndex) };
+	                              }),
+	                            )
+	                          }
+	                          disabled={isQuickSending || section.options.length <= 1}
+	                          className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed"
+	                        >
+	                          –
+	                        </button>
+	                      </div>
+	                    ))}
+	                  </div>
+	                </div>
+	              ))}
+	            </div>
+	          </>
+	        ) : null}
+
+	        {quickSendType === 'media' ? (
+	          <>
+	            <label className="mt-4 text-xs font-semibold text-slate-600">Tipo de mídia</label>
+	            <select
+	              value={quickSendMediaType}
+	              onChange={(event) => setQuickSendMediaType(event.target.value as typeof quickSendMediaType)}
+	              disabled={isQuickSending}
+	              className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
+	            >
+	              <option value="image">Imagem</option>
+	              <option value="video">Vídeo</option>
+	              <option value="audio">Áudio</option>
+	              <option value="document">Documento</option>
+	            </select>
+
+	            <label className="mt-4 text-xs font-semibold text-slate-600">URL da mídia</label>
+	            <input
+	              type="text"
+	              value={quickSendMediaUrl}
+	              onChange={(event) => setQuickSendMediaUrl(event.target.value)}
+	              placeholder="https://..."
+	              disabled={isQuickSending}
+	              className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-slate-400 focus:outline-none"
+	            />
+
+	            <div className="mt-4 grid gap-2 md:grid-cols-2">
+	              <div>
+	                <label className="text-xs font-semibold text-slate-600">Mimetype (opcional)</label>
+	                <input
+	                  type="text"
+	                  value={quickSendMediaMimeType}
+	                  onChange={(event) => setQuickSendMediaMimeType(event.target.value)}
+	                  placeholder="image/jpeg"
+	                  disabled={isQuickSending}
+	                  className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700"
+	                />
+	              </div>
+	              <div>
+	                <label className="text-xs font-semibold text-slate-600">Nome do arquivo (opcional)</label>
+	                <input
+	                  type="text"
+	                  value={quickSendMediaFileName}
+	                  onChange={(event) => setQuickSendMediaFileName(event.target.value)}
+	                  placeholder="arquivo.pdf"
+	                  disabled={isQuickSending}
+	                  className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700"
+	                />
+	              </div>
+	            </div>
+
+	            <div className="mt-4 flex flex-wrap items-center gap-4 text-sm text-slate-700">
+	              <label className="inline-flex items-center gap-2 text-xs">
+	                <input
+	                  type="checkbox"
+	                  checked={quickSendMediaPtt}
+	                  onChange={(event) => setQuickSendMediaPtt(event.target.checked)}
+	                  disabled={isQuickSending}
+	                  className="h-4 w-4"
+	                />
+	                PTT (áudio)
+	              </label>
+	              <label className="inline-flex items-center gap-2 text-xs">
+	                <input
+	                  type="checkbox"
+	                  checked={quickSendMediaGifPlayback}
+	                  onChange={(event) => setQuickSendMediaGifPlayback(event.target.checked)}
+	                  disabled={isQuickSending}
+	                  className="h-4 w-4"
+	                />
+	                Gif playback (vídeo)
+	              </label>
+	            </div>
+	          </>
+	        ) : null}
+
+	        {quickSendResult ? (
+	          <div className="mt-4 rounded-2xl border border-slate-100 bg-slate-50 p-4 text-xs text-slate-700">
+	            <p className="font-semibold">{String(quickSendResult.summary || (quickSendResult.enqueued ? 'Envio enfileirado.' : 'Envio concluído.'))}</p>
+	            {quickSendResult.jobId ? <p className="mt-1 text-[11px] text-slate-500">jobId: {String(quickSendResult.jobId)}</p> : null}
+	            {quickSendResult.messageId ? <p className="mt-1 text-[11px] text-slate-500">messageId: {String(quickSendResult.messageId)}</p> : null}
+	            <div className="mt-3 flex flex-wrap gap-2">
+	              {(Array.isArray(quickSendResult.links) ? quickSendResult.links : Array.isArray(quickSendResult.quickLinks) ? quickSendResult.quickLinks : []).map((link: any) => (
+	                <a
+	                  key={String(link.href)}
+	                  href={String(link.href)}
+	                  target="_blank"
+	                  rel="noreferrer"
+	                  className="rounded-full bg-white px-3 py-1 text-[11px] text-sky-700 shadow-sm hover:bg-slate-50"
+	                >
+	                  {String(link.label || link.rel || 'Link')}
+	                </a>
+	              ))}
+	            </div>
+	          </div>
+	        ) : null}
+	      </Modal>
 
       <MessageMonitorDrawer
         open={monitorOpen}
@@ -1736,7 +2907,19 @@ function HealthCard({ label, value, icon }: { label: string; value: string; icon
   );
 }
 
-function QueueMetric({ label, value, tone = 'neutral' }: { label: string; value: string | number; tone?: MetricTone }) {
+function QueueMetric({
+  label,
+  value,
+  tone = 'neutral',
+  helper,
+  title,
+}: {
+  label: string;
+  value: string | number;
+  tone?: MetricTone;
+  helper?: string;
+  title?: string;
+}) {
   const toneStyles: Record<MetricTone, string> = {
     neutral: 'bg-white text-slate-900',
     positive: 'bg-emerald-50 text-emerald-800',
@@ -1745,9 +2928,10 @@ function QueueMetric({ label, value, tone = 'neutral' }: { label: string; value:
   };
 
   return (
-    <div className={`rounded-xl border border-slate-100 p-4 shadow-sm ${toneStyles[tone]}`}>
+    <div className={`rounded-xl border border-slate-100 p-4 shadow-sm ${toneStyles[tone]}`} title={title}>
       <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
       <p className="mt-1 text-lg font-semibold">{value}</p>
+      {helper ? <p className="mt-1 text-[11px] text-slate-500">{helper}</p> : null}
     </div>
   );
 }

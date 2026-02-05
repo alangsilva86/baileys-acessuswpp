@@ -2,41 +2,44 @@
 
 ## Visão geral
 
-O dashboard atual é construído com HTML estático (`public/index.html`) estilizado via Tailwind CDN e JavaScript vanilla (`public/dashboard.js`) que consome os endpoints REST expostos pelo backend Express. A interface se apoia em atualizações por polling a cada 3 segundos para manter métricas e estados das instâncias sincronizados.
+O projeto possui **duas UIs** que consomem os mesmos endpoints do backend Express:
+
+- **UI canônica (React SPA)**: código em `apps/web` (Vite → `dist/web`). É servida quando `dist/web` existe.
+- **UI legada (fallback)**: HTML em `public/index.html` + módulos ES6 em `public/js/*.js`, com Tailwind buildado em `public/assets/app.css`.
+
+Ambas dependem de autenticação via `x-api-key` e usam REST + SSE (`/instances/*`, `/stream`) para manter estado, métricas e logs atualizados.
 
 ## Etapas da jornada e dependências
 
 ### Etapa 1 — Boot do dashboard e carregamento inicial
-- **Comportamento**: `initChart()` inicializa o gráfico de métricas (Chart.js) e `refreshInstances()` é chamado imediatamente e em intervalo de 3s (`setInterval`).
-- **Dependências técnicas**: `Chart.js` via CDN, endpoint `GET /instances`, armazenamento local `localStorage` para chave API e range de métricas.
-- **Observações**: Estado do badge de status é atualizado com base na resposta da instância selecionada.
+- **UI canônica (React)**: `apps/web/src/main.tsx` + `apps/web/src/features/dashboard/DashboardPage.tsx`. A conexão “tempo real” vem de SSE em `apps/web/src/features/dashboard/hooks/useInstanceMetrics.ts`.
+- **UI legada (fallback)**: `public/js/main.js` + `public/js/boot.js` (inicialização, refresh e fallback entre SSE e polling).
+- **Dependências técnicas**: endpoints `GET /instances`, SSE em `/instances/events` e `/stream`, `localStorage` para chave de API.
 
 ### Etapa 2 — Seleção e gerenciamento de instâncias
-- **Comportamento**: A lista de instâncias popula `<select id="selInstance">` e gera cards dinâmicos com estatísticas. Ações inline permitem editar nome/notas, selecionar, carregar QR, logout, wipe e exclusão (com modal).
-- **Dependências técnicas**: Endpoints `GET/POST/PATCH/DELETE /instances`, componentes HTML gerados dinamicamente, `fetchJSON()` para chamadas autenticadas, modal `#modalDelete`.
-- **Observações**: Cards refletem contadores por status (1–5) e uso de rate limit. O cabeçalho exibe `inst.user.id` exatamente como informado pelo socket, portanto IDs `@lid` aparecem sem normalização.
+- **UI canônica (React)**: `apps/web/src/features/dashboard/components/SidebarContainer.tsx` + `apps/web/src/features/dashboard/hooks/useInstances.ts`.
+- **UI legada (fallback)**: `public/js/instances.js` (select, cards e ações).
+- **Dependências técnicas**: endpoints `GET/POST/PATCH/DELETE /instances`.
 
 ### Etapa 3 — Contexto da instância e notas
-- **Comportamento**: Ao selecionar uma instância, o bloco "Contexto da instância" é exibido com textarea sincronizada e metadados de criação/atualização (`metadata.createdAt`, `metadata.updatedAt`).
-- **Dependências técnicas**: Endpoint `GET /instances/:id`, propriedades `note/notes`, elementos `#noteCard`, `#instanceNote`, `#noteMeta`.
-- **Observações**: Persistência depende de ação manual "Salvar" no card correspondente.
+- **UI canônica (React)**: seção “Notas” em `apps/web/src/features/dashboard/components/DashboardMain.tsx`.
+- **UI legada (fallback)**: `public/js/notes.js` (autosave, metadados e histórico).
+- **Dependências técnicas**: `PATCH /instances/:iid` (backend já suporta revisões em `metadata.revisions`).
 
 ### Etapa 4 — Métricas e gráfico de timeline
-- **Comportamento**: KPIs e gráfico de linha atualizam com dados de `/instances/:id/metrics`. Filtro `#selRange` determina janela em minutos armazenada em `localStorage`.
-- **Dependências técnicas**: Endpoint `GET /instances/:id/metrics`, estrutura `metrics.counters`, `metrics.rate`, `metrics.delivery`, timeline com campos `sent`, `pending`, `serverAck`, `delivered`, `read`, `played`.
-- **Observações**: Falta fallback visual além de texto quando não há dados; atualizações dependem do polling global.
-- **Dependências técnicas**: Endpoint `GET /instances/:id/metrics`, estrutura `metrics.counters` (com `statusCounts` 1–5), `metrics.rate` e timeline `sent/pending/serverAck/delivered/read/played`. Status são limpos automaticamente após `STATUS_TTL_MS`.
-- **Observações**: Falta fallback visual além de texto quando não há dados; atualizações dependem do polling global e não há mais exibição de tempos médios de ACK porque o backend responde imediatamente após o envio.
+- **UI canônica (React)**: `apps/web/src/features/dashboard/hooks/useInstanceMetrics.ts` + UI em `apps/web/src/features/dashboard/components/DashboardMain.tsx` (inclui export CSV/JSON).
+- **UI legada (fallback)**: `public/js/metrics.js`.
+- **Dependências técnicas**: `GET /instances/:iid/metrics`, `GET /instances/:iid/export.csv`, `GET /instances/:iid/export.json`.
 
 ### Etapa 5 — Ações de sessão e QR Code
-- **Comportamento**: Área de QR mostra imagem carregada via `/instances/:id/qr.png` quando desconectada. Botões executam `logout`, `wipe` e `pair` (gera código de pareamento copiado para clipboard).
-- **Dependências técnicas**: Endpoints `/instances/:id/qr.png`, `/instances/:id/logout`, `/instances/:id/wipe`, `/instances/:id/pair`, uso de API Key (`x-api-key`) e manipulação de `navigator.clipboard`.
-- **Observações**: Feedback textual em `#qrHint`; ausência de estados carregando/erro visuais além de texto. Após informar `phoneNumber` em `pair`, o backend passa a reenviar códigos automaticamente em timeouts do QR (não há indicador visual dessa automação).
+- **UI canônica (React)**: seção de QR e ações em `apps/web/src/features/dashboard/components/DashboardMain.tsx`.
+- **UI legada (fallback)**: `public/js/sessionActions.js`.
+- **Dependências técnicas**: `/instances/:iid/qr.png`, `/instances/:iid/logout`, `/instances/:iid/session/wipe`, `/instances/:iid/pair`.
 
 ### Etapa 6 — Envio rápido
-- **Comportamento**: Formulário "Envio Rápido" solicita API Key, telefone e mensagem, envia `POST /instances/:id/send-text` e exibe JSON de resposta em `#sendOut`.
-- **Dependências técnicas**: Endpoint `/instances/:id/send-text`, validações mínimas (campos vazios), armazenamento de API Key no `localStorage`.
-- **Observações**: Não há máscara/validação de formato ou feedback contextual (ex: sucesso/erro inline estilizado).
+- **UI canônica (React)**: modal em `apps/web/src/features/dashboard/components/DashboardMain.tsx` chamando `POST /instances/:iid/send-quick`.
+- **UI legada (fallback)**: `public/js/quickSend.js`.
+- **Dependências técnicas**: `/instances/:iid/send-quick` (text/buttons/list/media) e `/instances/:iid/exists` para pré-checagem opcional.
 
 ## Recomendações de melhorias referenciadas
 

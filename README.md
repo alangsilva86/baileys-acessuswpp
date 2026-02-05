@@ -16,15 +16,29 @@ Uma API completa para WhatsApp usando a biblioteca Baileys, com interface web pa
 
 ## Mapa dos módulos do dashboard
 
-As etapas de jornada descritas na revisão de UX (`docs/dashboard-ux-review.md`) agora estão refletidas em módulos ES6 separados. O diagrama abaixo ajuda a localizar os pontos de extensão por etapa:
+As etapas de jornada descritas na revisão de UX (`docs/dashboard-ux-review.md`) estão implementadas em **duas UIs**:
+
+- **UI canônica (React SPA)**: código em `apps/web`, build via Vite para `dist/web` (servida quando existe).
+- **UI legada (fallback)**: HTML em `public/index.html` + módulos ES6 em `public/js`.
+
+### UI canônica (React SPA)
+
+- **Etapa 1 — Boot / API key / real-time**: `apps/web/src/main.tsx`, `apps/web/src/lib/api.ts` e SSE em `apps/web/src/features/dashboard/hooks/useInstanceMetrics.ts` + `apps/web/src/features/dashboard/components/MessageMonitorDrawer.tsx`.
+- **Etapa 2 — Seleção e gerenciamento de instâncias**: `apps/web/src/features/dashboard/components/SidebarContainer.tsx` + `apps/web/src/features/dashboard/hooks/useInstances.ts`.
+- **Etapa 3 — Contexto da instância e notas**: `apps/web/src/features/dashboard/components/DashboardMain.tsx` (Notas) + `PATCH /instances/:iid`.
+- **Etapa 4 — Métricas e export por período**: `apps/web/src/features/dashboard/hooks/useInstanceMetrics.ts` + UI em `apps/web/src/features/dashboard/components/DashboardMain.tsx`.
+- **Etapa 5 — Sessão, QR e ações críticas**: `apps/web/src/features/dashboard/components/DashboardMain.tsx` (QR, logout, proxy, risco).
+- **Etapa 6 — Envio rápido**: `apps/web/src/features/dashboard/components/DashboardMain.tsx` (modal) + `POST /instances/:iid/send-quick`.
+
+### UI legada (fallback)
 
 - **Etapa 1 — Boot do dashboard e carregamento inicial**: `public/js/boot.js` orquestra a inicialização chamando `refreshInstances`, enquanto `public/js/state.js` e `public/js/api.js` concentram estado compartilhado, headers e utilitários usados pelos demais módulos.
 - **Etapa 2 — Seleção e gerenciamento de instâncias**: `public/js/instances.js` é responsável por listar instâncias, construir cards e propagar atualizações para a instância selecionada.
 - **Etapa 3 — Contexto da instância e notas**: `public/js/notes.js` cuida do autosave, metadados de criação/atualização e feedback visual do bloco de notas.
-- **Etapa 4 — Métricas e gráfico de timeline**: `public/js/metrics.js` controla KPIs, gráfico do Chart.js e sincronização da instância ativa.
-- **Etapa 5 — Ações de sessão e QR Code**: `public/js/sessionActions.js` agrega os handlers de logout/wipe/pair, modais e feedback do QR, reutilizando bloqueios definidos em `state.js`.
-- **Etapa 6 — Envio rápido**: `public/js/quickSend.js` concentra validações de telefone/mensagem e o envio de texto imediato, mantendo o contador e feedback inline.
-- **Logs recentes**: `public/js/logs.js` isola o carregamento incremental e a renderização dos eventos, consumido pelas etapas 4 e 5 para dar contexto operacional.
+- **Etapa 4 — Métricas e timeline**: `public/js/metrics.js` controla KPIs e sincronização da instância ativa.
+- **Etapa 5 — Ações de sessão e QR Code**: `public/js/sessionActions.js` agrega os handlers de logout/wipe/pair, modais e feedback do QR.
+- **Etapa 6 — Envio rápido**: `public/js/quickSend.js` concentra validações e o envio de mensagens rápidas.
+- **Logs recentes**: `public/js/logs.js` renderiza eventos e entregas para contexto operacional.
 
 ## Instalação
 

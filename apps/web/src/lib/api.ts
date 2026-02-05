@@ -1,4 +1,5 @@
 const API_KEY_STORAGE = 'baileys_api_key';
+const API_KEY_STORAGE_LEGACY = 'x_api_key';
 
 export type ApiError = Error & {
   status?: number;
@@ -8,12 +9,22 @@ export type ApiError = Error & {
 
 export function readStoredApiKey(): string {
   if (typeof window === 'undefined') return '';
-  return window.localStorage.getItem(API_KEY_STORAGE) ?? '';
+  const primary = window.localStorage.getItem(API_KEY_STORAGE);
+  if (primary && primary.trim()) return primary;
+  const legacy = window.localStorage.getItem(API_KEY_STORAGE_LEGACY);
+  return legacy ?? '';
 }
 
 export function writeStoredApiKey(value: string): void {
   if (typeof window === 'undefined') return;
-  window.localStorage.setItem(API_KEY_STORAGE, value);
+  const next = value ?? '';
+  if (!next.trim()) {
+    window.localStorage.removeItem(API_KEY_STORAGE);
+    window.localStorage.removeItem(API_KEY_STORAGE_LEGACY);
+    return;
+  }
+  window.localStorage.setItem(API_KEY_STORAGE, next);
+  window.localStorage.setItem(API_KEY_STORAGE_LEGACY, next);
 }
 
 function buildHeaders(apiKey: string, extra?: HeadersInit): HeadersInit {

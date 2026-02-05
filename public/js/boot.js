@@ -20,6 +20,7 @@ let autoRefreshSuspended = false;
 let selectedRefreshTimerId = null;
 let lastSelectedRefreshAt = 0;
 let eventSource = null;
+let eventSourceKey = null;
 let streamErrorCount = 0;
 let streamFallbackActive = false;
 
@@ -174,9 +175,22 @@ function parseStreamData(data) {
 
 function startEventStream() {
   if (typeof window === 'undefined' || typeof EventSource === 'undefined') return;
-  if (eventSource) return;
+  const key = localStorage.getItem('baileys_api_key') || localStorage.getItem('x_api_key') || '';
+  if (!key) return;
+  if (eventSource && eventSourceKey === key) return;
 
-  eventSource = new EventSource('/stream');
+  if (eventSource) {
+    try {
+      eventSource.close();
+    } catch (err) {
+      console.debug('[boot] stream close failed', err);
+    }
+  }
+
+  eventSourceKey = key;
+  const url = new URL('/stream', window.location.origin);
+  url.searchParams.set('apiKey', key);
+  eventSource = new EventSource(url.toString());
 
   const handleOpen = () => {
     streamErrorCount = 0;
@@ -208,14 +222,23 @@ function startEventStream() {
 
   window.addEventListener('beforeunload', () => {
     eventSource?.close();
+    eventSourceKey = null;
   });
 }
 
 export function bootDashboard() {
   if (els.inpApiKey) {
-    els.inpApiKey.value = localStorage.getItem('x_api_key') || '';
+    els.inpApiKey.value = localStorage.getItem('baileys_api_key') || localStorage.getItem('x_api_key') || '';
     els.inpApiKey.addEventListener('input', () => {
-      localStorage.setItem('x_api_key', els.inpApiKey.value.trim());
+      const next = els.inpApiKey.value.trim();
+      if (!next) {
+        localStorage.removeItem('baileys_api_key');
+        localStorage.removeItem('x_api_key');
+        return;
+      }
+      localStorage.setItem('baileys_api_key', next);
+      localStorage.setItem('x_api_key', next);
+      startEventStream();
     });
   }
 

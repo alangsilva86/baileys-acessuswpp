@@ -9,13 +9,17 @@ import {
   type MetricsRangeSummary,
 } from '../types';
 import { fetchJson, formatApiError } from '../../../lib/api';
+import { getSseToken } from '../../../lib/sseToken';
 
 export type MetricsRangePreset = '30m' | '2h' | '24h' | 'all';
+
+export type MetricsStreamState = 'idle' | 'connecting' | 'connected' | 'error';
 
 type InstanceMetricsSnapshot = {
   counters: InstanceMetricCounters;
   delivery: InstanceMetricDelivery;
   rate: InstanceMetricRate;
+  range: InstanceMetricsPayload['range'] | null;
   rangeSummary: MetricsRangeSummary | null;
   lastUpdated: number | null;
 };
@@ -25,6 +29,8 @@ type UseInstanceMetricsResult = {
   snapshot: InstanceMetricsSnapshot | null;
   isLoading: boolean;
   error: string | null;
+  streamState: MetricsStreamState;
+  streamError: string | null;
   lastUpdated: number | null;
   refresh: () => Promise<void>;
 };
@@ -95,12 +101,14 @@ function createSnapshotFromPayload(payload: InstanceMetricsPayload): InstanceMet
   const counters = normalizeCounters(payload.counters);
   const delivery = payload.delivery ?? buildDeliveryFromCounters(counters);
   const rate = normalizeRate(payload.rate ?? null);
-  const rangeSummary = payload.range?.summary ?? null;
-  const lastUpdated = payload.range?.effective?.to ?? Date.now();
+  const range = payload.range ?? null;
+  const rangeSummary = range?.summary ?? null;
+  const lastUpdated = range?.effective?.to ?? Date.now();
   return {
     counters,
     delivery,
     rate,
+    range,
     rangeSummary,
     lastUpdated,
   };
@@ -177,14 +185,16 @@ export default function useInstanceMetrics(
   const [snapshot, setSnapshot] = useState<InstanceMetricsSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [streamState, setStreamState] = useState<MetricsStreamState>('idle');
+  const [streamError, setStreamError] = useState<string | null>(null);
 
-  const fetchMetrics = useCallback(async () => {
+  const fetchMetrics = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!instanceId || !apiKey) {
       setSnapshot(null);
       return;
     }
-    setIsLoading(true);
-    setError(null);
+    if (!silent) setIsLoading(true);
+    if (!silent) setError(null);
     try {
       const qs = new URLSearchParams();
       const range = resolveRangeQuery(preset);
@@ -197,9 +207,11 @@ export default function useInstanceMetrics(
       );
       setSnapshot(createSnapshotFromPayload(payload));
     } catch (err) {
-      setError(formatApiError(err));
+      if (!silent) {
+        setError(formatApiError(err));
+      }
     } finally {
-      setIsLoading(false);
+      if (!silent) setIsLoading(false);
     }
   }, [apiKey, instanceId, preset]);
 
@@ -208,6 +220,8 @@ export default function useInstanceMetrics(
       setSnapshot(null);
       setError(null);
       setIsLoading(false);
+      setStreamState('idle');
+      setStreamError(null);
       return;
     }
     void fetchMetrics();
@@ -220,8 +234,10 @@ export default function useInstanceMetrics(
     if (typeof EventSource === 'undefined') {
       return undefined;
     }
-    const params = new URLSearchParams({ iid: instanceId, apiKey });
-    const source = new EventSource(`/instances/events?${params.toString()}`);
+    let cancelled = false;
+    let source: EventSource | null = null;
+    setStreamState('connecting');
+    setStreamError(null);
 
     const handleInstanceEvent = (event: MessageEvent) => {
       try {
@@ -234,28 +250,56 @@ export default function useInstanceMetrics(
           counters,
           delivery,
           rate,
+          range: previous?.range ?? null,
           rangeSummary: previous?.rangeSummary ?? null,
           lastUpdated: Date.now(),
         }));
-        setError(null);
+        setStreamError(null);
       } catch (err) {
         console.warn('useInstanceMetrics failed to parse event', err);
       }
     };
 
-    source.addEventListener('instance', handleInstanceEvent);
-    source.onerror = () => {
-      setError('Não foi possível manter o fluxo de métricas em tempo real.');
-    };
-    source.onopen = () => {
-      setError(null);
-    };
+    (async () => {
+      const token = await getSseToken(apiKey).catch(() => null);
+      if (cancelled) return;
+      if (!token) {
+        setStreamState('error');
+        setStreamError('Tempo real indisponível. Usando atualização periódica.');
+        return;
+      }
+
+      const params = new URLSearchParams({ iid: instanceId, sseToken: token });
+      source = new EventSource(`/instances/events?${params.toString()}`);
+
+      source.addEventListener('instance', handleInstanceEvent);
+      source.onerror = () => {
+        setStreamState('error');
+        setStreamError('Tempo real indisponível. Usando atualização periódica.');
+      };
+      source.onopen = () => {
+        setStreamState('connected');
+        setStreamError(null);
+      };
+    })();
 
     return () => {
-      source.removeEventListener('instance', handleInstanceEvent);
-      source.close();
+      cancelled = true;
+      if (source) {
+        source.removeEventListener('instance', handleInstanceEvent);
+        source.close();
+      }
     };
   }, [apiKey, instanceId]);
+
+  useEffect(() => {
+    if (!instanceId || !apiKey) return undefined;
+    if (streamState === 'connected') return undefined;
+    const id = window.setInterval(() => {
+      void fetchMetrics({ silent: true });
+    }, 10_000);
+    return () => window.clearInterval(id);
+  }, [apiKey, fetchMetrics, instanceId, streamState]);
 
   const metrics = useMemo(() => buildMetricCards(snapshot, preset), [preset, snapshot]);
 
@@ -264,7 +308,9 @@ export default function useInstanceMetrics(
     snapshot,
     isLoading,
     error,
+    streamState,
+    streamError,
     lastUpdated: snapshot?.lastUpdated ?? null,
-    refresh: fetchMetrics,
+    refresh: () => fetchMetrics({ silent: false }),
   };
 }

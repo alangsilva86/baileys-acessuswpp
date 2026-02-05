@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { CheckCircle2, Loader, WifiOff, QrCode } from 'lucide-react';
 import type { InstanceStatus } from '../types';
+import { formatDateTime, formatRelativeTime } from '../../../lib/time';
 
 type InstanceListItemProps = {
   id: string;
@@ -46,19 +47,24 @@ export default function InstanceListItem({
 }: InstanceListItemProps) {
   const meta = STATUS_META[status] ?? STATUS_META.disconnected;
   const handleClick = () => onSelect?.(id);
+  const updatedAbsolute = updatedAt ? formatDateTime(updatedAt) : '';
+  const updatedRelative = updatedAt ? formatRelativeTime(updatedAt) : '';
+  const updatedLabel = updatedRelative || updatedAbsolute || 'Sem atualização';
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
+    <div
       aria-current={isActive ? 'true' : undefined}
-      className={`w-full rounded-xl border px-3 py-3 text-left transition ${
+      className={`group relative w-full rounded-xl border transition ${
         isActive
           ? 'border-slate-900 bg-slate-900 text-white shadow-sm'
           : 'border-slate-100 bg-white/80 text-slate-900 hover:border-slate-200 hover:bg-white'
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
+      <button
+        type="button"
+        onClick={handleClick}
+        className="w-full px-3 py-3 pr-12 text-left"
+      >
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex items-center gap-2">
             {meta.icon}
@@ -68,13 +74,20 @@ export default function InstanceListItem({
             <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${isActive ? 'bg-white/15 text-white' : meta.tone}`}>
               {meta.label}
             </span>
-            <span className={`text-[11px] ${isActive ? 'text-white/70' : 'text-slate-400'}`}>
-              {updatedAt || 'Sem atualizacao'}
+            <span
+              title={updatedAbsolute ? `Atualizado em ${updatedAbsolute}` : undefined}
+              className={`text-[11px] ${isActive ? 'text-white/70' : 'text-slate-400'}`}
+            >
+              {updatedLabel}
             </span>
           </div>
         </div>
-        {trailing ? <div className="flex items-center">{trailing}</div> : null}
-      </div>
-    </button>
+      </button>
+      {trailing ? (
+        <div className="absolute right-2 top-2 flex items-center">
+          {trailing}
+        </div>
+      ) : null}
+    </div>
   );
 }

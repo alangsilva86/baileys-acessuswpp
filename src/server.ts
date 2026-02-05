@@ -16,6 +16,7 @@ import { getProxyValidationMetrics } from './network/proxyValidator.js';
 import { startPipedriveBridge } from './services/pipedrive/bridge.js';
 import { assertPipedriveUiConfig } from './services/pipedrive/uiConfig.js';
 import { assertPipedriveRedisConfig } from './services/pipedrive/storeBackend.js';
+import { resolveSseToken } from './services/sseTokens.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
@@ -44,6 +45,7 @@ app.disable('x-powered-by');
 const SENSITIVE_QUERY_KEYS = new Set([
   'apikey',
   'api_key',
+  'ssetoken',
   'token',
   'jwt',
   'pd_token',
@@ -67,7 +69,7 @@ function sanitizeUrlForLog(raw: string): string {
     const search = url.searchParams.toString();
     return search ? `${url.pathname}?${search}` : url.pathname;
   } catch {
-    return raw.replace(/([?&])(apiKey|api_key|token|access_token|refresh_token|authorization|code)=([^&]+)/gi, '$1$2=[REDACTED]');
+    return raw.replace(/([?&])(apiKey|api_key|sseToken|token|access_token|refresh_token|authorization|code)=([^&]+)/gi, '$1$2=[REDACTED]');
   }
 }
 
@@ -85,6 +87,19 @@ function extractApiKey(req: Request): string {
   if (typeof queryKey === 'string' && queryKey.trim()) return queryKey.trim();
   if (Array.isArray(queryKey)) {
     const [first] = queryKey;
+    if (typeof first === 'string') {
+      const trimmed = first.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return '';
+}
+
+function extractSseToken(req: Request): string {
+  const queryToken = req.query.sseToken;
+  if (typeof queryToken === 'string' && queryToken.trim()) return queryToken.trim();
+  if (Array.isArray(queryToken)) {
+    const [first] = queryToken;
     if (typeof first === 'string') {
       const trimmed = first.trim();
       if (trimmed) return trimmed;
@@ -197,7 +212,9 @@ app.get('/', (_req, res) => {
 const streamClients = new Map<Response, { id: string }>();
 
 app.get('/stream', (req, res) => {
-  if (!isAuthorized(req)) {
+  const token = extractSseToken(req);
+  const tokenOk = Boolean(token && resolveSseToken(token));
+  if (!isAuthorized(req) && !tokenOk) {
     res.status(401).json({ error: 'unauthorized' });
     return;
   }

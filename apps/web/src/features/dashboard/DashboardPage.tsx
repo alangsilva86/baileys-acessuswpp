@@ -21,6 +21,7 @@ export default function DashboardPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [instanceName, setInstanceName] = useState('');
+  const [criticalToken, setCriticalToken] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -38,6 +39,17 @@ export default function DashboardPage() {
     () => instances.find((instance) => instance.id === selectedId) ?? null,
     [instances, selectedId],
   );
+
+  const isDeleteTokenOk = useMemo(() => {
+    if (!selectedInstance) return false;
+    const token = criticalToken.trim();
+    if (!token) return false;
+    const normalized = token.toLowerCase();
+    if (normalized === 'wipe') return true;
+    if (normalized === selectedInstance.id.toLowerCase()) return true;
+    if (normalized === selectedInstance.name.toLowerCase()) return true;
+    return false;
+  }, [criticalToken, selectedInstance]);
 
   useEffect(() => {
     if (!selectedInstance) {
@@ -71,8 +83,13 @@ export default function DashboardPage() {
 
   const handleDeleteInstance = useCallback(() => {
     if (!selectedInstance) return;
+    if (selectedInstance.id === 'default') {
+      pushToast('A instância padrão não pode ser excluída. Defina outra instância como padrão antes de continuar.', 'error');
+      return;
+    }
+    setCriticalToken('');
     setDeleteModalOpen(true);
-  }, [selectedInstance]);
+  }, [pushToast, selectedInstance]);
 
   const handleApiKeyChange = useCallback((value: string) => {
     setApiKey(value);
@@ -104,17 +121,22 @@ export default function DashboardPage() {
       pushToast('Informe a API key para excluir instancias.', 'error');
       return;
     }
+    if (!isDeleteTokenOk) {
+      pushToast('Confirme digitando o nome/ID da instância ou “WIPE”.', 'error');
+      return;
+    }
     setIsDeleting(true);
     try {
       await actions.deleteInstance(selectedInstance.id);
       setDeleteModalOpen(false);
+      setCriticalToken('');
       pushToast(`Instancia "${selectedInstance.name}" removida.`, 'success');
     } catch (err) {
       pushToast(formatApiError(err), 'error', 'Falha ao excluir');
     } finally {
       setIsDeleting(false);
     }
-  }, [actions, apiKey, isDeleting, pushToast, selectedInstance]);
+  }, [actions, apiKey, isDeleteTokenOk, isDeleting, pushToast, selectedInstance]);
 
   const header = (
     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -220,14 +242,20 @@ export default function DashboardPage() {
 
       <Modal
         open={deleteModalOpen}
-        title="Excluir instancia"
+        title="Excluir instância"
         description={selectedInstance ? `Tem certeza que deseja remover "${selectedInstance.name}"?` : undefined}
-        onClose={() => setDeleteModalOpen(false)}
+        onClose={() => {
+          setDeleteModalOpen(false);
+          setCriticalToken('');
+        }}
         footer={(
           <>
             <button
               type="button"
-              onClick={() => setDeleteModalOpen(false)}
+              onClick={() => {
+                setDeleteModalOpen(false);
+                setCriticalToken('');
+              }}
               className="rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-600"
             >
               Cancelar
@@ -235,15 +263,32 @@ export default function DashboardPage() {
             <button
               type="button"
               onClick={() => void handleConfirmDelete()}
-              disabled={isDeleting || !selectedInstance}
+              disabled={isDeleting || !selectedInstance || !isDeleteTokenOk}
               className={`rounded-lg px-3 py-2 text-xs text-white ${isDeleting ? 'bg-slate-400 cursor-not-allowed' : 'bg-rose-600 hover:bg-rose-700'}`}
             >
-              {isDeleting ? 'Excluindo...' : 'Excluir instancia'}
+              {isDeleting ? 'Excluindo…' : 'Excluir instância'}
             </button>
           </>
         )}
       >
-        <p className="text-xs text-slate-500">Essa acao remove a instancia e a sessao associada.</p>
+        <p className="text-xs text-slate-500">Essa ação remove a instância e a sessão associada.</p>
+        <label className="mt-4 text-xs font-semibold text-slate-600">Confirmação</label>
+        <input
+          value={criticalToken}
+          onChange={(event) => setCriticalToken(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              void handleConfirmDelete();
+            }
+          }}
+          placeholder={selectedInstance ? `Digite "${selectedInstance.id}" ou WIPE` : 'Digite WIPE'}
+          disabled={isDeleting}
+          className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700"
+        />
+        <p className={`mt-1 text-[11px] ${isDeleteTokenOk ? 'text-emerald-600' : 'text-slate-400'}`}>
+          {isDeleteTokenOk ? 'Confirmação aceita.' : 'Digite o nome/ID da instância ou “WIPE” para habilitar.'}
+        </p>
       </Modal>
 
       <ToastStack items={toasts} onDismiss={dismissToast} />

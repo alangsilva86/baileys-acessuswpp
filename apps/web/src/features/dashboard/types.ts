@@ -76,6 +76,25 @@ export type InstanceRiskSnapshot = {
   runtime: InstanceRiskRuntime;
 };
 
+export type NoteRevisionDiff = {
+  before: string;
+  after: string;
+  summary: string;
+};
+
+export type NoteRevision = {
+  timestamp: string;
+  author: string | null;
+  diff: NoteRevisionDiff;
+};
+
+export type InstanceMetadata = {
+  note: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  revisions: NoteRevision[];
+};
+
 export type InstanceNetworkSnapshot = {
   status: NetworkStatus;
   proxyUrl: string | null;
@@ -172,6 +191,8 @@ export type DashboardInstance = {
   updatedAt?: string;
   qrUrl?: string;
   note?: string;
+  metadata?: InstanceMetadata | null;
+  revisions?: NoteRevision[];
   userJid?: string | null;
   userPhone?: string | null;
   risk?: InstanceRiskSnapshot | null;

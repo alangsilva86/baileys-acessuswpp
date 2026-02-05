@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { DashboardInstance, InstanceStats, InstanceStatus } from '../types';
+import type { DashboardInstance, InstanceMetadata, InstanceStats, InstanceStatus, NoteRevision } from '../types';
 import { fetchJson, formatApiError } from '../../../lib/api';
 
 type ApiInstance = {
   id: string;
   name: string;
   note?: string;
-  metadata?: { note?: string | null } | null;
+  revisions?: unknown;
+  metadata?: {
+    note?: string | null;
+    createdAt?: string | null;
+    updatedAt?: string | null;
+    revisions?: unknown;
+  } | null;
   connectionState?: string | null;
   connectionUpdatedAt?: string | null;
   user?: { id?: string | null } | null;
@@ -40,17 +46,11 @@ type ApiInstance = {
   } | null;
 };
 
-function formatTimestamp(value?: string | null): string | undefined {
+function normalizeIso(value?: string | null): string | undefined {
   if (!value) return undefined;
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return undefined;
-  return new Intl.DateTimeFormat('pt-BR', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(parsed);
+  return parsed.toISOString();
 }
 
 function mapStatus(connectionState?: string | null): InstanceStatus {
@@ -106,11 +106,9 @@ function buildNetworkLabel(network?: ApiInstance['network']): string {
   return `${base}${latency ? ` • ${latency}` : ''}`;
 }
 
-function buildQrUrl(instanceId: string, apiKey: string): string {
+function buildQrUrl(instanceId: string): string {
   const encodedId = encodeURIComponent(instanceId);
-  if (!apiKey) return `/instances/${encodedId}/qr.png`;
-  const params = new URLSearchParams({ apiKey });
-  return `/instances/${encodedId}/qr.png?${params.toString()}`;
+  return `/instances/${encodedId}/qr.png`;
 }
 
 function extractPhoneFromJid(userJid?: string | null): string | null {
@@ -122,17 +120,57 @@ function extractPhoneFromJid(userJid?: string | null): string | null {
   return digits.length >= 10 ? digits : null;
 }
 
+function normalizeNoteRevisions(value: unknown): NoteRevision[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((rev) => {
+      if (!rev || typeof rev !== 'object') return null;
+      const record = rev as Record<string, any>;
+      const timestamp = typeof record.timestamp === 'string' ? record.timestamp : '';
+      if (!timestamp) return null;
+      const author = typeof record.author === 'string' ? record.author : null;
+      const diff = record.diff && typeof record.diff === 'object' ? (record.diff as Record<string, any>) : {};
+      return {
+        timestamp,
+        author,
+        diff: {
+          before: typeof diff.before === 'string' ? diff.before : '',
+          after: typeof diff.after === 'string' ? diff.after : '',
+          summary: typeof diff.summary === 'string' ? diff.summary : '',
+        },
+      } satisfies NoteRevision;
+    })
+    .filter(Boolean) as NoteRevision[];
+}
+
 function mapInstance(inst: ApiInstance, apiKey: string): DashboardInstance {
-  const note = typeof inst.note === 'string' ? inst.note : (typeof inst.metadata?.note === 'string' ? inst.metadata.note : '');
+  const noteBase =
+    typeof inst.note === 'string'
+      ? inst.note
+      : typeof inst.metadata?.note === 'string'
+      ? inst.metadata.note
+      : '';
+  const revisions = normalizeNoteRevisions(inst.metadata?.revisions ?? inst.revisions);
+  const metadata: InstanceMetadata | null = inst.metadata || revisions.length
+    ? {
+        note: typeof inst.metadata?.note === 'string' ? inst.metadata.note : noteBase,
+        createdAt: typeof inst.metadata?.createdAt === 'string' ? inst.metadata.createdAt : inst.metadata?.createdAt ?? null,
+        updatedAt: typeof inst.metadata?.updatedAt === 'string' ? inst.metadata.updatedAt : inst.metadata?.updatedAt ?? null,
+        revisions,
+      }
+    : null;
+  const note = metadata?.note ?? noteBase;
   const userJid = inst.user?.id ?? null;
   const userPhone = extractPhoneFromJid(userJid);
   return {
     id: inst.id,
     name: inst.name,
     status: mapStatus(inst.connectionState),
-    updatedAt: formatTimestamp(inst.connectionUpdatedAt) ?? undefined,
-    qrUrl: buildQrUrl(inst.id, apiKey),
+    updatedAt: normalizeIso(inst.connectionUpdatedAt) ?? undefined,
+    qrUrl: buildQrUrl(inst.id),
     note,
+    metadata,
+    revisions,
     userJid,
     userPhone,
     risk: inst.risk as any,
