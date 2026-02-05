@@ -71,6 +71,19 @@ interface CreateWebhookPayload {
   version?: string;
 }
 
+interface UsersMeResponse {
+  data?: {
+    id?: number | string;
+    user_id?: number | string;
+    company_id?: number | string;
+    companyId?: number | string;
+    userId?: number | string;
+    company?: number | string;
+    user?: number | string;
+  };
+  success?: boolean;
+}
+
 function buildApiBase(apiDomain?: string | null): string {
   if (PIPEDRIVE_API_BASE_URL_V1) return PIPEDRIVE_API_BASE_URL_V1.replace(/\/$/, '');
   if (apiDomain) {
@@ -102,6 +115,25 @@ function toNumber(value: unknown): number | null {
   return null;
 }
 
+function parseUsersMe(payload: unknown): { userId: number | null; companyId: number | null } {
+  const body = payload as UsersMeResponse | null;
+  const data = body?.data ?? (payload as any)?.data ?? null;
+  if (!data || typeof data !== 'object') return { userId: null, companyId: null };
+  const record = data as Record<string, unknown>;
+  const userId =
+    toNumber(record.id) ??
+    toNumber(record.user_id) ??
+    toNumber(record.userId) ??
+    toNumber(record.user) ??
+    null;
+  const companyId =
+    toNumber(record.company_id) ??
+    toNumber(record.companyId) ??
+    toNumber(record.company) ??
+    null;
+  return { userId, companyId };
+}
+
 async function pickToken(options: { companyId?: number | null; apiDomain?: string | null } = {}): Promise<PipedriveOAuthToken | null> {
   if (options.companyId != null) {
     const byCompany = await getTokenByCompanyId(options.companyId);
@@ -121,6 +153,14 @@ export class PipedriveClient {
     this.http = axios.create({ timeout: DEFAULT_TIMEOUT_MS });
   }
 
+  private async fetchUsersMe(options: { accessToken: string; apiDomain?: string | null }): Promise<{ userId: number | null; companyId: number | null }> {
+    const apiBase = buildApiBase(options.apiDomain ?? null);
+    const response = await this.http.get(`${apiBase}/users/me`, {
+      headers: { Authorization: `Bearer ${options.accessToken}` },
+    });
+    return parseUsersMe(response.data);
+  }
+
   async exchangeToken(code: string, redirectUri: string): Promise<PipedriveOAuthToken> {
     const url = `${PIPEDRIVE_OAUTH_BASE_URL.replace(/\/$/, '')}/oauth/token`;
     const body = new URLSearchParams({
@@ -134,7 +174,7 @@ export class PipedriveClient {
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
     });
     const data = response.data as OAuthTokenResponse;
-    return upsertToken({
+    const token = await upsertToken({
       access_token: data.access_token,
       refresh_token: data.refresh_token ?? null,
       expires_at: computeExpiresAt(data.expires_in),
@@ -143,6 +183,28 @@ export class PipedriveClient {
       user_id: toNumber(data.user_id),
       scope: data.scope ?? null,
     });
+
+    if (!token.company_id || !token.user_id) {
+      try {
+        const meta = await this.fetchUsersMe({ accessToken: token.access_token, apiDomain: token.api_domain ?? null });
+        if (meta.companyId || meta.userId) {
+          return await upsertToken({
+            id: token.id,
+            access_token: token.access_token,
+            refresh_token: token.refresh_token,
+            expires_at: token.expires_at,
+            api_domain: token.api_domain,
+            company_id: meta.companyId ?? token.company_id ?? null,
+            user_id: meta.userId ?? token.user_id ?? null,
+            scope: token.scope,
+          });
+        }
+      } catch {
+        // ignore users/me failures (OAuth token still usable)
+      }
+    }
+
+    return token;
   }
 
   async refreshToken(token: PipedriveOAuthToken): Promise<PipedriveOAuthToken> {

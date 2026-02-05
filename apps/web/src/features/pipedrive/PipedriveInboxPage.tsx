@@ -50,10 +50,34 @@ type MessagesPage = {
   nextBeforeTsMs: number | null;
 };
 
+const TOKEN_PARAM_CANDIDATES = ['token', 'jwt', 'pd_token', 'pdToken', 'auth_token', 'authToken', 'userToken'];
+
+function readFirstParam(params: URLSearchParams, keys: string[]): string {
+  const lower = new Map<string, string>();
+  for (const [key, value] of params.entries()) {
+    lower.set(key.toLowerCase(), value);
+  }
+  for (const key of keys) {
+    const value = lower.get(key.toLowerCase());
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
 function parseToken(): string {
   if (typeof window === 'undefined') return '';
   const params = new URLSearchParams(window.location.search);
-  return params.get('token')?.trim() || '';
+  const tokenFromQuery = readFirstParam(params, TOKEN_PARAM_CANDIDATES);
+  if (tokenFromQuery) return tokenFromQuery;
+
+  const hash = window.location.hash?.replace(/^#/, '') ?? '';
+  if (hash) {
+    const hashParams = new URLSearchParams(hash);
+    const tokenFromHash = readFirstParam(hashParams, TOKEN_PARAM_CANDIDATES);
+    if (tokenFromHash) return tokenFromHash;
+  }
+
+  return '';
 }
 
 function formatTs(value: string | null): string {
@@ -71,6 +95,11 @@ function formatTs(value: string | null): string {
 
 export default function PipedriveInboxPage() {
   const token = useMemo(() => parseToken(), []);
+  const queryKeys = useMemo(() => {
+    if (typeof window === 'undefined') return [];
+    const params = new URLSearchParams(window.location.search);
+    return Array.from(new Set(Array.from(params.keys()).map((key) => key.trim()).filter(Boolean))).sort();
+  }, []);
   const [bootstrap, setBootstrap] = useState<BootstrapPayload | null>(null);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [isBootstrapping, setIsBootstrapping] = useState(false);
@@ -93,7 +122,7 @@ export default function PipedriveInboxPage() {
 
   const refreshBootstrap = useCallback(async () => {
     if (!token) {
-      setBootstrapError('Token ausente na URL do iframe.');
+      setBootstrapError('Token ausente na URL do painel do Pipedrive.');
       setBootstrap(null);
       return;
     }
@@ -226,6 +255,19 @@ export default function PipedriveInboxPage() {
         <div className="mx-auto max-w-3xl rounded-2xl border border-rose-100 bg-white p-6 text-sm text-rose-700 shadow-sm">
           <p className="font-semibold">Pipedrive Inbox</p>
           <p className="mt-2">{bootstrapError}</p>
+          {!token ? (
+            <div className="mt-3 space-y-2 text-[11px] text-slate-600">
+              <p>
+                Isso normalmente acontece quando o Pipedrive não está enviando o token na URL do painel. Abra dentro do Pipedrive e confirme que o link do painel contém
+                <span className="font-mono"> token=</span> (ou <span className="font-mono">jwt=</span>).
+              </p>
+              {queryKeys.length ? (
+                <p className="break-words">
+                  Parâmetros recebidos: <span className="font-mono">{queryKeys.join(', ')}</span>
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           <button
             type="button"
             onClick={() => void refreshBootstrap()}
@@ -264,7 +306,7 @@ export default function PipedriveInboxPage() {
                 onChange={(e) => setDefaultInstanceId(e.target.value)}
                 className="w-56 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 shadow-sm"
               >
-                <option value="">Selecione uma instância…</option>
+                <option value="">Desativado</option>
                 {bootstrap.instances.map((inst) => (
                   <option key={inst.id} value={inst.id} disabled={inst.linked_company_id && inst.linked_company_id !== bootstrap.companyId}>
                     {inst.name} {inst.connected ? '' : '(offline)'}
@@ -274,7 +316,7 @@ export default function PipedriveInboxPage() {
               <button
                 type="button"
                 onClick={() => void handleSaveInstance()}
-                disabled={!defaultInstanceId || isSavingInstance}
+                disabled={isSavingInstance}
                 className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300"
               >
                 {isSavingInstance ? 'Salvando…' : 'Salvar'}
