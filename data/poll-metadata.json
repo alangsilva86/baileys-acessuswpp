@@ -9,10 +9,11 @@
       "Produto A",
       "Produto B",
       "Unknown",
+      "Produto Especial",
       "Produto Especial"
     ],
     "selectableCount": null,
-    "updatedAt": 1770268825531
+    "updatedAt": 1770300331442
   },
   "556200000000@g.us#poll-message-id": {
     "pollKey": "556200000000@g.us#poll-message-id",
@@ -24,6 +25,6 @@
       "Produto A"
     ],
     "selectableCount": null,
-    "updatedAt": 1770268825535
+    "updatedAt": 1770300331447
   }
 }
