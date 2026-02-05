@@ -189,7 +189,26 @@ Mensagem recebida (`MESSAGE_INBOUND`):
 }
 ```
 
-### Pipedrive (Messaging App Extension)
+### Pipedrive
+
+#### Inbox embutido (pós‑Channels) — App Extensions (iframe)
+
+Como a Channels API foi descontinuada em **01/02/2026**, o caminho recomendado para ter um "chat dentro do Pipedrive" é usar **Custom UI Extensions** (iframe) e sincronizar o CRM via APIs públicas (v2‑first + Notes v1).
+
+- **URL do iframe (Developer Hub)**: aponte para `GET /ui/pipedrive` (ex.: `https://SEU_DOMINIO/ui/pipedrive`)
+- **Autenticação**: o Pipedrive injeta `token` (JWT) na URL do iframe; o backend valida com `PIPEDRIVE_UI_JWT_SECRET` e usa o `companyId` como boundary de tenant
+- **Storage/concorrência**: requer Redis (`PIPEDRIVE_STORE_BACKEND=redis` + `PIPEDRIVE_REDIS_URL` ou `REDIS_URL`) para conversas, dedupe, locks e batching de Notes
+- **Vincular instância**: dentro do iframe, selecione a instância padrão e clique em **Salvar** (isso vincula `companyId → instanceId`)
+
+Env vars principais:
+
+- `PIPEDRIVE_UI_ENABLED=1`
+- `PIPEDRIVE_UI_JWT_SECRET=...` (**obrigatório em produção**)
+- `PIPEDRIVE_STORE_BACKEND=redis` e `PIPEDRIVE_REDIS_URL` (ou `REDIS_URL`)
+
+> Nota: neste modelo, as mensagens **não aparecem** em **Leads → Messaging** (nativo). Elas ficam no seu **Inbox embutido** e são registradas no CRM como **Notes** na **Person**.
+
+#### Messaging App Extension (Channels API v1) — legado
 
 Esta integração expõe os endpoints exigidos pelo **Messaging App Extension** do Pipedrive e sincroniza mensagens em **dual‑mode**:
 

@@ -11,8 +11,11 @@ import instanceRoutes from './routes/instances.js';
 import pipedriveRoutes from './routes/pipedrive.js';
 import { brokerEventEmitter, brokerEventStore, type BrokerEvent } from './broker/eventStore.js';
 import { initSendQueue, startSendWorker } from './queue/sendQueue.js';
+import { initPipedriveNotesQueue, startPipedriveNotesWorker } from './queue/pipedriveNotesQueue.js';
 import { getProxyValidationMetrics } from './network/proxyValidator.js';
 import { startPipedriveBridge } from './services/pipedrive/bridge.js';
+import { assertPipedriveUiConfig } from './services/pipedrive/uiConfig.js';
+import { assertPipedriveRedisConfig } from './services/pipedrive/storeBackend.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
@@ -34,27 +37,67 @@ const SPA_FALLBACK_EXCLUDE_PREFIXES = ['/instances', '/webhooks', '/pipedrive'];
 const app = express();
 app.disable('x-powered-by');
 
+const SENSITIVE_QUERY_KEYS = new Set([
+  'apikey',
+  'api_key',
+  'token',
+  'access_token',
+  'refresh_token',
+  'authorization',
+  'code',
+  'secret',
+  'signature',
+]);
+
+function sanitizeUrlForLog(raw: string): string {
+  try {
+    const url = new URL(raw, 'http://localhost');
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (SENSITIVE_QUERY_KEYS.has(key.toLowerCase())) {
+        url.searchParams.set(key, '[REDACTED]');
+      }
+    }
+    const search = url.searchParams.toString();
+    return search ? `${url.pathname}?${search}` : url.pathname;
+  } catch {
+    return raw.replace(/([?&])(apiKey|api_key|token|access_token|refresh_token|authorization|code)=([^&]+)/gi, '$1$2=[REDACTED]');
+  }
+}
+
+function parseFrameAncestors(value: string | undefined): string[] {
+  const raw = (value || '').trim();
+  if (!raw) return [];
+  return raw
+    .split(/[,\s]+/g)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 const defaultCsp = helmet.contentSecurityPolicy.getDefaultDirectives();
+const baseCspDirectives = {
+  ...defaultCsp,
+  'script-src': [
+    ...(defaultCsp['script-src'] ?? []),
+    'https://cdn.jsdelivr.net',
+  ],
+  'connect-src': Array.from(
+    new Set([
+      ...(defaultCsp['connect-src'] ?? ["'self'"]),
+      "'self'",
+      'https://cdn.jsdelivr.net',
+    ]),
+  ),
+  'img-src': [
+    ...(defaultCsp['img-src'] ?? []),
+    'blob:',
+  ],
+} as const;
+
 app.use(
   helmet({
     contentSecurityPolicy: {
       directives: {
-        ...defaultCsp,
-        'script-src': [
-          ...(defaultCsp['script-src'] ?? []),
-          'https://cdn.jsdelivr.net',
-        ],
-        'connect-src': Array.from(
-          new Set([
-            ...(defaultCsp['connect-src'] ?? ["'self'"]),
-            "'self'",
-            'https://cdn.jsdelivr.net',
-          ]),
-        ),
-        'img-src': [
-          ...(defaultCsp['img-src'] ?? []),
-          'blob:',
-        ],
+        ...baseCspDirectives,
       },
     },
   }),
@@ -67,13 +110,14 @@ app.use((req, res, next) => {
   const request = req as RequestWithId;
   request.id = crypto.randomUUID();
   const start = Date.now();
-  logger.info({ reqId: request.id, method: req.method, url: req.url }, 'request.start');
+  const safeUrl = sanitizeUrlForLog(req.url);
+  logger.info({ reqId: request.id, method: req.method, url: safeUrl }, 'request.start');
   res.on('finish', () => {
     logger.info(
       {
         reqId: request.id,
         method: req.method,
-        url: req.url,
+        url: safeUrl,
         statusCode: res.statusCode,
         ms: Date.now() - start,
       },
@@ -85,6 +129,19 @@ app.use((req, res, next) => {
 
 app.use('/instances', instanceRoutes);
 app.use('/pipedrive', pipedriveRoutes);
+
+const PIPEDRIVE_FRAME_ANCESTORS = parseFrameAncestors(process.env.PIPEDRIVE_UI_FRAME_ANCESTORS ?? 'https://*.pipedrive.com');
+const pipedriveEmbedCsp = helmet.contentSecurityPolicy({
+  directives: {
+    ...baseCspDirectives,
+    'frame-ancestors': ["'self'", ...PIPEDRIVE_FRAME_ANCESTORS],
+  },
+});
+
+app.get(['/ui/pipedrive', '/ui/pipedrive/*'], pipedriveEmbedCsp, (_req, res) => {
+  res.removeHeader('X-Frame-Options');
+  res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+});
 
 app.get('/health', (_req, res) => {
   const instances = getAllInstances().map((inst) => ({
@@ -187,10 +244,14 @@ app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
 });
 
 async function main(): Promise<void> {
+  assertPipedriveUiConfig();
+  assertPipedriveRedisConfig();
   await loadInstances();
   await initSendQueue();
+  await initPipedriveNotesQueue();
   await startAllInstances();
   await startSendWorker();
+  await startPipedriveNotesWorker();
   startPipedriveBridge();
   app.listen(PORT, () => {
     logger.info({ port: PORT }, 'server.listening');

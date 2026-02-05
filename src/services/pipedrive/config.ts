@@ -20,6 +20,20 @@ function parseChannelsMode(value: string | undefined): 'dual' | 'channels' | 'v2
   return 'dual';
 }
 
+function parseStoreBackend(value: string | undefined): 'auto' | 'file' | 'redis' {
+  const normalized = (value || '').trim().toLowerCase();
+  if (normalized === 'file') return 'file';
+  if (normalized === 'redis') return 'redis';
+  return 'auto';
+}
+
+function parseNumberEnv(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return parsed;
+}
+
 export const PIPEDRIVE_ENABLED = isEnabled(process.env.PIPEDRIVE_ENABLED);
 export const PIPEDRIVE_SYNC_INBOUND = process.env.PIPEDRIVE_SYNC_INBOUND
   ? isEnabled(process.env.PIPEDRIVE_SYNC_INBOUND)
@@ -61,6 +75,54 @@ export const PIPEDRIVE_AUTOMATION_TEMPLATE_DEAL_STAGE =
   process.env.PIPEDRIVE_AUTOMATION_TEMPLATE_DEAL_STAGE ?? '';
 export const PIPEDRIVE_AUTOMATION_TEMPLATE_ACTIVITY =
   process.env.PIPEDRIVE_AUTOMATION_TEMPLATE_ACTIVITY ?? '';
+
+export const PIPEDRIVE_UI_ENABLED = process.env.PIPEDRIVE_UI_ENABLED
+  ? isEnabled(process.env.PIPEDRIVE_UI_ENABLED)
+  : false;
+export const PIPEDRIVE_UI_JWT_SECRET = process.env.PIPEDRIVE_UI_JWT_SECRET ?? '';
+export const PIPEDRIVE_UI_JWT_MAX_AGE_SECONDS = Math.floor(
+  parseNumberEnv(process.env.PIPEDRIVE_UI_JWT_MAX_AGE_SECONDS, 900),
+);
+export const PIPEDRIVE_UI_FRAME_ANCESTORS = process.env.PIPEDRIVE_UI_FRAME_ANCESTORS ?? 'https://*.pipedrive.com';
+
+export const PIPEDRIVE_STORE_BACKEND = parseStoreBackend(process.env.PIPEDRIVE_STORE_BACKEND);
+export const PIPEDRIVE_REDIS_PREFIX = (process.env.PIPEDRIVE_REDIS_PREFIX ?? 'pd').trim() || 'pd';
+export const PIPEDRIVE_REDIS_URL =
+  process.env.PIPEDRIVE_REDIS_URL ??
+  process.env.REDIS_URL ??
+  process.env.REDIS_DSN ??
+  process.env.REDIS_CONNECTION_STRING ??
+  '';
+
+export const PIPEDRIVE_NOTES_FLUSH_DEBOUNCE_MS = Math.max(
+  250,
+  Math.floor(parseNumberEnv(process.env.PIPEDRIVE_NOTES_FLUSH_DEBOUNCE_MS, 2500)),
+);
+export const PIPEDRIVE_NOTES_MAX_BYTES = Math.max(
+  1_000,
+  Math.floor(parseNumberEnv(process.env.PIPEDRIVE_NOTES_MAX_BYTES, 95_000)),
+);
+export const PIPEDRIVE_NOTES_BLOCK_BASE_WINDOW_MINUTES = Math.max(
+  1,
+  Math.floor(parseNumberEnv(process.env.PIPEDRIVE_NOTES_BLOCK_BASE_WINDOW_MINUTES, 15)),
+);
+export const PIPEDRIVE_NOTES_BLOCK_MIN_WINDOW_MINUTES = Math.max(
+  1,
+  Math.floor(parseNumberEnv(process.env.PIPEDRIVE_NOTES_BLOCK_MIN_WINDOW_MINUTES, 5)),
+);
+export const PIPEDRIVE_NOTES_BLOCK_MAX_WINDOW_MINUTES = Math.max(
+  PIPEDRIVE_NOTES_BLOCK_MIN_WINDOW_MINUTES,
+  Math.floor(parseNumberEnv(process.env.PIPEDRIVE_NOTES_BLOCK_MAX_WINDOW_MINUTES, 60)),
+);
+
+export const PIPEDRIVE_LOCAL_MESSAGES_TTL_DAYS = Math.max(
+  1,
+  Math.floor(parseNumberEnv(process.env.PIPEDRIVE_LOCAL_MESSAGES_TTL_DAYS, 30)),
+);
+export const PIPEDRIVE_MESSAGE_DEDUPE_TTL_DAYS = Math.max(
+  1,
+  Math.floor(parseNumberEnv(process.env.PIPEDRIVE_MESSAGE_DEDUPE_TTL_DAYS, 30)),
+);
 
 const MAX_CONVERSATIONS_DEFAULT = 200;
 const MAX_MESSAGES_DEFAULT = 200;

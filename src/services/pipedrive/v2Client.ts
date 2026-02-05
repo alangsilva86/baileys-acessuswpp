@@ -22,6 +22,11 @@ export interface PipedriveV2Person {
   phones?: PipedriveV2PersonPhone[];
 }
 
+export interface PipedriveV2Activity {
+  id: number;
+  subject: string;
+}
+
 interface PipedriveV2Pagination {
   next_cursor?: string | null;
 }
@@ -59,6 +64,13 @@ function normalizePerson(raw: any): PipedriveV2Person | null {
   if (!name) return null;
   const phone = Array.isArray(raw?.phone) ? raw.phone : Array.isArray(raw?.phones) ? raw.phones : undefined;
   return { id, name, phone: Array.isArray(phone) ? phone : undefined };
+}
+
+function normalizeActivity(raw: any): PipedriveV2Activity | null {
+  const id = typeof raw?.id === 'number' ? raw.id : typeof raw?.id === 'string' ? Number(raw.id) : NaN;
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const subject = typeof raw?.subject === 'string' ? raw.subject : '';
+  return { id, subject };
 }
 
 export class PipedriveV2Client {
@@ -182,7 +194,39 @@ export class PipedriveV2Client {
     }
     throw lastError instanceof Error ? lastError : new Error('pipedrive_v2_create_person_failed');
   }
+
+  async createActivity(options: {
+    subject: string;
+    type?: string | null;
+    dueDate?: string | null;
+    dueTime?: string | null;
+    personId: number;
+    dealId?: number | null;
+    companyId?: number | null;
+    apiDomain?: string | null;
+  }): Promise<PipedriveV2Activity> {
+    const token = await this.getToken({ companyId: options.companyId ?? null, apiDomain: options.apiDomain ?? null });
+    const apiBase = buildApiBase(token.api_domain ?? options.apiDomain ?? null);
+
+    const payload: Record<string, unknown> = {
+      subject: options.subject,
+      type: options.type ?? 'task',
+      person_id: options.personId,
+    };
+    if (options.dueDate) payload.due_date = options.dueDate;
+    if (options.dueTime) payload.due_time = options.dueTime;
+    if (typeof options.dealId === 'number') payload.deal_id = options.dealId;
+
+    const response = await this.http.post(`${apiBase}/activities`, payload, {
+      headers: { Authorization: `Bearer ${token.access_token}` },
+    });
+
+    const data = response.data as PipedriveV2Response<any> | null;
+    const activityRaw = (data as any)?.data ?? data;
+    const activity = normalizeActivity(activityRaw);
+    if (!activity) throw new Error('pipedrive_v2_activity_invalid');
+    return activity;
+  }
 }
 
 export const pipedriveV2Client = new PipedriveV2Client();
-

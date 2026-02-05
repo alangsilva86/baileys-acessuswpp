@@ -22,6 +22,7 @@ import {
   PIPEDRIVE_CHANNEL_AVATAR_URL,
   PIPEDRIVE_CHANNELS_MODE,
   PIPEDRIVE_FALLBACK_NOTES_ENABLED,
+  PIPEDRIVE_UI_ENABLED,
   PIPEDRIVE_WEBHOOK_USER,
   PIPEDRIVE_WEBHOOK_PASS,
   PIPEDRIVE_WEBHOOK_EVENTS,
@@ -42,6 +43,7 @@ import {
   getChannelByProviderId,
   getSourceUserId,
   listChannels,
+  listTokens,
   listConversations,
   removeChannelByProviderId,
   removeConversationsByProviderId,
@@ -51,6 +53,11 @@ import {
 import type { PipedriveChannelRecord } from '../services/pipedrive/store.js';
 import { markPipedriveOutbound } from '../services/pipedrive/bridge.js';
 import type { PipedriveMessage, PipedriveParticipant } from '../services/pipedrive/types.js';
+import { resolvePipedriveStoreBackend } from '../services/pipedrive/storeBackend.js';
+import { getPipedriveRedisStore } from '../services/pipedrive/redisStoreInstance.js';
+import { verifyPipedriveUiJwt, type PipedriveUiJwtClaims } from '../services/pipedrive/uiJwt.js';
+import { enqueuePipedriveNoteEvent } from '../queue/pipedriveNotesQueue.js';
+import { pipedriveV2Client } from '../services/pipedrive/v2Client.js';
 
 const router = Router();
 const logger = pino({ level: process.env.LOG_LEVEL || 'info', base: { service: 'pipedrive-routes' } });
@@ -277,6 +284,15 @@ function resolveTargetJid(conversationId: string): string | null {
   return `${normalized}@s.whatsapp.net`;
 }
 
+function resolveConversationKey(input: string): string | null {
+  const raw = (input || '').trim();
+  if (!raw) return null;
+  const digits = raw.replace(/\D+/g, '');
+  if (!digits) return null;
+  const normalized = normalizeToE164BR(digits) ?? digits;
+  return `+${normalized}`;
+}
+
 function guessMediaType(mimetype: string | undefined): MediaMessageType {
   if (!mimetype) return 'document';
   if (mimetype.startsWith('image/')) return 'image';
@@ -309,6 +325,39 @@ router.get('/manifest.json', (req, res) => {
   const version = typeof req.query.version === 'string' && req.query.version.trim() ? req.query.version.trim() : null;
   res.json(buildManifest(resolveBaseUrl(req), { version }));
 });
+
+type UiAuthedRequest = Request & { pipedriveUi?: PipedriveUiJwtClaims };
+
+function extractBearer(req: Request): string {
+  const header = req.header('authorization') || '';
+  const [scheme, token] = header.split(' ');
+  if (!scheme || scheme.toLowerCase() !== 'bearer' || !token) return '';
+  return token.trim();
+}
+
+function pipedriveUiAuth(req: Request, res: Response, next: NextFunction): void {
+  if (!PIPEDRIVE_UI_ENABLED) {
+    res.status(404).json({ error: 'pipedrive_ui_disabled' });
+    return;
+  }
+  if (resolvePipedriveStoreBackend() !== 'redis') {
+    res.status(503).json({ error: 'pipedrive_store_backend_unavailable' });
+    return;
+  }
+  const token = extractBearer(req);
+  if (!token) {
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+  try {
+    const claims = verifyPipedriveUiJwt(token);
+    (req as UiAuthedRequest).pipedriveUi = claims;
+    next();
+  } catch (err: any) {
+    logger.warn({ err: err?.message ?? err }, 'ui.jwt.invalid');
+    res.status(401).json({ error: 'unauthorized', message: err?.message ?? 'jwt_invalid' });
+  }
+}
 
 router.get('/oauth/start', (req, res) => {
   if (!PIPEDRIVE_CLIENT_ID || !PIPEDRIVE_CLIENT_SECRET) {
@@ -769,6 +818,75 @@ router.get('/admin/metrics', apiKeyAuth, async (_req, res) => {
   res.json({ success: true, data: metrics });
 });
 
+router.get('/admin/company-config', apiKeyAuth, async (_req, res) => {
+  if (resolvePipedriveStoreBackend() !== 'redis') {
+    res.status(503).json({ error: 'pipedrive_store_backend_unavailable' });
+    return;
+  }
+
+  const store = getPipedriveRedisStore();
+  const tokens = await listTokens();
+  const companies = Array.from(
+    new Set(
+      tokens
+        .map((token) => (typeof token.company_id === 'number' ? token.company_id : null))
+        .filter(Boolean) as number[],
+    ),
+  ).sort((a, b) => a - b);
+
+  const data = await Promise.all(
+    companies.map(async (companyId) => {
+      const config = await store.getCompanyConfig(companyId);
+      const instances = await store.listCompanyInstances(companyId);
+      return {
+        companyId,
+        apiDomain: config.api_domain,
+        defaultInstanceId: config.default_instance_id,
+        instances,
+        updatedAt: config.updated_at_iso,
+      };
+    }),
+  );
+
+  res.json({ success: true, data });
+});
+
+router.post('/admin/company-config', apiKeyAuth, async (req, res) => {
+  if (resolvePipedriveStoreBackend() !== 'redis') {
+    res.status(503).json({ error: 'pipedrive_store_backend_unavailable' });
+    return;
+  }
+
+  const companyIdRaw = typeof req.body?.companyId === 'number' ? req.body.companyId : Number(req.body?.companyId);
+  const companyId = Number.isFinite(companyIdRaw) && companyIdRaw > 0 ? Math.floor(companyIdRaw) : null;
+  const instanceId = typeof req.body?.defaultInstanceId === 'string'
+    ? req.body.defaultInstanceId.trim()
+    : typeof req.body?.instanceId === 'string'
+    ? req.body.instanceId.trim()
+    : '';
+
+  if (!companyId || !instanceId) {
+    res.status(400).json({ error: 'companyId_and_instanceId_required' });
+    return;
+  }
+
+  const inst = getInstance(instanceId);
+  if (!inst) {
+    res.status(404).json({ error: 'instance_not_found' });
+    return;
+  }
+
+  const store = getPipedriveRedisStore();
+  const tokenInfo = await pipedriveClient.getAccessToken({ companyId });
+  const apiDomain = tokenInfo?.token?.api_domain ?? null;
+  try {
+    const config = await store.linkInstanceToCompany({ companyId, instanceId, apiDomain, makeDefault: true });
+    res.json({ success: true, data: config });
+  } catch (err: any) {
+    res.status(409).json({ error: 'instance_conflict', message: err?.message ?? String(err) });
+  }
+});
+
 router.get('/admin/metrics/export', apiKeyAuth, async (req, res) => {
   const format = typeof req.query.format === 'string' ? req.query.format.trim().toLowerCase() : 'json';
   const download = req.query.download === '1' || req.query.download === 'true';
@@ -783,6 +901,239 @@ router.get('/admin/metrics/export', apiKeyAuth, async (req, res) => {
     return;
   }
   res.json({ success: true, data: metrics });
+});
+
+router.get('/ui/bootstrap', pipedriveUiAuth, async (req, res) => {
+  const claims = (req as UiAuthedRequest).pipedriveUi!;
+  const store = getPipedriveRedisStore();
+
+  const tokenInfo = await pipedriveClient.getAccessToken({ companyId: claims.companyId });
+  if (!tokenInfo) {
+    res.status(409).json({ error: 'pipedrive_token_missing' });
+    return;
+  }
+
+  const apiDomain = tokenInfo.token.api_domain ?? claims.apiDomain ?? null;
+  const currentConfig = await store.getCompanyConfig(claims.companyId);
+  if (!currentConfig.api_domain && apiDomain) {
+    await store.setCompanyConfig(claims.companyId, {
+      api_domain: apiDomain,
+      updated_at_iso: new Date().toISOString(),
+    });
+  }
+
+  const config = await store.getCompanyConfig(claims.companyId);
+  const allowed = await store.listCompanyInstances(claims.companyId);
+  const instances = getAllInstances().map((inst) => ({
+    id: inst.id,
+    name: inst.name || inst.id,
+    connected: inst.connectionState === 'open',
+    connectionState: inst.connectionState,
+    linked_company_id: null as number | null,
+  }));
+
+  await Promise.all(
+    instances.map(async (inst) => {
+      inst.linked_company_id = await store.getInstanceCompany(inst.id);
+    }),
+  );
+
+  const visibleInstances = instances.filter(
+    (inst) => !inst.linked_company_id || inst.linked_company_id === claims.companyId,
+  );
+
+  res.json({
+    success: true,
+    data: {
+      enabled: true,
+      companyId: claims.companyId,
+      userId: claims.userId,
+      apiDomain: config.api_domain ?? apiDomain,
+      defaultInstanceId: config.default_instance_id,
+      allowedInstanceIds: allowed,
+      instances: visibleInstances,
+    },
+  });
+});
+
+router.post('/ui/settings/default-instance', pipedriveUiAuth, async (req, res) => {
+  const claims = (req as UiAuthedRequest).pipedriveUi!;
+  const store = getPipedriveRedisStore();
+  const raw = typeof req.body?.instanceId === 'string' ? req.body.instanceId.trim() : '';
+
+  if (!raw) {
+    const config = await store.setCompanyConfig(claims.companyId, {
+      default_instance_id: null,
+      enabled: true,
+      updated_at_iso: new Date().toISOString(),
+    });
+    res.json({ success: true, data: config });
+    return;
+  }
+
+  const inst = getInstance(raw);
+  if (!inst) {
+    res.status(404).json({ error: 'instance_not_found' });
+    return;
+  }
+
+  const tokenInfo = await pipedriveClient.getAccessToken({ companyId: claims.companyId });
+  const apiDomain = tokenInfo?.token?.api_domain ?? claims.apiDomain ?? null;
+
+  try {
+    const config = await store.linkInstanceToCompany({
+      companyId: claims.companyId,
+      instanceId: raw,
+      apiDomain,
+      makeDefault: true,
+    });
+    res.json({ success: true, data: config });
+  } catch (err: any) {
+    res.status(409).json({ error: 'instance_conflict', message: err?.message ?? String(err) });
+  }
+});
+
+router.get('/ui/conversations', pipedriveUiAuth, async (req, res) => {
+  const claims = (req as UiAuthedRequest).pipedriveUi!;
+  const store = getPipedriveRedisStore();
+  const limit = parseLimit(req.query.limit, 50, 200);
+  const cursor = typeof req.query.cursor === 'string' ? req.query.cursor.trim() : null;
+  const result = await store.listConversations({ companyId: claims.companyId, limit, cursor });
+  res.json({ success: true, data: result });
+});
+
+router.get('/ui/conversations/:key/messages', pipedriveUiAuth, async (req, res) => {
+  const claims = (req as UiAuthedRequest).pipedriveUi!;
+  const store = getPipedriveRedisStore();
+  const conversationKey = req.params.key;
+  const limit = parseLimit(req.query.limit, 200, 500);
+  let beforeTsMs: number | null = null;
+  if (typeof req.query.before === 'string' && req.query.before.trim()) {
+    const raw = req.query.before.trim();
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric)) beforeTsMs = Math.floor(numeric);
+    else {
+      const parsed = new Date(raw);
+      if (!Number.isNaN(parsed.getTime())) beforeTsMs = parsed.getTime();
+    }
+  }
+
+  const result = await store.listConversationMessages({
+    companyId: claims.companyId,
+    conversationKey,
+    limit,
+    beforeTsMs,
+  });
+  res.json({ success: true, data: result });
+});
+
+router.post('/ui/conversations/:key/messages', pipedriveUiAuth, async (req, res) => {
+  const claims = (req as UiAuthedRequest).pipedriveUi!;
+  const store = getPipedriveRedisStore();
+  const config = await store.getCompanyConfig(claims.companyId);
+  const instanceId = config.default_instance_id;
+  if (!instanceId) {
+    res.status(409).json({ error: 'default_instance_missing' });
+    return;
+  }
+
+  const text = typeof req.body?.text === 'string'
+    ? req.body.text.trim()
+    : typeof req.body?.message === 'string'
+    ? req.body.message.trim()
+    : '';
+  if (!text) {
+    res.status(400).json({ error: 'text_required' });
+    return;
+  }
+
+  const conversationKey = req.params.key;
+  const digits = (conversationKey || '').replace(/\D+/g, '');
+  const normalized = normalizeToE164BR(digits) ?? digits;
+  if (!normalized) {
+    res.status(400).json({ error: 'invalid_conversation_key' });
+    return;
+  }
+  const targetJid = `${normalized}@s.whatsapp.net`;
+
+  const instance = await ensureInstanceStarted(instanceId, { name: instanceId });
+  if (!instance.sock || !instance.context?.messageService) {
+    res.status(503).json({ error: 'instance_unavailable' });
+    return;
+  }
+  if (!allowSend(instance)) {
+    res.status(429).json({ error: 'rate_limit_exceeded' });
+    return;
+  }
+
+  const timeoutMs = getSendTimeoutMs();
+  const sentMessage = await instance.context.messageService.sendText(targetJid, text, { timeoutMs });
+  const messageId = sentMessage?.key?.id ?? null;
+  if (!messageId) {
+    res.status(500).json({ error: 'message_id_missing' });
+    return;
+  }
+
+  const nowIso = new Date().toISOString();
+  const nowMs = Date.now();
+
+  await store.upsertConversationMessage({
+    companyId: claims.companyId,
+    conversationKey,
+    message: {
+      id: messageId,
+      ts_ms: nowMs,
+      created_at_iso: nowIso,
+      direction: 'outbound',
+      text,
+      instance_id: instanceId,
+    },
+  });
+
+  await enqueuePipedriveNoteEvent({
+    companyId: claims.companyId,
+    conversationKey,
+    messageId,
+    direction: 'outbound',
+    text,
+    instanceId,
+    contactPhone: `+${normalized}`,
+    createdAtIso: nowIso,
+  });
+
+  res.json({ success: true, data: { id: messageId } });
+});
+
+router.post('/ui/activities', pipedriveUiAuth, async (req, res) => {
+  const claims = (req as UiAuthedRequest).pipedriveUi!;
+  const subject = typeof req.body?.subject === 'string' ? req.body.subject.trim() : '';
+  const type = typeof req.body?.type === 'string' ? req.body.type.trim() : 'task';
+  const dueDate = typeof req.body?.due_date === 'string' ? req.body.due_date.trim() : typeof req.body?.dueDate === 'string' ? req.body.dueDate.trim() : '';
+  const dueTime = typeof req.body?.due_time === 'string' ? req.body.due_time.trim() : typeof req.body?.dueTime === 'string' ? req.body.dueTime.trim() : '';
+  const personId = typeof req.body?.person_id === 'number' ? req.body.person_id : typeof req.body?.personId === 'number' ? req.body.personId : null;
+  const dealId = typeof req.body?.deal_id === 'number' ? req.body.deal_id : typeof req.body?.dealId === 'number' ? req.body.dealId : null;
+
+  if (!subject || !personId) {
+    res.status(400).json({ error: 'subject_and_person_required' });
+    return;
+  }
+
+  try {
+    const created = await pipedriveV2Client.createActivity({
+      subject,
+      type,
+      dueDate,
+      dueTime,
+      personId,
+      dealId,
+      companyId: claims.companyId,
+      apiDomain: claims.apiDomain ?? null,
+    } as any);
+    res.json({ success: true, data: created });
+  } catch (err: any) {
+    const upstream = serializeAxiosError(err);
+    res.status(upstream?.status ? 502 : 500).json({ error: 'activity_create_failed', upstream });
+  }
 });
 
 router.post('/webhooks', pipedriveWebhookAuth, async (req, res) => {

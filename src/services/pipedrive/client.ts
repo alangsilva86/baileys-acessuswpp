@@ -58,6 +58,10 @@ interface CreateNotePayload {
   org_id?: number;
 }
 
+interface UpdateNotePayload {
+  content: string;
+}
+
 interface CreateWebhookPayload {
   subscription_url: string;
   event_action: string;
@@ -273,6 +277,51 @@ export class PipedriveClient {
     if (typeof options.orgId === 'number') payload.org_id = options.orgId;
 
     const response = await this.http.post(`${tokenInfo.apiBase}/notes`, payload, {
+      headers: { Authorization: `Bearer ${tokenInfo.token.access_token}` },
+    });
+    const data = response.data?.data ?? response.data;
+    const id = typeof data?.id === 'number' ? data.id : typeof data?.id === 'string' ? Number(data.id) : NaN;
+    if (!Number.isFinite(id) || id <= 0) throw new Error('pipedrive_note_id_missing');
+    return { id };
+  }
+
+  async getNote(options: {
+    id: number;
+    companyId?: number | null;
+    apiDomain?: string | null;
+  }): Promise<{ id: number; content: string }> {
+    const tokenInfo = await this.getAccessToken({
+      companyId: options.companyId ?? null,
+      apiDomain: options.apiDomain ?? null,
+    });
+    if (!tokenInfo) {
+      throw new Error('pipedrive_token_missing');
+    }
+    const response = await this.http.get(`${tokenInfo.apiBase}/notes/${options.id}`, {
+      headers: { Authorization: `Bearer ${tokenInfo.token.access_token}` },
+    });
+    const data = response.data?.data ?? response.data;
+    const id = typeof data?.id === 'number' ? data.id : typeof data?.id === 'string' ? Number(data.id) : NaN;
+    if (!Number.isFinite(id) || id <= 0) throw new Error('pipedrive_note_id_missing');
+    const content = typeof data?.content === 'string' ? data.content : '';
+    return { id, content };
+  }
+
+  async updateNote(options: {
+    id: number;
+    content: string;
+    companyId?: number | null;
+    apiDomain?: string | null;
+  }): Promise<{ id: number }> {
+    const tokenInfo = await this.getAccessToken({
+      companyId: options.companyId ?? null,
+      apiDomain: options.apiDomain ?? null,
+    });
+    if (!tokenInfo) {
+      throw new Error('pipedrive_token_missing');
+    }
+    const payload: UpdateNotePayload = { content: options.content };
+    const response = await this.http.put(`${tokenInfo.apiBase}/notes/${options.id}`, payload, {
       headers: { Authorization: `Bearer ${tokenInfo.token.access_token}` },
     });
     const data = response.data?.data ?? response.data;

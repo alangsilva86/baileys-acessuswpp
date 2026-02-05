@@ -12,6 +12,7 @@ import {
   recordPipedriveFallbackNote,
   recordPipedriveMessage,
 } from './metrics.js';
+import { resolvePipedriveStoreBackend } from './storeBackend.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info', base: { service: 'pipedrive-sync' } });
 
@@ -34,7 +35,8 @@ function getAxiosStatus(err: unknown): number | null {
 
 export type PipedriveSyncResult =
   | { mode: 'channels' }
-  | { mode: 'fallback_note'; noteId: number; reused: boolean; personId: number | null };
+  | { mode: 'fallback_note'; noteId: number; reused: boolean; personId: number | null }
+  | { mode: 'notes_batch' };
 
 export async function syncMessageToPipedrive(options: {
   providerChannelId: string;
@@ -68,6 +70,9 @@ export async function syncMessageToPipedrive(options: {
   const fallback = async (): Promise<PipedriveSyncResult> => {
     if (!PIPEDRIVE_FALLBACK_NOTES_ENABLED) {
       throw new Error('pipedrive_fallback_notes_disabled');
+    }
+    if (resolvePipedriveStoreBackend() === 'redis') {
+      return { mode: 'notes_batch' };
     }
     try {
       const note = await createFallbackNote({

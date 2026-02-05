@@ -2,6 +2,8 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import pino from 'pino';
 import { resolvePipedriveDataDir } from './dataDir.js';
+import { resolvePipedriveStoreBackend } from './storeBackend.js';
+import { getPipedriveRedisStore } from './redisStoreInstance.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info', base: { service: 'pipedrive-metrics' } });
 
@@ -59,6 +61,8 @@ const defaultStore: PipedriveMetricsData = {
   last: { message_at: null, webhook_at: null, automation_at: null },
 };
 
+const backend = resolvePipedriveStoreBackend();
+
 let storeCache: PipedriveMetricsData | null = null;
 let saveTimer: NodeJS.Timeout | null = null;
 
@@ -112,12 +116,91 @@ function inc(store: PipedriveMetricsData, key: NumericCounterKey, by = 1): void 
   }
 }
 
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+async function getRedisMetrics(): Promise<PipedriveMetricsData> {
+  const store = getPipedriveRedisStore();
+  const fields = await store.getMetricFields('global');
+  const counters: PipedriveMetricsCounters = { ...defaultCounters };
+
+  const numericKeys: NumericCounterKey[] = [
+    'messages_inbound',
+    'messages_outbound',
+    'channels_ok',
+    'channels_failed',
+    'fallback_notes_created',
+    'fallback_notes_reused',
+    'fallback_notes_failed',
+    'webhook_events_total',
+    'automations_sent',
+    'automations_skipped',
+    'automations_failed',
+  ];
+
+  for (const key of numericKeys) {
+    const raw = fields[key];
+    if (raw != null) {
+      const value = Number(raw);
+      if (Number.isFinite(value)) counters[key] = value;
+    }
+  }
+
+  const webhookByObject: Record<string, number> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (!key.startsWith('webhook_object:')) continue;
+    const obj = key.slice('webhook_object:'.length);
+    const num = Number(value);
+    if (obj && Number.isFinite(num)) webhookByObject[obj] = num;
+  }
+  counters.webhook_events_by_object = webhookByObject;
+
+  return {
+    version: 1,
+    updated_at: fields.updated_at ? String(fields.updated_at) : nowIso(),
+    counters,
+    last: {
+      message_at: fields.last_message_at ? String(fields.last_message_at) : null,
+      webhook_at: fields.last_webhook_at ? String(fields.last_webhook_at) : null,
+      automation_at: fields.last_automation_at ? String(fields.last_automation_at) : null,
+    },
+  };
+}
+
+async function recordRedisCounters(patch: {
+  inc?: Array<{ key: string; by: number }>;
+  set?: Record<string, string>;
+}): Promise<void> {
+  const store = getPipedriveRedisStore();
+  const now = nowIso();
+  const set: Record<string, string> = { updated_at: now, ...(patch.set ?? {}) };
+  await Promise.all([
+    ...(patch.inc ?? []).map((item) => store.incrMetric('global', item.key, item.by)),
+    store.setMetricFields('global', set),
+  ]);
+}
+
 export async function getPipedriveMetrics(): Promise<PipedriveMetricsData> {
+  if (backend === 'redis') {
+    try {
+      return await getRedisMetrics();
+    } catch (err: any) {
+      logger.warn({ err: err?.message ?? err }, 'metrics.redis.read_failed');
+    }
+  }
   const store = await loadStore();
   return JSON.parse(JSON.stringify(store)) as PipedriveMetricsData;
 }
 
 export async function recordPipedriveMessage(direction: 'inbound' | 'outbound'): Promise<void> {
+  if (backend === 'redis') {
+    await recordRedisCounters({
+      inc: [{ key: direction === 'inbound' ? 'messages_inbound' : 'messages_outbound', by: 1 }],
+      set: { last_message_at: nowIso() },
+    });
+    return;
+  }
   const store = await loadStore();
   if (direction === 'inbound') inc(store, 'messages_inbound', 1);
   else inc(store, 'messages_outbound', 1);
@@ -127,6 +210,12 @@ export async function recordPipedriveMessage(direction: 'inbound' | 'outbound'):
 }
 
 export async function recordPipedriveChannelsResult(result: 'ok' | 'failed'): Promise<void> {
+  if (backend === 'redis') {
+    await recordRedisCounters({
+      inc: [{ key: result === 'ok' ? 'channels_ok' : 'channels_failed', by: 1 }],
+    });
+    return;
+  }
   const store = await loadStore();
   inc(store, result === 'ok' ? 'channels_ok' : 'channels_failed', 1);
   touchUpdatedAt(store);
@@ -134,6 +223,16 @@ export async function recordPipedriveChannelsResult(result: 'ok' | 'failed'): Pr
 }
 
 export async function recordPipedriveFallbackNote(result: 'created' | 'reused' | 'failed'): Promise<void> {
+  if (backend === 'redis') {
+    const key =
+      result === 'created'
+        ? 'fallback_notes_created'
+        : result === 'reused'
+        ? 'fallback_notes_reused'
+        : 'fallback_notes_failed';
+    await recordRedisCounters({ inc: [{ key, by: 1 }] });
+    return;
+  }
   const store = await loadStore();
   if (result === 'created') inc(store, 'fallback_notes_created', 1);
   else if (result === 'reused') inc(store, 'fallback_notes_reused', 1);
@@ -143,6 +242,17 @@ export async function recordPipedriveFallbackNote(result: 'created' | 'reused' |
 }
 
 export async function recordPipedriveWebhookEvent(object: string | null): Promise<void> {
+  if (backend === 'redis') {
+    const key = object ? object.toLowerCase() : 'unknown';
+    await recordRedisCounters({
+      inc: [
+        { key: 'webhook_events_total', by: 1 },
+        { key: `webhook_object:${key}`, by: 1 },
+      ],
+      set: { last_webhook_at: nowIso() },
+    });
+    return;
+  }
   const store = await loadStore();
   inc(store, 'webhook_events_total', 1);
   const key = object ? object.toLowerCase() : 'unknown';
@@ -153,6 +263,19 @@ export async function recordPipedriveWebhookEvent(object: string | null): Promis
 }
 
 export async function recordPipedriveAutomation(result: 'sent' | 'skipped' | 'failed'): Promise<void> {
+  if (backend === 'redis') {
+    const key =
+      result === 'sent'
+        ? 'automations_sent'
+        : result === 'skipped'
+        ? 'automations_skipped'
+        : 'automations_failed';
+    await recordRedisCounters({
+      inc: [{ key, by: 1 }],
+      set: { last_automation_at: nowIso() },
+    });
+    return;
+  }
   const store = await loadStore();
   if (result === 'sent') inc(store, 'automations_sent', 1);
   else if (result === 'skipped') inc(store, 'automations_skipped', 1);
