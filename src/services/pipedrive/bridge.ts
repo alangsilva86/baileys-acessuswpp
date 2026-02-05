@@ -11,8 +11,8 @@ import {
   getSourceUserId,
   upsertConversationMessage,
 } from './store.js';
-import { pipedriveClient } from './client.js';
 import type { PipedriveMessage, PipedriveParticipant } from './types.js';
+import { syncMessageToPipedrive } from './sync.js';
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info', base: { service: 'pipedrive-bridge' } });
 const OUTBOUND_SKIP_TTL_MS = 10 * 60_000;
@@ -159,21 +159,24 @@ async function handleEvent(event: BrokerEvent): Promise<void> {
   const channel = await getChannelByProviderId(providerChannelId);
   if (!channel) {
     logger.debug({ providerChannelId }, 'bridge.channel.missing');
-    return;
   }
 
   try {
-    await pipedriveClient.receiveMessage(channel, {
-      conversation_id: conversationId,
-      conversation_link: link ?? undefined,
-      message_id: messageId,
-      message: messageText,
-      created_at: createdAt,
-      status: 'sent',
+    await syncMessageToPipedrive({
+      providerChannelId,
+      channel,
+      direction,
+      conversationId,
+      conversationLink: link,
+      messageId,
+      messageText,
+      createdAt,
       sender,
       attachments: [],
+      contactPhone: payload.contact?.phone ?? null,
+      contactName: payload.contact?.displayName ?? null,
     });
   } catch (err: any) {
-    logger.warn({ err: err?.message ?? err, providerChannelId, messageId }, 'bridge.receive.failed');
+    logger.warn({ err: err?.message ?? err, providerChannelId, messageId }, 'bridge.sync.failed');
   }
 }

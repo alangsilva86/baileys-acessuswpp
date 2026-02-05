@@ -191,9 +191,12 @@ Mensagem recebida (`MESSAGE_INBOUND`):
 
 ### Pipedrive (Messaging App Extension)
 
-Esta integração expõe os endpoints exigidos pelo **Messaging App Extension** do Pipedrive e sincroniza mensagens usando a Channels API (quando disponível).
+Esta integração expõe os endpoints exigidos pelo **Messaging App Extension** do Pipedrive e sincroniza mensagens em **dual‑mode**:
 
-> **Aviso**: a Channels API foi descontinuada em **1º de fevereiro de 2026**. Se o acesso foi liberado para vocês, prossigam; caso contrário, os endpoints podem falhar.
+- **Channels API v1** (Messaging App Extension) quando disponível.
+- **Fallback via Notes (v1) + Persons (v2)** quando a Channels API falhar/estiver indisponível ou quando `PIPEDRIVE_CHANNELS_MODE=v2`.
+
+> **Aviso**: a Channels API foi descontinuada em **1º de fevereiro de 2026**. Em `PIPEDRIVE_CHANNELS_MODE=dual`, falhas de Channels acionam o fallback automaticamente.
 
 #### 0) Pré-requisitos básicos
 
@@ -225,6 +228,12 @@ Configure no painel do Render (Settings → Environment):
 
 ```
 PIPEDRIVE_ENABLED=1
+PIPEDRIVE_CHANNELS_MODE=dual
+PIPEDRIVE_OAUTH_SCOPE=channels:full persons:full notes:full webhooks:full
+PIPEDRIVE_API_BASE_URL_V1=https://api.pipedrive.com/v1
+PIPEDRIVE_API_BASE_URL_V2=https://api.pipedrive.com/api/v2
+PIPEDRIVE_FALLBACK_NOTES_ENABLED=1
+PIPEDRIVE_FALLBACK_CREATE_PERSON=1
 PIPEDRIVE_CLIENT_ID=<PIPEDRIVE_CLIENT_ID>
 PIPEDRIVE_CLIENT_SECRET=<PIPEDRIVE_CLIENT_SECRET>
 PIPEDRIVE_PUBLIC_BASE_URL=<BASE_URL>
@@ -236,6 +245,11 @@ API_KEY=<API_KEY>
 
 Importante: ajuste o Redirect URI no Pipedrive também para `/pipedrive/oauth/callback`.
 
+Notas rápidas:
+- `PIPEDRIVE_CHANNELS_MODE=dual`: tenta Channels e faz fallback via Notes automaticamente.
+- `PIPEDRIVE_CHANNELS_MODE=channels`: força Channels (sem fallback).
+- `PIPEDRIVE_CHANNELS_MODE=v2`: não usa Channels; envia tudo via Notes.
+
 1.2) Local (`.env`)
 
 Se quiser testar localmente, crie `.env`:
@@ -246,6 +260,12 @@ PORT=3000
 API_KEY=<API_KEY>
 
 PIPEDRIVE_ENABLED=1
+PIPEDRIVE_CHANNELS_MODE=dual
+PIPEDRIVE_OAUTH_SCOPE=channels:full persons:full notes:full webhooks:full
+PIPEDRIVE_API_BASE_URL_V1=https://api.pipedrive.com/v1
+PIPEDRIVE_API_BASE_URL_V2=https://api.pipedrive.com/api/v2
+PIPEDRIVE_FALLBACK_NOTES_ENABLED=1
+PIPEDRIVE_FALLBACK_CREATE_PERSON=1
 PIPEDRIVE_CLIENT_ID=<PIPEDRIVE_CLIENT_ID>
 PIPEDRIVE_CLIENT_SECRET=<PIPEDRIVE_CLIENT_SECRET>
 PIPEDRIVE_PUBLIC_BASE_URL=http://localhost:3000
@@ -284,6 +304,8 @@ Resposta esperada:
 { "url": "https://oauth.pipedrive.com/oauth/authorize?..." }
 ```
 
+Obs: o endpoint também pode retornar `warnings` quando o `PIPEDRIVE_OAUTH_SCOPE` parece insuficiente para Channels/Notes/Webhooks.
+
 3.2) Abra a URL no navegador
 
 Ela deve levar ao Pipedrive para autorizar.
@@ -320,7 +342,7 @@ curl -s -X POST "<BASE_URL>/pipedrive/admin/register-channel" \
   }' | jq .
 ```
 
-Se retorno for `success: true`, o canal foi registrado.
+Se retorno for `success: true`, o canal foi registrado. Em `PIPEDRIVE_CHANNELS_MODE=dual`, se a Channels API falhar, o endpoint pode retornar `success: true` com `warning` e o fluxo seguirá via Notes (fallback).
 
 #### 5) Testar envio via postMessage (Pipedrive → seu sistema)
 
@@ -366,11 +388,70 @@ curl -s \
 
 Se houver paginação, o retorno inclui `additional_data.after`.
 
-#### 7) Erros comuns (e como corrigir)
+#### 7) Webhooks v2 + Automação (opcional)
+
+7.1) Configurar credenciais do receiver (Basic Auth)
+
+Defina no ambiente:
+
+```
+PIPEDRIVE_WEBHOOK_USER=<USER>
+PIPEDRIVE_WEBHOOK_PASS=<PASS>
+PIPEDRIVE_WEBHOOK_EVENTS=deal,activity,person,organization
+```
+
+7.2) Assinar webhooks (admin)
+
+```bash
+curl -s -X POST "<BASE_URL>/pipedrive/admin/webhooks/subscribe" \
+  -H "content-type: application/json" \
+  -H "x-api-key: <API_KEY>" \
+  -d '{}' | jq .
+```
+
+7.3) Ver status (admin)
+
+```bash
+curl -s "<BASE_URL>/pipedrive/admin/webhooks/status" \
+  -H "x-api-key: <API_KEY>" | jq .
+```
+
+Notas:
+- O receiver é `POST <BASE_URL>/pipedrive/webhooks` (chamado pelo Pipedrive).
+- Eventos recebidos ficam em `data/pipedrive-webhooks.json`.
+
+7.4) Automação (envio WhatsApp)
+
+Para disparar alertas por WhatsApp em eventos de `deal` e `activity`:
+
+```
+PIPEDRIVE_AUTOMATION_INSTANCE_ID=<INSTANCE_ID>
+PIPEDRIVE_AUTOMATION_TEMPLATE_DEAL_STAGE=Seu template {{object}} {{action}} ({{person.name}})
+PIPEDRIVE_AUTOMATION_TEMPLATE_ACTIVITY=Seu template {{object}} {{action}} ({{person.name}})
+```
+
+#### 8) BI / Métricas (admin)
+
+```bash
+curl -s "<BASE_URL>/pipedrive/admin/metrics" \
+  -H "x-api-key: <API_KEY>" | jq .
+```
+
+Export:
+
+```bash
+curl -s "<BASE_URL>/pipedrive/admin/metrics/export?format=csv&download=1" \
+  -H "x-api-key: <API_KEY>"
+```
+
+As métricas ficam em `data/pipedrive-metrics.json`.
+
+#### 9) Erros comuns (e como corrigir)
 
 - `401 unauthorized`: Basic Auth errado (`client_id:secret`).
 - `pipedrive_not_configured`: faltam `PIPEDRIVE_CLIENT_ID/SECRET`.
 - `register_channel_failed`: OAuth não realizado ou token não salvo.
+- `pipedrive_webhook_not_configured`: faltam `PIPEDRIVE_WEBHOOK_USER/PASS`.
 - `instance_unavailable`: instância WhatsApp não conectada.
 - `group_conversations_not_supported`: use contato 1:1 (`@g.us` não suportado).
 - `senderId_and_recipientIds_required`: faltam `senderId` ou `recipientIds[]`.

@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { resolvePipedriveDataDir } from './dataDir.js';
 import {
   PIPEDRIVE_MAX_CONVERSATIONS,
   PIPEDRIVE_MAX_MESSAGES,
@@ -11,7 +12,7 @@ import type {
   PipedriveParticipant,
 } from './types.js';
 
-const DATA_DIR = path.join(process.cwd(), 'data');
+const DATA_DIR = resolvePipedriveDataDir();
 const TOKENS_FILE = path.join(DATA_DIR, 'pipedrive-oauth.json');
 const CHANNELS_FILE = path.join(DATA_DIR, 'pipedrive-channels.json');
 const CONVERSATIONS_FILE = path.join(DATA_DIR, 'pipedrive-conversations.json');
@@ -40,6 +41,13 @@ async function writeJson<T>(filePath: string, data: T): Promise<void> {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function normalizeIso(value: string | null | undefined, fallback: string): string {
+  if (!value) return fallback;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return fallback;
+  return parsed.toISOString();
 }
 
 function hashId(value: string): string {
@@ -359,6 +367,7 @@ export async function upsertConversationMessage(options: {
 
   const sanitizedMessage: StoredMessage = {
     ...options.message,
+    created_at: normalizeIso(options.message.created_at, now),
     message: normalizeMessageText(options.message),
     attachments: options.message.attachments ?? [],
     direction: options.direction,

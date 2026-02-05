@@ -14,7 +14,7 @@
     "build": "npm run build:web && tsc -p tsconfig.json",
     "tailwind:build": "tailwindcss -i ./public/styles/tailwind.css -o ./public/assets/app.css --minify",
     "example:poll-webhook": "tsx src/examples/pollWebhookServer.ts",
-    "test": "tsx --test \"test/**/*.test.ts\""
+    "test": "node --test --import tsx \"test/**/*.test.ts\""
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc.6",

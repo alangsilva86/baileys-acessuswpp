@@ -1,6 +1,6 @@
 import axios, { type AxiosInstance } from 'axios';
 import {
-  PIPEDRIVE_API_BASE_URL,
+  PIPEDRIVE_API_BASE_URL_V1,
   PIPEDRIVE_CLIENT_ID,
   PIPEDRIVE_CLIENT_SECRET,
   PIPEDRIVE_OAUTH_BASE_URL,
@@ -51,8 +51,24 @@ interface ReceiveMessagePayload {
   reply_by?: string | null;
 }
 
+interface CreateNotePayload {
+  content: string;
+  person_id?: number;
+  deal_id?: number;
+  org_id?: number;
+}
+
+interface CreateWebhookPayload {
+  subscription_url: string;
+  event_action: string;
+  event_object: string;
+  http_auth_user?: string;
+  http_auth_password?: string;
+  version?: string;
+}
+
 function buildApiBase(apiDomain?: string | null): string {
-  if (PIPEDRIVE_API_BASE_URL) return PIPEDRIVE_API_BASE_URL.replace(/\/$/, '');
+  if (PIPEDRIVE_API_BASE_URL_V1) return PIPEDRIVE_API_BASE_URL_V1.replace(/\/$/, '');
   if (apiDomain) {
     const normalized = apiDomain.replace(/\/$/, '');
     if (normalized.endsWith('/api/v1') || normalized.endsWith('/v1')) return normalized;
@@ -227,6 +243,99 @@ export class PipedriveClient {
       throw new Error('pipedrive_token_missing');
     }
     await this.http.delete(`${tokenInfo.apiBase}/channels/${channel.id}`, {
+      headers: { Authorization: `Bearer ${tokenInfo.token.access_token}` },
+    });
+  }
+
+  async createNote(options: {
+    content: string;
+    personId?: number | null;
+    dealId?: number | null;
+    orgId?: number | null;
+    companyId?: number | null;
+    apiDomain?: string | null;
+  }): Promise<{ id: number }> {
+    const tokenInfo = await this.getAccessToken({
+      companyId: options.companyId ?? null,
+      apiDomain: options.apiDomain ?? null,
+    });
+    if (!tokenInfo) {
+      throw new Error('pipedrive_token_missing');
+    }
+
+    const payload: CreateNotePayload = { content: options.content };
+    if (typeof options.personId === 'number') payload.person_id = options.personId;
+    if (typeof options.dealId === 'number') payload.deal_id = options.dealId;
+    if (typeof options.orgId === 'number') payload.org_id = options.orgId;
+
+    const response = await this.http.post(`${tokenInfo.apiBase}/notes`, payload, {
+      headers: { Authorization: `Bearer ${tokenInfo.token.access_token}` },
+    });
+    const data = response.data?.data ?? response.data;
+    const id = typeof data?.id === 'number' ? data.id : typeof data?.id === 'string' ? Number(data.id) : NaN;
+    if (!Number.isFinite(id) || id <= 0) throw new Error('pipedrive_note_id_missing');
+    return { id };
+  }
+
+  async listWebhooks(options: { companyId?: number | null; apiDomain?: string | null } = {}): Promise<any[]> {
+    const tokenInfo = await this.getAccessToken({
+      companyId: options.companyId ?? null,
+      apiDomain: options.apiDomain ?? null,
+    });
+    if (!tokenInfo) {
+      throw new Error('pipedrive_token_missing');
+    }
+    const response = await this.http.get(`${tokenInfo.apiBase}/webhooks`, {
+      headers: { Authorization: `Bearer ${tokenInfo.token.access_token}` },
+    });
+    const data = response.data?.data ?? response.data;
+    return Array.isArray(data) ? data : [];
+  }
+
+  async createWebhook(options: {
+    subscriptionUrl: string;
+    eventAction: string;
+    eventObject: string;
+    httpAuthUser?: string | null;
+    httpAuthPassword?: string | null;
+    companyId?: number | null;
+    apiDomain?: string | null;
+  }): Promise<{ id: number }> {
+    const tokenInfo = await this.getAccessToken({
+      companyId: options.companyId ?? null,
+      apiDomain: options.apiDomain ?? null,
+    });
+    if (!tokenInfo) {
+      throw new Error('pipedrive_token_missing');
+    }
+
+    const payload: CreateWebhookPayload = {
+      subscription_url: options.subscriptionUrl,
+      event_action: options.eventAction,
+      event_object: options.eventObject,
+      version: '2.0',
+    };
+    if (options.httpAuthUser) payload.http_auth_user = options.httpAuthUser;
+    if (options.httpAuthPassword) payload.http_auth_password = options.httpAuthPassword;
+
+    const response = await this.http.post(`${tokenInfo.apiBase}/webhooks`, payload, {
+      headers: { Authorization: `Bearer ${tokenInfo.token.access_token}` },
+    });
+    const data = response.data?.data ?? response.data;
+    const id = typeof data?.id === 'number' ? data.id : typeof data?.id === 'string' ? Number(data.id) : NaN;
+    if (!Number.isFinite(id) || id <= 0) throw new Error('pipedrive_webhook_id_missing');
+    return { id };
+  }
+
+  async deleteWebhook(options: { id: number; companyId?: number | null; apiDomain?: string | null }): Promise<void> {
+    const tokenInfo = await this.getAccessToken({
+      companyId: options.companyId ?? null,
+      apiDomain: options.apiDomain ?? null,
+    });
+    if (!tokenInfo) {
+      throw new Error('pipedrive_token_missing');
+    }
+    await this.http.delete(`${tokenInfo.apiBase}/webhooks/${options.id}`, {
       headers: { Authorization: `Bearer ${tokenInfo.token.access_token}` },
     });
   }

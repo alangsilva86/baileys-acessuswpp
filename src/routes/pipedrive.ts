@@ -20,8 +20,22 @@ import {
   PIPEDRIVE_REDIRECT_URI,
   PIPEDRIVE_TEMPLATE_SUPPORT,
   PIPEDRIVE_CHANNEL_AVATAR_URL,
+  PIPEDRIVE_CHANNELS_MODE,
+  PIPEDRIVE_FALLBACK_NOTES_ENABLED,
+  PIPEDRIVE_WEBHOOK_USER,
+  PIPEDRIVE_WEBHOOK_PASS,
+  PIPEDRIVE_WEBHOOK_EVENTS,
 } from '../services/pipedrive/config.js';
 import { pipedriveClient } from '../services/pipedrive/client.js';
+import { syncMessageToPipedrive } from '../services/pipedrive/sync.js';
+import { maybeRunPipedriveAutomation } from '../services/pipedrive/automation.js';
+import { recordPipedriveWebhookEvent as recordPipedriveWebhookEventStore, listPipedriveWebhookEvents } from '../services/pipedrive/webhookStore.js';
+import {
+  exportPipedriveMetricsCsv,
+  getPipedriveMetrics,
+  recordPipedriveAutomation,
+  recordPipedriveWebhookEvent,
+} from '../services/pipedrive/metrics.js';
 import {
   findMessage,
   findParticipant,
@@ -32,6 +46,7 @@ import {
   removeChannelByProviderId,
   removeConversationsByProviderId,
   getConversation,
+  upsertChannel,
 } from '../services/pipedrive/store.js';
 import { markPipedriveOutbound } from '../services/pipedrive/bridge.js';
 import type { PipedriveMessage, PipedriveParticipant } from '../services/pipedrive/types.js';
@@ -94,6 +109,63 @@ function parseBasicAuth(header: string | undefined): { user: string; pass: strin
   return { user: decoded.slice(0, sepIndex), pass: decoded.slice(sepIndex + 1) };
 }
 
+function parseScopes(scope: string): string[] {
+  return scope
+    .split(/[,\s]+/g)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function getScopeWarnings(scope: string): string[] {
+  const trimmed = (scope || '').trim();
+  if (!trimmed) return ['scope_missing'];
+  const scopes = parseScopes(trimmed).map((s) => s.toLowerCase());
+  const warnings: string[] = [];
+
+  const has = (needle: RegExp) => scopes.some((s) => needle.test(s));
+  if (PIPEDRIVE_CHANNELS_MODE !== 'v2' && !has(/channel|messenger/)) warnings.push('missing_channels_scope');
+  if (PIPEDRIVE_FALLBACK_NOTES_ENABLED && !has(/notes/)) warnings.push('missing_notes_scope');
+  if (PIPEDRIVE_FALLBACK_NOTES_ENABLED && !has(/persons?|contacts?/)) warnings.push('missing_persons_scope');
+
+  return warnings;
+}
+
+function safeJsonStringify(value: unknown, maxLen = 2000): string {
+  try {
+    const raw = JSON.stringify(value);
+    if (raw.length <= maxLen) return raw;
+    return `${raw.slice(0, maxLen)}…`;
+  } catch {
+    return String(value);
+  }
+}
+
+function serializeAxiosError(err: unknown): { message: string; status: number | null; url: string | null; responseBody: string | null } | null {
+  const anyErr = err as any;
+  const message = anyErr?.message ? String(anyErr.message) : String(err);
+  const status = typeof anyErr?.response?.status === 'number' ? anyErr.response.status : null;
+  const url = typeof anyErr?.config?.url === 'string' ? anyErr.config.url : null;
+  const responseBody = anyErr?.response?.data != null ? safeJsonStringify(anyErr.response.data) : null;
+  if (!status && !url && !anyErr?.isAxiosError) return null;
+  return { message, status, url, responseBody };
+}
+
+function classifyUpstreamFailure(err: unknown): { type: string; status: number | null } {
+  const anyErr = err as any;
+  const status = typeof anyErr?.response?.status === 'number' ? anyErr.response.status : null;
+  if (anyErr?.message === 'pipedrive_token_missing') return { type: 'token_missing', status };
+  if (status === 401 || status === 403) return { type: 'auth_failed', status };
+  if (status === 404 || status === 410) return { type: 'endpoint_missing', status };
+  const responseBody = anyErr?.response?.data;
+  if (responseBody) {
+    const raw = safeJsonStringify(responseBody).toLowerCase();
+    if (raw.includes('deprecated') || raw.includes('deprecat') || raw.includes('sunset')) {
+      return { type: 'deprecated', status };
+    }
+  }
+  return { type: 'upstream_error', status };
+}
+
 function pipedriveAuth(req: Request, res: Response, next: NextFunction): void {
   if (!PIPEDRIVE_CLIENT_ID || !PIPEDRIVE_CLIENT_SECRET) {
     res.status(503).json({ error: 'pipedrive_not_configured' });
@@ -106,6 +178,25 @@ function pipedriveAuth(req: Request, res: Response, next: NextFunction): void {
     return;
   }
   if (!safeEquals(creds.user, PIPEDRIVE_CLIENT_ID) || !safeEquals(creds.pass, PIPEDRIVE_CLIENT_SECRET)) {
+    res.setHeader('WWW-Authenticate', 'Basic');
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+  next();
+}
+
+function pipedriveWebhookAuth(req: Request, res: Response, next: NextFunction): void {
+  if (!PIPEDRIVE_WEBHOOK_USER || !PIPEDRIVE_WEBHOOK_PASS) {
+    res.status(503).json({ error: 'pipedrive_webhook_not_configured' });
+    return;
+  }
+  const creds = parseBasicAuth(req.header('authorization'));
+  if (!creds) {
+    res.setHeader('WWW-Authenticate', 'Basic');
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+  if (!safeEquals(creds.user, PIPEDRIVE_WEBHOOK_USER) || !safeEquals(creds.pass, PIPEDRIVE_WEBHOOK_PASS)) {
     res.setHeader('WWW-Authenticate', 'Basic');
     res.status(401).json({ error: 'unauthorized' });
     return;
@@ -174,7 +265,7 @@ function guessMediaType(mimetype: string | undefined): MediaMessageType {
   return 'document';
 }
 
-function buildManifest(baseUrl: string): Record<string, unknown> {
+function buildManifest(baseUrl: string, options: { version?: string | null } = {}): Record<string, unknown> {
   const normalized = baseUrl.replace(/\/$/, '');
   const endpoints: Record<string, string> = {
     getConversations: `${normalized}/pipedrive/channels/:providerChannelId/conversations`,
@@ -190,11 +281,13 @@ function buildManifest(baseUrl: string): Record<string, unknown> {
   return {
     provider_type: PIPEDRIVE_PROVIDER_TYPE,
     endpoints,
+    ...(options.version ? { version: options.version } : {}),
   };
 }
 
 router.get('/manifest.json', (req, res) => {
-  res.json(buildManifest(resolveBaseUrl(req)));
+  const version = typeof req.query.version === 'string' && req.query.version.trim() ? req.query.version.trim() : null;
+  res.json(buildManifest(resolveBaseUrl(req), { version }));
 });
 
 router.get('/oauth/start', (req, res) => {
@@ -216,17 +309,21 @@ router.get('/oauth/start', (req, res) => {
       : PIPEDRIVE_OAUTH_SCOPE;
   if (scope) query.set('scope', scope);
   const authUrl = `${PIPEDRIVE_OAUTH_BASE_URL.replace(/\/$/, '')}/oauth/authorize?${query.toString()}`;
+  const scopeWarnings = getScopeWarnings(scope || '');
 
   const shouldRedirect =
     req.query.redirect === '1' ||
     (req.headers.accept ?? '').includes('text/html');
 
   if (shouldRedirect) {
+    if (scopeWarnings.length) {
+      logger.warn({ warnings: scopeWarnings, scope: scope || null }, 'oauth.scope.warning');
+    }
     res.redirect(authUrl);
     return;
   }
 
-  res.json({ url: authUrl });
+  res.json({ url: authUrl, scope: scope || null, warnings: scopeWarnings.length ? scopeWarnings : undefined });
 });
 
 router.get('/oauth/callback', async (req, res) => {
@@ -250,6 +347,7 @@ router.get('/oauth/callback', async (req, res) => {
         company_id: token.company_id,
         user_id: token.user_id,
         api_domain: token.api_domain,
+        scope: token.scope,
         expires_at: token.expires_at,
       },
     });
@@ -295,10 +393,43 @@ router.post('/admin/register-channel', apiKeyAuth, async (req, res) => {
       ? body.templateSupport
       : PIPEDRIVE_TEMPLATE_SUPPORT;
 
-  const companyId = typeof body.companyId === 'number' ? body.companyId : null;
-  const apiDomain = typeof body.apiDomain === 'string' ? body.apiDomain : null;
+  const companyIdRaw = typeof body.companyId === 'number'
+    ? body.companyId
+    : typeof body.companyId === 'string'
+    ? Number(body.companyId)
+    : null;
+  const companyId = Number.isFinite(companyIdRaw as number) ? Number(companyIdRaw) : null;
+  const apiDomain =
+    typeof body.apiDomain === 'string' && body.apiDomain.trim()
+      ? body.apiDomain.trim()
+      : null;
 
   try {
+    const tokenInfo = await pipedriveClient.getAccessToken({ companyId, apiDomain });
+    if (!tokenInfo) {
+      res.status(503).json({ error: 'pipedrive_token_missing' });
+      return;
+    }
+
+    if (PIPEDRIVE_CHANNELS_MODE === 'v2') {
+      const channel = await upsertChannel({
+        id: `fallback:${providerChannelId}`,
+        provider_channel_id: providerChannelId,
+        name,
+        provider_type: providerType,
+        template_support: templateSupport,
+        avatar_url: avatarUrl ?? null,
+        company_id: tokenInfo.token.company_id ?? companyId ?? null,
+        api_domain: tokenInfo.token.api_domain ?? apiDomain ?? null,
+      });
+      res.json({
+        success: true,
+        data: channel,
+        warning: 'channels_mode_v2_skip_register',
+      });
+      return;
+    }
+
     const channel = await pipedriveClient.registerChannel({
       providerChannelId,
       name,
@@ -310,16 +441,72 @@ router.post('/admin/register-channel', apiKeyAuth, async (req, res) => {
     });
     res.json({ success: true, data: channel });
   } catch (err: any) {
-    logger.error({ err: err?.message ?? err }, 'admin.register-channel.failed');
-    res.status(500).json({ error: 'register_channel_failed' });
+    const upstream = serializeAxiosError(err);
+    const classification = classifyUpstreamFailure(err);
+    logger.error(
+      { err: err?.message ?? err, upstream, classification, providerChannelId },
+      'admin.register-channel.failed',
+    );
+
+    if (PIPEDRIVE_CHANNELS_MODE === 'dual' && PIPEDRIVE_FALLBACK_NOTES_ENABLED) {
+      const tokenInfo = await pipedriveClient.getAccessToken({ companyId, apiDomain });
+      const channel = await upsertChannel({
+        id: `fallback:${providerChannelId}`,
+        provider_channel_id: providerChannelId,
+        name,
+        provider_type: providerType,
+        template_support: templateSupport,
+        avatar_url: avatarUrl ?? null,
+        company_id: tokenInfo?.token.company_id ?? companyId ?? null,
+        api_domain: tokenInfo?.token.api_domain ?? apiDomain ?? null,
+      });
+      res.json({
+        success: true,
+        data: channel,
+        warning: {
+          message: 'channels_register_failed_using_fallback_notes',
+          classification,
+          upstream,
+        },
+      });
+      return;
+    }
+
+    const status = classification.type === 'token_missing' ? 503 : upstream?.status ? 502 : 500;
+    res.status(status).json({
+      error: classification.type === 'token_missing' ? 'pipedrive_token_missing' : 'register_channel_failed',
+      classification,
+      upstream,
+    });
   }
 });
 
 router.post('/admin/register-all', apiKeyAuth, async (_req, res) => {
   const instances = getAllInstances();
-  const results: Array<{ id: string; status: string; detail?: string }>= [];
+  const results: Array<{ id: string; status: string; detail?: string; warning?: unknown }>= [];
+  const tokenInfo = await pipedriveClient.getAccessToken();
   for (const inst of instances) {
     try {
+      if (!tokenInfo) {
+        results.push({ id: inst.id, status: 'error', detail: 'pipedrive_token_missing' });
+        continue;
+      }
+
+      if (PIPEDRIVE_CHANNELS_MODE === 'v2') {
+        const channel = await upsertChannel({
+          id: `fallback:${inst.id}`,
+          provider_channel_id: inst.id,
+          name: inst.name || inst.id,
+          provider_type: PIPEDRIVE_PROVIDER_TYPE,
+          template_support: PIPEDRIVE_TEMPLATE_SUPPORT,
+          avatar_url: PIPEDRIVE_CHANNEL_AVATAR_URL || null,
+          company_id: tokenInfo.token.company_id ?? null,
+          api_domain: tokenInfo.token.api_domain ?? null,
+        });
+        results.push({ id: channel.provider_channel_id, status: 'fallback', warning: 'channels_mode_v2_skip_register' });
+        continue;
+      }
+
       const channel = await pipedriveClient.registerChannel({
         providerChannelId: inst.id,
         name: inst.name || inst.id,
@@ -329,10 +516,253 @@ router.post('/admin/register-all', apiKeyAuth, async (_req, res) => {
       });
       results.push({ id: channel.provider_channel_id, status: 'ok' });
     } catch (err: any) {
-      results.push({ id: inst.id, status: 'error', detail: err?.message ?? String(err) });
+      const upstream = serializeAxiosError(err);
+      const classification = classifyUpstreamFailure(err);
+
+      if (PIPEDRIVE_CHANNELS_MODE === 'dual' && PIPEDRIVE_FALLBACK_NOTES_ENABLED) {
+        const channel = await upsertChannel({
+          id: `fallback:${inst.id}`,
+          provider_channel_id: inst.id,
+          name: inst.name || inst.id,
+          provider_type: PIPEDRIVE_PROVIDER_TYPE,
+          template_support: PIPEDRIVE_TEMPLATE_SUPPORT,
+          avatar_url: PIPEDRIVE_CHANNEL_AVATAR_URL || null,
+          company_id: tokenInfo?.token.company_id ?? null,
+          api_domain: tokenInfo?.token.api_domain ?? null,
+        });
+        results.push({
+          id: channel.provider_channel_id,
+          status: 'fallback',
+          warning: { message: 'channels_register_failed_using_fallback_notes', classification, upstream },
+        });
+        continue;
+      }
+
+      results.push({ id: inst.id, status: 'error', detail: err?.message ?? String(err), warning: { classification, upstream } });
     }
   }
   res.json({ success: true, data: results });
+});
+
+router.post('/admin/webhooks/subscribe', apiKeyAuth, async (req, res) => {
+  if (!PIPEDRIVE_WEBHOOK_USER || !PIPEDRIVE_WEBHOOK_PASS) {
+    res.status(503).json({ error: 'pipedrive_webhook_not_configured' });
+    return;
+  }
+
+  const body = (req.body || {}) as Record<string, unknown>;
+  const unsubscribe =
+    body.unsubscribe === true ||
+    body.action === 'unsubscribe' ||
+    body.mode === 'unsubscribe';
+  const deleteAll = body.all === true || body.deleteAll === true;
+
+  const companyIdRaw = typeof body.companyId === 'number'
+    ? body.companyId
+    : typeof body.companyId === 'string'
+    ? Number(body.companyId)
+    : null;
+  const companyId = Number.isFinite(companyIdRaw as number) ? Number(companyIdRaw) : null;
+  const apiDomain =
+    typeof body.apiDomain === 'string' && body.apiDomain.trim()
+      ? body.apiDomain.trim()
+      : null;
+
+  const actionsInput = Array.isArray(body.actions) ? body.actions : null;
+  const actions = actionsInput
+    ? actionsInput
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => item.trim())
+    : ['added', 'updated'];
+
+  const objectsInput = Array.isArray(body.objects) ? body.objects : null;
+  const objects = objectsInput
+    ? objectsInput
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => item.trim())
+    : PIPEDRIVE_WEBHOOK_EVENTS;
+
+  const subscriptionUrl = `${resolveBaseUrl(req)}/pipedrive/webhooks`;
+  const desired = new Set(objects.flatMap((obj) => actions.map((action) => `${action}:${obj}`)));
+
+  try {
+    const existing = await pipedriveClient.listWebhooks({ companyId, apiDomain });
+    const ours = existing.filter((hook) => hook?.subscription_url === subscriptionUrl);
+
+    const created: any[] = [];
+    const deleted: any[] = [];
+    const kept: any[] = [];
+
+    if (unsubscribe) {
+      const toDelete = ours.filter((hook) => {
+        const key = `${hook?.event_action}:${hook?.event_object}`;
+        return deleteAll ? true : desired.has(key);
+      });
+      for (const hook of toDelete) {
+        const id = typeof hook?.id === 'number' ? hook.id : typeof hook?.id === 'string' ? Number(hook.id) : NaN;
+        if (!Number.isFinite(id) || id <= 0) continue;
+        await pipedriveClient.deleteWebhook({ id, companyId, apiDomain });
+        deleted.push({ id, event_action: hook.event_action, event_object: hook.event_object });
+      }
+
+      res.json({
+        success: true,
+        data: {
+          mode: 'unsubscribe',
+          subscription_url: subscriptionUrl,
+          deleted,
+          kept: ours.length - deleted.length,
+        },
+      });
+      return;
+    }
+
+    for (const obj of objects) {
+      for (const action of actions) {
+        const key = `${action}:${obj}`;
+        const found = ours.find((hook) => `${hook?.event_action}:${hook?.event_object}` === key);
+        if (found) {
+          kept.push(found);
+          continue;
+        }
+        const createdHook = await pipedriveClient.createWebhook({
+          subscriptionUrl,
+          eventAction: action,
+          eventObject: obj,
+          httpAuthUser: PIPEDRIVE_WEBHOOK_USER,
+          httpAuthPassword: PIPEDRIVE_WEBHOOK_PASS,
+          companyId,
+          apiDomain,
+        });
+        created.push({ id: createdHook.id, event_action: action, event_object: obj });
+      }
+    }
+
+    const stale = ours.filter((hook) => !desired.has(`${hook?.event_action}:${hook?.event_object}`));
+    for (const hook of stale) {
+      const id = typeof hook?.id === 'number' ? hook.id : typeof hook?.id === 'string' ? Number(hook.id) : NaN;
+      if (!Number.isFinite(id) || id <= 0) continue;
+      await pipedriveClient.deleteWebhook({ id, companyId, apiDomain });
+      deleted.push({ id, event_action: hook.event_action, event_object: hook.event_object, reason: 'stale' });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        mode: 'subscribe',
+        subscription_url: subscriptionUrl,
+        actions,
+        objects,
+        created,
+        deleted,
+        kept: kept.length,
+      },
+    });
+  } catch (err: any) {
+    const upstream = serializeAxiosError(err);
+    logger.error({ err: err?.message ?? err, upstream }, 'admin.webhooks.subscribe.failed');
+    res.status(upstream?.status ? 502 : 500).json({ error: 'webhook_subscribe_failed', upstream });
+  }
+});
+
+router.get('/admin/webhooks/status', apiKeyAuth, async (req, res) => {
+  const companyIdRaw = typeof req.query.companyId === 'string' ? Number(req.query.companyId) : NaN;
+  const companyId = Number.isFinite(companyIdRaw) ? companyIdRaw : null;
+  const apiDomain = typeof req.query.apiDomain === 'string' && req.query.apiDomain.trim() ? req.query.apiDomain.trim() : null;
+
+  const subscriptionUrl = `${resolveBaseUrl(req)}/pipedrive/webhooks`;
+  try {
+    const hooks = await pipedriveClient.listWebhooks({ companyId, apiDomain });
+    const ours = hooks.filter((hook) => hook?.subscription_url === subscriptionUrl);
+    const recent = await listPipedriveWebhookEvents({ limit: 20 });
+    res.json({
+      success: true,
+      data: {
+        subscription_url: subscriptionUrl,
+        expected_objects: PIPEDRIVE_WEBHOOK_EVENTS,
+        hooks: ours,
+        recent_events: recent,
+      },
+    });
+  } catch (err: any) {
+    const upstream = serializeAxiosError(err);
+    logger.error({ err: err?.message ?? err, upstream }, 'admin.webhooks.status.failed');
+    res.status(upstream?.status ? 502 : 500).json({ error: 'webhook_status_failed', upstream });
+  }
+});
+
+router.get('/admin/metrics', apiKeyAuth, async (_req, res) => {
+  const metrics = await getPipedriveMetrics();
+  res.json({ success: true, data: metrics });
+});
+
+router.get('/admin/metrics/export', apiKeyAuth, async (req, res) => {
+  const format = typeof req.query.format === 'string' ? req.query.format.trim().toLowerCase() : 'json';
+  const download = req.query.download === '1' || req.query.download === 'true';
+  const metrics = await getPipedriveMetrics();
+  if (format === 'csv') {
+    const csv = exportPipedriveMetricsCsv(metrics);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    if (download) {
+      res.setHeader('Content-Disposition', `attachment; filename="pipedrive-metrics.csv"`);
+    }
+    res.send(csv);
+    return;
+  }
+  res.json({ success: true, data: metrics });
+});
+
+router.post('/webhooks', pipedriveWebhookAuth, async (req, res) => {
+  const payload = req.body ?? null;
+  const record = await recordPipedriveWebhookEventStore(payload);
+  const allowed = record.meta.object ? PIPEDRIVE_WEBHOOK_EVENTS.includes(record.meta.object) : false;
+
+  try {
+    await recordPipedriveWebhookEvent(record.meta.object);
+  } catch {
+    // ignore metrics errors
+  }
+
+  let automation: unknown = null;
+  if (allowed && !record.duplicate) {
+    try {
+      automation = await maybeRunPipedriveAutomation(payload);
+    } catch (err: any) {
+      logger.warn({ err: err?.message ?? err, key: record.key }, 'webhooks.automation.failed');
+      automation = { sent: false, skippedReason: 'error', error: err?.message ?? String(err) };
+    }
+  } else if (!allowed) {
+    automation = { sent: false, skippedReason: 'event_not_allowed' };
+  } else if (record.duplicate) {
+    automation = { sent: false, skippedReason: 'duplicate' };
+  }
+
+  if (allowed) {
+    const result = automation as any;
+    const metric =
+      result?.sent === true
+        ? 'sent'
+        : result?.skippedReason === 'error'
+        ? 'failed'
+        : 'skipped';
+    try {
+      await recordPipedriveAutomation(metric);
+    } catch {
+      // ignore metrics errors
+    }
+  }
+
+  res.json({
+    success: true,
+    data: {
+      key: record.key,
+      duplicate: record.duplicate,
+      object: record.meta.object,
+      action: record.meta.action,
+      entity_id: record.meta.entityId,
+      automation,
+    },
+  });
 });
 
 router.get('/channels/:providerChannelId/conversations', pipedriveAuth, async (req, res) => {
@@ -526,41 +956,42 @@ router.post(
     }
 
     const channel = await getChannelByProviderId(providerChannelId);
-    if (channel) {
-      const sourceUserId = getSourceUserId(providerChannelId);
-      if (senderIdRaw && senderIdRaw !== sourceUserId) {
-        logger.debug({ senderIdRaw, expected: sourceUserId }, 'postMessage.senderId.mismatch');
-      }
-      const sender: PipedriveParticipant = {
-        id: sourceUserId,
-        name: instance.name || providerChannelId,
-        role: 'source_user',
+    const sourceUserId = getSourceUserId(providerChannelId);
+    if (senderIdRaw && senderIdRaw !== sourceUserId) {
+      logger.debug({ senderIdRaw, expected: sourceUserId }, 'postMessage.senderId.mismatch');
+    }
+    const sender: PipedriveParticipant = {
+      id: sourceUserId,
+      name: instance.name || providerChannelId,
+      role: 'source_user',
+    };
+    const nowIso = new Date().toISOString();
+    for (const msg of sentMessages) {
+      const messageId = msg.id;
+      const message: PipedriveMessage = {
+        id: messageId,
+        status: 'sent',
+        created_at: nowIso,
+        message: msg.text,
+        sender_id: sender.id,
+        attachments: [],
       };
-      const nowIso = new Date().toISOString();
-      for (const msg of sentMessages) {
-        const messageId = msg.id;
-        const message: PipedriveMessage = {
-          id: messageId,
-          status: 'sent',
-          created_at: nowIso,
-          message: msg.text,
-          sender_id: sender.id,
+      try {
+        await syncMessageToPipedrive({
+          providerChannelId,
+          channel,
+          direction: 'outbound',
+          conversationId,
+          conversationLink: undefined,
+          messageId,
+          messageText: message.message,
+          createdAt: message.created_at,
+          status: message.status,
+          sender,
           attachments: [],
-        };
-        try {
-          await pipedriveClient.receiveMessage(channel, {
-            conversation_id: conversationId,
-            conversation_link: undefined,
-            message_id: messageId,
-            message: message.message,
-            created_at: message.created_at,
-            status: message.status,
-            sender,
-            attachments: [],
-          });
-        } catch (err: any) {
-          logger.warn({ err: err?.message ?? err, messageId }, 'postMessage.receive.failed');
-        }
+        });
+      } catch (err: any) {
+        logger.warn({ err: err?.message ?? err, messageId }, 'postMessage.sync.failed');
       }
     }
 
