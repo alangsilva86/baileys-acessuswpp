@@ -33,7 +33,7 @@ interface OAuthTokenResponse {
 interface RegisterChannelPayload {
   name: string;
   provider_channel_id: string;
-  avatar_url?: string | null;
+  avatar_url?: string;
   provider_type: string;
   template_support?: boolean;
 }
@@ -187,13 +187,17 @@ export class PipedriveClient {
     if (!tokenInfo) {
       throw new Error('pipedrive_token_missing');
     }
+    const avatarUrl =
+      typeof options.avatarUrl === 'string' && options.avatarUrl.trim()
+        ? options.avatarUrl.trim()
+        : null;
     const payload: RegisterChannelPayload = {
       name: options.name,
       provider_channel_id: options.providerChannelId,
       provider_type: options.providerType,
-      avatar_url: options.avatarUrl ?? null,
       template_support: options.templateSupport ?? PIPEDRIVE_TEMPLATE_SUPPORT,
     };
+    if (avatarUrl) payload.avatar_url = avatarUrl;
     const response = await this.http.post(`${tokenInfo.apiBase}/channels`, payload, {
       headers: { Authorization: `Bearer ${tokenInfo.token.access_token}` },
     });
@@ -208,7 +212,7 @@ export class PipedriveClient {
       name: options.name,
       provider_type: options.providerType,
       template_support: options.templateSupport ?? PIPEDRIVE_TEMPLATE_SUPPORT,
-      avatar_url: options.avatarUrl ?? null,
+      avatar_url: avatarUrl,
       company_id: tokenInfo.token.company_id ?? null,
       api_domain: tokenInfo.token.api_domain ?? null,
     });

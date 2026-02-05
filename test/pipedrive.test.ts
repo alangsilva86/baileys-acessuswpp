@@ -157,6 +157,50 @@ test('fallback Notes cria Person (v2) e Note (v1) com idempotência', async () =
   assert.equal(v1Calls.length, 1, 'expected note to be created only once');
 });
 
+test('fallback Notes ignora sufixo :device no JID ao extrair telefone', async () => {
+  const { createFallbackNote } = await import('../src/services/pipedrive/fallbackNotes.js');
+
+  const v2Calls: any[] = [];
+  const v1Calls: any[] = [];
+
+  const v2Client = {
+    async findPersonByPhone(input: any) {
+      v2Calls.push({ fn: 'findPersonByPhone', input });
+      return null;
+    },
+    async createPerson(input: any) {
+      v2Calls.push({ fn: 'createPerson', input });
+      return { id: 11, name: input.name, phone: [{ value: input.phone, primary: true }] };
+    },
+  };
+
+  const v1Client = {
+    async createNote(input: any) {
+      v1Calls.push({ fn: 'createNote', input });
+      return { id: 100 };
+    },
+  };
+
+  const note = await createFallbackNote(
+    {
+      instanceId: 'inst-2',
+      direction: 'inbound',
+      messageId: 'msg-2',
+      conversationId: '554498539056:1@s.whatsapp.net',
+      messageText: 'Oi',
+    },
+    { v1Client: v1Client as any, v2Client: v2Client as any },
+  );
+
+  assert.equal(note.noteId, 100);
+  assert.equal(note.reused, false);
+  assert.equal(v1Calls.length, 1);
+
+  const createCall = v2Calls.find((c) => c.fn === 'createPerson');
+  assert.ok(createCall, 'expected createPerson to be called');
+  assert.equal(createCall.input.phone, '+554498539056');
+});
+
 test('admin/register-channel retorna warning com erro upstream (dual + fallback)', async (t) => {
   const { server, baseUrl } = await createServer();
   t.after(() =>

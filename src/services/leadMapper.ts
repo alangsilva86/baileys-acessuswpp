@@ -24,9 +24,12 @@ const E164_REGEX = /^\+?[0-9]{1,15}$/;
 function normalizePhone(jid?: string | null): string | null {
   if (!jid) return null;
 
+  if (isLidJid(jid)) return null;
+
   const atIndex = jid.indexOf('@');
   const rawValue = atIndex >= 0 ? jid.slice(0, atIndex) : jid;
-  const trimmed = rawValue.trim();
+  const withoutDevice = rawValue.includes(':') ? rawValue.slice(0, rawValue.indexOf(':')) : rawValue;
+  const trimmed = withoutDevice.trim();
 
   if (!trimmed) return null;
 

@@ -174,6 +174,22 @@ test('MessageService emits structured inbound payload', async () => {
   assert.deepStrictEqual(event?.payload, payload);
 });
 
+test('MessageService normalizes phone for JID with device suffix', async () => {
+  const { service, webhook } = createService({ mappingStore: null });
+  const inboundMessage = buildInboundMessage();
+  inboundMessage.key = {
+    ...(inboundMessage.key as any),
+    remoteJid: '5511987654321:1@s.whatsapp.net',
+    fromMe: false,
+  } as any;
+
+  await service.onInbound([inboundMessage]);
+
+  assert.equal(webhook.events.length, 1);
+  const payload = webhook.events[0]?.payload as any;
+  assert.equal(payload.contact.phone, '+5511987654321');
+});
+
 test('MessageService resolves inbound contact when Baileys provides LID identifiers', async () => {
   const eventStore = new BrokerEventStore();
   const webhookEvents: Array<{ event: string; payload: any }> = [];

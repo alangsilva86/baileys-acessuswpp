@@ -196,6 +196,8 @@ Esta integração expõe os endpoints exigidos pelo **Messaging App Extension** 
 - **Channels API v1** (Messaging App Extension) quando disponível.
 - **Fallback via Notes (v1) + Persons (v2)** quando a Channels API falhar/estiver indisponível ou quando `PIPEDRIVE_CHANNELS_MODE=v2`.
 
+> **Importante**: quando estiver em **fallback via Notes**, as mensagens **não aparecem** em **Leads → Messaging** do Pipedrive. Elas são registradas como **Notes** na **Pessoa (People → Person → Notes)**. Para validar, procure a pessoa pelo telefone e confira as Notes.
+
 > **Aviso**: a Channels API foi descontinuada em **1º de fevereiro de 2026**. Em `PIPEDRIVE_CHANNELS_MODE=dual`, falhas de Channels acionam o fallback automaticamente.
 
 #### 0) Pré-requisitos básicos
@@ -343,6 +345,8 @@ curl -s -X POST "<BASE_URL>/pipedrive/admin/register-channel" \
 ```
 
 Se retorno for `success: true`, o canal foi registrado. Em `PIPEDRIVE_CHANNELS_MODE=dual`, se a Channels API falhar, o endpoint pode retornar `success: true` com `warning` e o fluxo seguirá via Notes (fallback).
+
+Dica rápida: quando o retorno vier com `data.id` iniciando com `fallback:`, o modo ativo é **Notes** (não Channels). Nesse caso, valide no Pipedrive em **People → Person → Notes** (procure pelo telefone).
 
 #### 4.1) Desregistrar canal (admin)
 

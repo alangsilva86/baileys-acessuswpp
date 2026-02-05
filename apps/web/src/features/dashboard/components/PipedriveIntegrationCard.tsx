@@ -268,6 +268,9 @@ export default function PipedriveIntegrationCard({
             {isFallback ? (
               <div className="mt-1 text-amber-700">
                 Channels indisponível — usando fallback via Notes/Persons (API v1/v2).
+                <div className="mt-1 text-amber-700/80">
+                  Neste modo, as mensagens aparecem como Notes na Pessoa (People → Person → Notes), não em Leads → Messaging.
+                </div>
               </div>
             ) : null}
           </div>

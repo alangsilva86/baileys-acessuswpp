@@ -37,7 +37,16 @@ function toIso(value: string | number | Date | null | undefined): string {
 }
 
 function extractPhoneDigits(input: string): string | null {
-  const digits = input.replace(/\D+/g, '');
+  const raw = input.trim();
+  if (!raw) return null;
+  let target = raw;
+  const atIndex = raw.indexOf('@');
+  if (atIndex >= 0) {
+    target = raw.slice(0, atIndex);
+    const colonIndex = target.indexOf(':');
+    if (colonIndex >= 0) target = target.slice(0, colonIndex);
+  }
+  const digits = target.replace(/\D+/g, '');
   return digits ? digits : null;
 }
 
