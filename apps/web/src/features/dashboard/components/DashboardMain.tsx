@@ -36,7 +36,6 @@ import Modal from './Modal';
 import useInstanceMetrics, { type MetricsRangePreset } from '../hooks/useInstanceMetrics';
 import useInstanceLogs from '../hooks/useInstanceLogs';
 import useQueueFailedJobs from '../hooks/useQueueFailedJobs';
-import PipedriveIntegrationCard from './PipedriveIntegrationCard';
 import MessageMonitorDrawer from './MessageMonitorDrawer';
 
 type DashboardMainProps = {
@@ -1322,13 +1321,6 @@ export default function DashboardMain({
               )}
             </section>
 
-            <PipedriveIntegrationCard
-              instanceId={instance.id}
-              instanceName={instance.name}
-              isConnected={isConnected}
-              apiKey={apiKey}
-              onNotify={onNotify}
-            />
           </div>
         </div>
       ) : activeTab === 'messages' ? (
